@@ -42,7 +42,7 @@ All arguments can also be passed via environment variables:
 ```bash
 python3 aws-sync.py \
   --host https://fwd.app \
-  --network-id 1275 \
+  --network-id <network_id> \
   --username <your_username> \
   --password <your_password>
 ```
