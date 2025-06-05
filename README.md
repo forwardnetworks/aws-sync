@@ -14,6 +14,7 @@ This utility:
 
 - A consistent IAM role name across all AWS accounts.
 - Valid Forward Networks credentials with access to the target network.
+- AWS Organizations API access from Forward Networks collection
 - Python 3.8+ and `requests` module (see `requirements.txt`).
 
 ## Usage
