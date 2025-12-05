@@ -1,6 +1,6 @@
 # AWS Sync Tool for Forward Networks
 
-This script automates the collection and synchronization of AWS account information into a Forward Networks environment.
+This script automates the collection and synchronization of AWS account information into a Forward Networks environment. It supports multiple Forward setup IDs at once and writes each PATCH payload to disk for review before any API updates occur.
 
 ## Purpose
 
@@ -30,6 +30,8 @@ python3 aws-sync.py \
 ### Optional arguments:
 - `--query-id`: Custom query ID (default is pre-configured in script).
 - `--insecure`: Disable SSL verification (not recommended for production).
+- `--dry-run`: Build payloads and save `aws_patch_payload.json`, but skip the PATCH requests.
+- `--yes`: Skip the confirmation prompt (safe for automation once payloads are verified).
 
 All arguments can also be passed via environment variables:
 - `FWD_HOST`
@@ -50,8 +52,13 @@ python3 aws-sync.py \
 
 This script will:
 - Retrieve all AWS accounts via NQE.
-- Identify the matching setup ID(s) from your Forward deployment.
-- Generate and PATCH the configuration JSON to keep cloud sync up-to-date.
+- Group accounts by setup ID when the query includes that column (required when multiple setups exist), otherwise fall back to the single available setup.
+- Save the planned PATCH payload(s) into `aws_patch_payload.json` for verification.
+- Prompt for confirmation (unless `--dry-run` or `--yes` is provided) and PATCH each setup accordingly.
+
+### Multiple setup IDs
+
+If your Forward network contains multiple AWS setup IDs, the default query will detect this and exit. Provide a custom NQE that includes a `Setup ID` column—such as `Q_87ae9239148d19c940714200830f657927541253`—via the `--query-id` argument or `FWD_QUERY_ID` environment variable before running the script.
 
 ## License
 
