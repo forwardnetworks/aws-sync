@@ -1,0 +1,437 @@
+# AWS Account Sync Procedure
+
+This guide explains how to keep a Forward AWS cloud setup aligned with AWS accounts that are added to or removed from an AWS Organization.
+
+It is written for readers who may not work in AWS every day. It focuses on the practical setup, preflight checks, and safe use of `awssync`.
+
+## Summary
+
+Forward collects AWS by using configured credentials to read AWS network metadata. In multi-account setups, Forward still assumes a role in each collected account.
+
+For many AWS accounts in the same AWS Organization, there are two separate requirements:
+
+1. Forward must be able to discover the AWS account inventory from AWS Organizations.
+2. Forward must be able to assume a collection role in every account that should be collected.
+
+`awssync` automates the Forward-side account list update. It does not create IAM roles in AWS and does not grant Forward access to new accounts by itself. New accounts become collectable only after the expected IAM role exists in those accounts and trusts Forward.
+
+This workflow supports both Forward IAM role and IAM user/access-key multi-account setups. In both modes, the existing Forward setup must have `assumeRoleInfos` entries with role ARNs so `awssync` can derive the role name and generate role ARNs for newly discovered accounts.
+
+## AWS Terms
+
+- **AWS account**: A billing/security boundary in AWS. Each account has a 12-digit account ID.
+- **AWS Organization**: A group of AWS accounts managed together.
+- **Management account**: The top-level AWS account for the Organization. This is sometimes called the root account, but AWS usually calls it the management account.
+- **Member account**: Any AWS account that belongs to the Organization.
+- **IAM role**: An AWS identity with permissions. In multi-account AWS setups, Forward assumes this role in each collected account.
+- **IAM user/access key**: A stored AWS credential that Forward can use to assume the per-account roles in a multi-account setup.
+- **External ID**: An optional safety value used in the IAM trust policy when Forward assumes a role. IAM user/access-key setups commonly do not use a Forward external ID.
+- **Forward AWS setup**: The cloud account setup configured in Forward for AWS collection.
+
+## Required AWS Model
+
+One AWS account must be available for Forward to use as the Organizations discovery point. This is usually the AWS Organizations management account. A delegated administrator account can also work if it has the required Organizations permissions.
+
+That discovery account must allow Forward to call AWS Organizations read APIs, including account-listing APIs such as `organizations:ListAccounts`. Forward uses that visibility to learn which AWS accounts exist.
+
+Each collectable member account must also have a Forward collection role. The role name must be consistent across accounts because `awssync` builds role ARNs by taking the existing Forward setup role name and applying it to each discovered account ID. This same-role-name requirement applies to both Forward IAM role and IAM user/access-key multi-account setups.
+
+Example:
+
+```text
+Existing configured role ARN:
+arn:aws:iam::111111111111:role/ForwardRole
+
+Discovered account:
+222222222222
+
+Generated role ARN:
+arn:aws:iam::222222222222:role/ForwardRole
+```
+
+If the role is missing in account `222222222222`, Forward can add the account to the setup, but collection for that account will fail until AWS IAM is fixed.
+
+## Preflight Checklist
+
+Complete these checks before running `awssync --apply`.
+
+### 1. Confirm Forward Is Collecting the AWS Organization Discovery Account
+
+In Forward, confirm the AWS setup includes the management account or the delegated discovery account.
+
+This matters because account inventory comes from AWS Organizations. If Forward only collects a member account that cannot list the Organization, the script will not have the complete account list to sync.
+
+Expected result: the latest processed Forward snapshot includes the AWS setup and shows AWS account inventory from the Organization.
+
+### 2. Confirm AWS Organizations Permissions
+
+The discovery account role must have read access to AWS Organizations. At minimum, verify it can list accounts.
+
+An AWS CLI check can look like this:
+
+```bash
+aws organizations list-accounts
+```
+
+Run that command using credentials equivalent to the Forward AWS setup credentials for the Organizations discovery account.
+
+Expected result: AWS returns the Organization accounts. If AWS returns `AccessDeniedException` or says Organizations is not in use, fix AWS access before using `awssync`.
+
+### 3. Confirm the Forward Collection Role Exists in Member Accounts
+
+For each account that should be collected, confirm the same role name exists.
+
+AWS CLI example:
+
+```bash
+aws iam get-role --role-name ForwardRole
+```
+
+Run this check in representative member accounts, especially newly created accounts.
+
+Expected result: the role exists and its trust policy allows Forward to assume it, including the external ID if the Forward setup uses one.
+
+### 4. Confirm Forward Can Assume the Role
+
+Before syncing a large account set, test at least one known member account in Forward.
+
+Expected result: Forward setup/connectivity testing succeeds for the account and region set. If role assumption fails, fix IAM trust or permissions before applying a larger sync.
+
+### 5. Confirm the Platform Query Scope
+
+`awssync` gets discovered AWS account rows from Forward NQE.
+
+The tool defaults to an inline Forward NQE source query for AWS account discovery. That inline query returns `Cloud Setup ID` from `cloudAccount.cloudSetupId`, which is required when one network has multiple AWS setups. When exactly one `--setup-id` is selected, the inline query is parameterized with that setup ID so Forward can scope the query before returning rows. `--query-id` is optional and should only be used when support intentionally overrides that query.
+
+If a saved query declares a String setup parameter, pass `--query-setup-param PARAM_NAME` with exactly one `--setup-id`. Do not pass this flag to a saved query that does not declare the parameter; Forward rejects extra NQE parameters.
+
+Expected result: the query returns AWS account IDs, names, and setup identifiers when there is more than one Forward AWS setup in the network. The built-in saved report that only returns name, ID, type, email, and collected status is not enough to separate multiple AWS setups.
+
+## Build the Tool
+
+```bash
+make build
+```
+
+The binary is written to:
+
+```text
+./bin/awssync
+```
+
+Set common Forward inputs through environment variables:
+
+```bash
+export FWD_HOST=https://fwd.app
+export FWD_USER=you@example.com
+export FWD_PASS='secret'
+export FWD_NETWORK_ID=NETWORK_ID
+```
+
+Use the Forward base URL for `FWD_HOST`; it can be SaaS or an on-prem Forward instance.
+
+`FWD_NETWORK_ID` is optional when the Forward user can see exactly one network. In an interactive terminal, the CLI can show a numbered picker when multiple networks are visible and accepts either the menu number or the network ID. Automation should set `FWD_NETWORK_ID` or pass `--network-id` explicitly.
+
+## Run a Dry Plan
+
+Start without `--apply`. This writes the planned PATCH payload to disk but does not update Forward.
+
+```bash
+./bin/awssync \
+  --max-snapshot-age 24h \
+  --output aws_sync_payload.json \
+  --manual-output aws_sync_manual_payload.json
+```
+
+If support needs to override the platform query, pass an explicit query ID:
+
+```bash
+./bin/awssync \
+  --query-id OVERRIDE_QUERY_ID \
+  --max-snapshot-age 24h \
+  --output aws_sync_payload.json
+```
+
+If the network has multiple Forward AWS setups and only some should be synchronized, scope the run with `--setup-id`:
+
+```bash
+./bin/awssync \
+  --setup-id AWS_SETUP_ID \
+  --max-snapshot-age 24h \
+  --output aws_sync_payload.json
+```
+
+Repeat `--setup-id` to target more than one setup.
+
+If the network has multiple AWS setups:
+- interactive terminal: a setup picker is shown and accepts setup numbers or case-insensitive setup IDs.
+- non-interactive: pass `--setup-id` values explicitly, or the run exits with a setup selection error.
+
+Use `--format human` for an easier scan of checks and setup summaries:
+
+```bash
+./bin/awssync --max-snapshot-age 24h --format human
+```
+
+Then review the summary and payload:
+
+- `selected_setup_ids`: setup IDs included in this run (useful when defaults are inferred).
+- `planned_setups` (setup list sections): per-setup added/removed counts and OU visibility messages.
+
+Review the JSON summary printed by the command:
+
+- `fetched_item_count`: number of AWS account rows returned by NQE.
+- `planned_setup_count`: number of Forward AWS setups that can be patched.
+- `skipped_setup_count`: number of setups skipped because required metadata was missing.
+- `configured_account_count`: number of accounts currently configured in Forward for a setup.
+- `nqe_account_row_count`: number of AWS account rows returned by NQE for a setup.
+- `nqe_candidate_row_count`: number of uncollected candidate accounts visible in NQE for a setup.
+- `nqe_org_unit_row_count`: rows where NQE exposed AWS `organizationalUnitIds`. This is useful supporting evidence when present, but it can be zero for valid AWS Organizations where accounts are directly under the root.
+- `planned_payload_account_count`: number of accounts planned for the PATCH payload.
+- `added_accounts`: accounts that will be added to the Forward setup.
+- `removed_accounts`: accounts that would be removed from the Forward setup.
+- `unchanged_account_count`: accounts already present and still discovered.
+- `candidate_check`: whether uncollected candidate accounts were visible in the snapshot. If none are visible, verify the management or delegated discovery account before applying removals.
+- `organization_discovery_signal`: whether an Organization-level signal was visible for the setup (`visible_candidates`, `visible_ou_ids`, `visible_candidates_and_ou_ids`, or `no_org_signal`).
+- `role_name`: IAM role name that will be used in each generated role ARN.
+- `external_id_configured`: whether an external ID from the existing setup will be preserved. This can be `false` for IAM user/access-key setups.
+- `payload_sha256`: fingerprint of the payload written to disk.
+- `manual_output`: optional path of setup-keyed manual payload for UI drag-and-drop.
+- `manual_payload_sha256`: fingerprint of the manual payload written to disk.
+- `manual_payloads`: map keyed by setup ID containing the planned `assumeRoleInfo` entries for manual drag-and-drop workflows.
+- `patched`: should be `false` in a dry plan.
+
+Then review `aws_sync_payload.json`. Confirm:
+
+- Setup IDs are correct.
+- Account IDs are expected 12-digit AWS account IDs.
+- Account names look correct.
+- Role ARNs use the intended role name.
+- External ID is present only when the existing setup uses one.
+- Regions and proxy settings match the existing Forward setup.
+- The PATCH payload does not include access keys or secrets; those stored credentials remain unchanged in Forward.
+- Removed accounts are expected. If removals are not expected, stop and inspect the Forward snapshot and NQE query before applying.
+
+If `--manual-output` is used, also confirm that manual payload file by opening it and verifying:
+
+- Setup keys match `selected_setup_ids`.
+- Each setup value is an array of account records with generated role ARNs and external IDs (if configured).
+
+## Run Preflight Checks
+
+`preflight` performs read-only checks and prints a JSON readiness report.
+
+```bash
+./bin/awssync preflight \
+  --max-snapshot-age 24h
+```
+
+Expected result: `ready` is `true`, `nqe_aws_accounts` passes, `patch_plan` passes, and `account_removals` either passes or is understood and approved.
+
+If `management_account_discovery` fails, the snapshot did not show any uncollected AWS account candidates. That can happen when the AWS Organization has no undiscovered accounts, but it can also mean Forward is not collecting the management or delegated discovery account. Do not apply account removals in that state unless AWS Organizations discovery has been independently verified and `--allow-no-candidates` is intentional.
+
+`aws_organizations_evidence` reports if the plan has either candidate visibility or OU ID visibility for each selected setup. In multi-setup runs, the check lists the setup IDs that lack this signal. Treat both as supporting evidence only. The safer destructive-sync guard is:
+
+- `account_removals` requires `--allow-removals`.
+- `management_account_discovery` fails: add `--allow-no-candidates` only after confirming discovery is complete.
+- `aws_organizations_evidence` fails: add `--allow-no-org-evidence` only after independent verification that Forward has complete AWS Organizations visibility for that setup.
+
+## Apply the Sync
+
+After the dry plan is reviewed, run with `--apply`.
+
+```bash
+./bin/awssync \
+  --max-snapshot-age 24h \
+  --output aws_sync_payload.json \
+  --apply \
+  --yes
+```
+
+Expected result: the command prints `patched_setup_count` greater than zero and each patched setup shows `patched: true`.
+
+If the plan includes account removals, `--apply` fails unless `--allow-removals` is included. Use that flag only after reviewing `removed_accounts`.
+
+If the plan includes account removals and no uncollected candidate accounts are visible, `--apply` also requires `--allow-no-candidates`. Use that flag only after confirming the management or delegated discovery account is collected and AWS Organizations discovery is working.
+
+If the plan includes account removals and the same setup has neither candidate rows nor OU rows visible, `--apply` also requires `--allow-no-org-evidence`. Use that flag only after an independent validation that the setup is collecting from the expected AWS Organization.
+
+To apply the exact reviewed payload file later without recomputing the plan:
+
+```bash
+./bin/awssync apply-plan \
+  --plan aws_sync_payload.json \
+  --yes
+```
+
+## Validate After Apply
+
+After applying:
+
+1. Run or wait for a new Forward snapshot.
+2. Confirm snapshot processing completes.
+3. Confirm expected AWS accounts appear in Forward.
+4. Check collection errors for newly added accounts.
+
+Useful commands:
+
+```bash
+./bin/awssync status
+```
+
+```bash
+./bin/awssync wait \
+  --snapshot-id SNAPSHOT_ID
+```
+
+If a new account appears in the Forward setup but fails collection, the most likely cause is missing or incorrect IAM role setup in that AWS account.
+
+## Ongoing Automation
+
+Run `awssync` on a schedule or after AWS account lifecycle events.
+
+Recommended sequence:
+
+1. AWS account is created or closed.
+2. Automation creates or removes the Forward collection IAM role.
+3. Forward runs a snapshot that can discover the updated Organization account inventory.
+4. `awssync` runs against that processed snapshot or latest processed snapshot.
+5. Forward runs the next collection with the updated account list.
+
+For event-driven workflows, `awssync serve-webhook` can receive Forward `SNAPSHOT_READY` events and run the sync against the exact snapshot from the event.
+
+Start the receiver:
+
+```bash
+./bin/awssync serve-webhook \
+  --listen :8080 \
+  --path /forward/snapshot-ready \
+  --webhook-basic-username awssync \
+  --webhook-basic-password RECEIVER_SHARED_SECRET \
+  --apply \
+  --yes
+```
+
+Create the Forward webhook through the Forward API:
+
+```bash
+./bin/awssync configure-webhook \
+  --webhook-url https://awssync.example.com/forward/snapshot-ready \
+  --webhook-basic-username awssync \
+  --webhook-basic-password RECEIVER_SHARED_SECRET \
+  --test-webhook
+```
+
+Forward webhooks use Basic Auth credentials when credentials are configured. The `--webhook-basic-username` and `--webhook-basic-password` values on `configure-webhook` must match the receiver values on `serve-webhook`.
+
+`configure-webhook` is repeatable. It creates a missing webhook and updates the same named webhook if it already exists. If only specific AWS setups should sync from webhook events, add one or more `--setup-id` values. The tool adds those setup IDs to the receiver URL so the receiver can scope the run. Add `--webhook-per-setup` to create or update one webhook per setup ID.
+
+```bash
+./bin/awssync configure-webhook \
+  --webhook-url https://awssync.example.com/forward/snapshot-ready \
+  --setup-id AWS \
+  --setup-id AWS-SANDBOX \
+  --webhook-per-setup
+```
+
+Important SaaS caveat: if Forward is SaaS, `--webhook-url` must be reachable from Forward SaaS over the internet. A localhost, RFC1918, VPN-only, or private URL will not work unless the receiver is exposed through an approved public endpoint, reverse proxy, or tunnel. If Forward is on-prem, the URL only needs to be reachable from the Forward app server.
+
+### Install the Receiver as a Service
+
+For production webhook use, run `awssync serve-webhook` as a supervised service on a host that can reach Forward and that Forward can reach on the webhook URL.
+
+Recommended service practices:
+
+- Run as a dedicated low-privilege user such as `awssync`.
+- Store `FWD_HOST`, `FWD_USER`, `FWD_PASS`, `AWSSYNC_WEBHOOK_BASIC_USERNAME`, and `AWSSYNC_WEBHOOK_BASIC_PASSWORD` in a protected service environment file.
+- Start in dry-run mode first, without `--apply`, and confirm webhook delivery and payload generation.
+- Add `--apply --yes` only after dry-run output is reviewed.
+- Use `--allow-removals` only after an operator reviews planned removals.
+- Use `--allow-no-candidates` only after confirming management or delegated discovery is working.
+- Use `--allow-no-org-evidence` only after independent verification that AWS Organizations discovery remains complete.
+- Send service logs to the normal log collection system.
+
+Linux systemd command example:
+
+```ini
+ExecStart=/usr/local/bin/awssync serve-webhook --listen 0.0.0.0:8080 --apply --yes
+EnvironmentFile=/etc/awssync/awssync.env
+Restart=on-failure
+RestartSec=10
+```
+
+For temporary SaaS testing, a short-lived tunnel such as `trycloudflare` can expose a local receiver. Account-less tunnels are suitable for testing only and should not be used for production automation.
+
+## Common Failure Modes
+
+### No AWS Accounts Found
+
+Likely causes:
+
+- Forward has not collected the AWS Organizations discovery account.
+- The latest processed snapshot is too old.
+- The NQE query does not return AWS account rows.
+- AWS Organizations permissions are missing.
+
+Fix: verify the discovery account setup, run a new snapshot, and rerun the dry plan.
+
+### No Candidate Accounts Visible
+
+Likely causes:
+
+- The AWS Organization has no accounts that are currently uncollected.
+- Forward is not collecting the management or delegated discovery account.
+- The discovery account role lacks AWS Organizations read permissions.
+- The query override does not include the `Collected?` column.
+
+Fix: run `preflight`, verify `management_account_discovery`, and confirm the AWS Organizations access check. Do not approve removals from this state unless the account list is confirmed complete.
+
+### Webhook Does Not Trigger Sync
+
+Likely causes:
+
+- The Forward webhook URL is not reachable from the Forward app server.
+- Forward SaaS is pointed at a private or VPN-only receiver URL.
+- Basic Auth values in Forward do not match the receiver.
+- The webhook is not scoped to the intended network.
+
+Fix: run `configure-webhook --test-webhook`, check receiver logs, and confirm `/healthz` is reachable from the same network path Forward will use.
+
+### Missing Setup Metadata
+
+Likely causes:
+
+- The query returned a setup ID that does not match a Forward AWS setup.
+- Multiple AWS setups exist, but the platform query response does not include the setup identifier.
+
+Fix: verify the platform query output. If support is intentionally bypassing the platform query, use an override query that includes the Forward setup ID.
+
+### Unable to Determine Role ARN Name
+
+Likely causes:
+
+- The existing Forward setup has no `assumeRoleInfos`.
+- The existing account entry does not include a valid role ARN.
+- The setup is single-account or collect-all CAP rather than a multi-account role-ARN setup.
+
+Fix: configure and test at least one known-good AWS account in the Forward setup first. `awssync` needs that setup as the template for role name, regions, proxy, and optional external ID.
+
+### Account Added but Collection Fails
+
+Likely causes:
+
+- The Forward IAM role was not created in the new AWS account.
+- The trust policy does not allow Forward to assume the role.
+- The external ID in AWS does not match the Forward setup.
+- The role policy lacks required read permissions.
+
+Fix: repair IAM in the AWS account, then rerun collection. The account list may already be correct in Forward.
+
+## Summary
+
+AWS account sync has two layers:
+
+1. AWS Organizations tells Forward which accounts exist.
+2. IAM roles in each AWS account allow Forward to collect those accounts.
+
+`awssync` automates layer 1 into Forward's configured account list. Layer 2 is still required in AWS: every account must have the expected IAM role and trust policy. For IAM user/access-key setups, the stored credential must also be allowed to assume those roles. This is why the first setup step is verifying management-account or delegated-account Organizations visibility before running the script.
