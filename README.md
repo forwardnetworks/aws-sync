@@ -21,6 +21,8 @@ Both Forward IAM role and IAM user/access-key multi-account setups are supported
 
 ## Procedure
 
+For an end-to-end flow diagram showing connection types and required permissions, see [AWS Account Sync End-to-End Flow](docs/architecture-flow.md).
+
 For a short quick start, see [AWS Account Sync Quick Start](docs/quick-start.md).
 
 For the full procedure, including AWS Organizations prerequisites, management-account or delegated-account discovery checks, IAM role checks, dry-run review, apply, and post-apply validation, see [AWS Account Sync Procedure](docs/aws-account-sync-procedure.md).
