@@ -2,6 +2,8 @@
 
 ### Highlights
 
+- Positioned the Forward Terraform provider as the native IaC workflow for new AWS Organizations onboarding.
+- Kept `awssync` focused on existing Forward setup synchronization from NQE data plus manual/break-glass onboarding artifacts.
 - Added `discover-org` for initial AWS Organizations onboarding before Forward has collected the org.
 - Writes both onboarding artifacts:
   - `fwd_accounts_data_<timestamp>.json` for Forward UI drag-and-drop import.

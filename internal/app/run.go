@@ -166,9 +166,9 @@ type AWSOrganizationSource struct {
 type ManualAccountData struct {
 	ID         string  `json:"id"`
 	Name       string  `json:"name"`
-	RoleArn    *string `json:"roleArn"`
-	ExternalID *string `json:"externalId"`
-	ErrorMsg   *string `json:"errorMsg"`
+	RoleArn    *string `json:"roleArn,omitempty"`
+	ExternalID *string `json:"externalId,omitempty"`
+	ErrorMsg   *string `json:"errorMsg,omitempty"`
 }
 
 type AWSOrganizationConfig struct {

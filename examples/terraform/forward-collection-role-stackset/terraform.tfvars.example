@@ -1,0 +1,18 @@
+role_name = "ForwardRole"
+
+trusted_principal_arns = [
+  "arn:aws:iam::999999999999:role/ForwardAssumeRole",
+]
+
+external_id = "Org:12345"
+
+target_ou_ids = [
+  "r-example",
+]
+
+deployment_regions = ["us-east-1"]
+
+tags = {
+  Application = "Forward"
+  ManagedBy   = "Terraform"
+}

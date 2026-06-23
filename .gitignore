@@ -1,3 +1,12 @@
 bin/
 __pycache__/
 *.pyc
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+*.tfvars
+!*.tfvars.example
+aws_sync_payload*.json
+aws_create_payload_*.json
+fwd_accounts_data_*.json

@@ -216,6 +216,38 @@ If `--credential-mode static-keys` is used without `AWSSYNC_COLLECTOR_SECRET_ACC
 
 Do not use `discover-org` for a setup that already exists. Use the NQE sync path below so Forward's collected data, regions, proxy settings, and stored credentials remain the source of truth.
 
+### Optional Terraform Bootstrap
+
+For new AWS Organizations onboarding, prefer the Forward Terraform provider as the native IaC workflow. The provider can fetch Forward's external ID, read AWS Organizations, and create or update the Forward AWS setup directly with `forward_aws_cloud_account`. It supports Forward assume-role, static-key, and collector instance-profile credential models.
+
+Use the `examples/terraform` bootstrap examples below when you need AWS-side prerequisites for either the provider workflow or the `awssync discover-org` CLI fallback:
+
+- `examples/terraform/aws-org-discovery-role`: creates an IAM role with Organizations read permissions for `discover-org`.
+- `examples/terraform/forward-collection-role-stackset`: deploys the Forward collection role name into member accounts with CloudFormation StackSets.
+- `examples/terraform/github-actions-discover-org`: creates a GitHub OIDC role so GitHub Actions can run `discover-org` without static AWS keys.
+
+Example:
+
+```bash
+terraform -chdir=examples/terraform/aws-org-discovery-role init
+terraform -chdir=examples/terraform/aws-org-discovery-role apply
+
+terraform -chdir=examples/terraform/forward-collection-role-stackset init
+terraform -chdir=examples/terraform/forward-collection-role-stackset apply
+```
+
+Then use the StackSet role name with `discover-org`:
+
+```bash
+AWS_PROFILE=org-readonly ./bin/awssync discover-org \
+  --setup-id AWS-PROD \
+  --role-name "$(terraform -chdir=examples/terraform/forward-collection-role-stackset output -raw role_name)" \
+  --collect-region us-east-1 \
+  --external-id Org:12345
+```
+
+Static-key collection through Terraform requires protected encrypted state because Terraform stores sensitive values in state. If the collector secret must stay out of Terraform state, use `awssync discover-org` and pass `AWSSYNC_COLLECTOR_SECRET_ACCESS_KEY` from runtime secret storage.
+
 ## Run a Dry Plan
 
 Start without `--apply`. This writes the planned PATCH payload to disk but does not update Forward.
