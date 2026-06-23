@@ -132,6 +132,9 @@ func TestRunAWSOrganizationsWithoutForwardWritesManualAndFullPayloads(t *testing
 	if err := json.Unmarshal(data, &manualPayloads); err != nil {
 		t.Fatalf("decode manual: %v", err)
 	}
+	if strings.Contains(string(data), "errorMsg") {
+		t.Fatalf("manual payload should omit empty errorMsg fields: %s", string(data))
+	}
 	if len(manualPayloads) != 2 {
 		t.Fatalf("unexpected manual payload: %#v", manualPayloads)
 	}

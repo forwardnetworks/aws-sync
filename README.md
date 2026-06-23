@@ -3,6 +3,8 @@
 `awssync` discovers AWS accounts through Forward NQE, builds one PATCH payload per existing AWS cloud setup, writes those payloads to disk, and can optionally PATCH them back into Forward.
 It also has a `discover-org` onboarding mode that reads AWS Organizations directly, writes the Forward UI `fwd_accounts_data` upload JSON, and writes the Forward create-setup POST JSON for new AWS setups.
 
+For new AWS Organizations onboarding, the native IaC workflow is now the Forward Terraform provider. Use Terraform when the organization can use a stable Forward collection role name across accounts and one of Forward's supported credential models: Forward assume-role, static collector keys, or collector instance profile. Use `awssync discover-org` when you need manual JSON files, a break-glass workflow, or static-key collector payloads that should stay outside Terraform state.
+
 The repository is structured like `awsfilter`: Cobra/Viper CLI entrypoint, raw API client package, and isolated run/planning logic with tests.
 
 ## What it does
@@ -19,6 +21,8 @@ The repository is structured like `awsfilter`: Cobra/Viper CLI entrypoint, raw A
 
 - `fwd_accounts_data_<timestamp>.json`: flat account array for the Forward UI drag-and-drop flow.
 - `aws_create_payload_<timestamp>.json`: body for `POST /api/networks/{networkId}/cloudAccounts`.
+
+Terraform examples for AWS-side prerequisites live in [examples/terraform](examples/terraform). They create AWS Organizations read roles, Forward collection roles through StackSets, and an optional GitHub OIDC role for running `discover-org` without long-lived AWS keys. For a fully Terraform-native Forward onboarding workflow, use the Forward Terraform provider's `forward_aws_assume_role_external_id`, `forward_aws_organization_accounts`, and `forward_aws_cloud_account` resources/data sources.
 
 The Forward collection IAM role name must be the same in every AWS account that should be collected. `awssync` uses the role name from the existing Forward AWS setup as the template for generated role ARNs.
 
@@ -82,6 +86,8 @@ Use `--manual-output` if you also want UI-friendly drag-and-drop JSON:
 
 Discover an AWS Organization before Forward has collected it:
 
+Prefer the Forward Terraform provider for native IaC onboarding. This CLI mode is best for manual review files, break-glass onboarding, or environments that cannot yet use the provider.
+
 ```bash
 AWS_PROFILE=org-readonly ./bin/awssync discover-org \
   --setup-id AWS-PROD \
@@ -105,6 +111,16 @@ AWS_PROFILE=org-readonly ./bin/awssync discover-org \
 ```
 
 To create the new Forward setup through the API after writing both JSON files, add `--post --yes`. For static IAM key collection, use `--credential-mode static-keys --collector-access-key-id KEY_ID` and provide the secret through `AWSSYNC_COLLECTOR_SECRET_ACCESS_KEY`; otherwise the create payload contains a placeholder and is not POST-ready.
+
+Optional Terraform bootstrap for the CLI fallback:
+
+```bash
+terraform -chdir=examples/terraform/aws-org-discovery-role init
+terraform -chdir=examples/terraform/aws-org-discovery-role apply
+
+terraform -chdir=examples/terraform/forward-collection-role-stackset init
+terraform -chdir=examples/terraform/forward-collection-role-stackset apply
+```
 
 Apply the generated payloads back into Forward:
 

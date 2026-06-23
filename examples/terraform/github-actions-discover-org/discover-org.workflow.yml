@@ -1,0 +1,38 @@
+name: discover-org
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  discover-org:
+    runs-on: ubuntu-latest
+    env:
+      FWD_HOST: ${{ secrets.FWD_HOST }}
+      FWD_USER: ${{ secrets.FWD_USER }}
+      FWD_PASS: ${{ secrets.FWD_PASS }}
+      FWD_NETWORK_ID: ${{ secrets.FWD_NETWORK_ID }}
+      AWSSYNC_SETUP_ID: AWS-PROD
+      AWSSYNC_ROLE_NAME: ForwardRole
+      AWSSYNC_COLLECT_REGION: us-east-1
+      AWSSYNC_POST: "true"
+      AWSSYNC_YES: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::111111111111:role/awssync-github-discover-org
+          aws-region: us-east-1
+
+      - run: make build
+
+      - run: ./bin/awssync discover-org --format human

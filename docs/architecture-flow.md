@@ -111,7 +111,79 @@ flowchart TB
 
 ---
 
-## Mode 3 — Webhook Daemon
+## Mode 3 — Native IaC Onboarding With Terraform
+
+For new AWS Organizations onboarding, the preferred automation path is the Forward Terraform provider. Terraform can prepare AWS-side roles, read AWS Organizations, fetch Forward's external ID when needed, and create or update the Forward AWS cloud setup in one plan/apply workflow. The provider supports Forward assume-role, static-key, and collector instance-profile credential models.
+
+```mermaid
+flowchart TB
+    subgraph tf["Terraform native IaC workflow"]
+        aws_provider["AWS provider\nrole / StackSet prerequisites"]
+        ext_id["forward_aws_assume_role_external_id\nGET external ID\nforward-assume-role only"]
+        org_ds["forward_aws_organization_accounts\nDescribeOrganization, ListAccounts, ListParents"]
+        credential_mode["credential_mode\nforward-assume-role\nstatic-keys\ninstance-profile"]
+        fwd_resource["forward_aws_cloud_account\nPOST or PATCH /cloudAccounts"]
+    end
+
+    subgraph aws["AWS Organizations"]
+        org_api["Organization account inventory"]
+        member_role["Stable Forward collection role\nin each member account"]
+    end
+
+    subgraph fwd_tf["Forward platform"]
+        external_tf["GET /cloudAccounts/aws/assumeRole/externalId"]
+        write_tf["POST or PATCH /cloudAccounts"]
+    end
+
+    aws_provider --> member_role
+    ext_id --> external_tf
+    org_ds --> org_api
+    org_ds --> member_role
+    ext_id --> org_ds
+    org_ds --> fwd_resource
+    credential_mode --> fwd_resource
+    fwd_resource --> write_tf
+
+    classDef neutral fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A;
+    classDef fwdnode fill:#E6F1FB,stroke:#185FA5,color:#042C53;
+    classDef awsnode fill:#E1F5EE,stroke:#0F6E56,color:#04342C;
+
+    class aws_provider,ext_id,org_ds,credential_mode,fwd_resource neutral;
+    class org_api,member_role awsnode;
+    class external_tf,write_tf fwdnode;
+```
+
+---
+
+## Optional Terraform Bootstrap For CLI Fallback
+
+Terraform can also prepare AWS access before `awssync discover-org` runs. Use this when you need CLI-generated manual JSON files or a break-glass create payload instead of the native provider-managed Forward setup.
+
+```mermaid
+flowchart TB
+    tf["Terraform"]
+    org_role["AWS Organizations read role\nDescribeOrganization, ListAccounts, ListParents"]
+    stackset["CloudFormation StackSet\nForward collection role in member accounts"]
+    gha["GitHub OIDC role\noptional automation runner"]
+    discover["awssync discover-org\nwrites onboarding JSON or POSTs new setup"]
+
+    tf --> org_role
+    tf --> stackset
+    tf --> gha
+    org_role --> discover
+    stackset --> discover
+    gha --> discover
+
+    classDef neutral fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A;
+    classDef awsnode fill:#E1F5EE,stroke:#0F6E56,color:#04342C;
+
+    class tf,discover neutral;
+    class org_role,stackset,gha awsnode;
+```
+
+---
+
+## Mode 4 — Webhook Daemon
 
 `awssync serve-webhook` runs as a long-lived HTTP server. Forward calls it on
 each `SNAPSHOT_READY` event. Traffic direction is **inbound to awssync**.

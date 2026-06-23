@@ -1,7 +1,8 @@
 # AWS Account Sync Quick Start
 
-Use `awssync` to update a Forward AWS setup when AWS Organization accounts are added or removed.
-Use `awssync discover-org` only when Forward has not onboarded that AWS Organization yet and you need files for the initial setup.
+Use `awssync` to update an existing Forward AWS setup when AWS Organization accounts are added or removed and Forward's collected NQE data is the source of truth.
+
+For new AWS Organizations onboarding, prefer the Forward Terraform provider as the native IaC workflow. It supports Forward assume-role, static-key, and collector instance-profile credential models. Use `awssync discover-org` only when Forward has not onboarded that AWS Organization yet and you need manual JSON files, a break-glass create payload, or a static-key workflow that should stay outside Terraform state.
 
 ## Before You Start
 
@@ -68,7 +69,7 @@ Stop if removed accounts are unexpected.
 
 ## Discover Before Onboarding
 
-Use this path for a new Forward AWS setup. It reads AWS Organizations directly and never patches an existing Forward setup.
+Prefer the Forward Terraform provider for native IaC onboarding. Use this CLI path for a new Forward AWS setup when you need manual review artifacts or cannot use the provider. It reads AWS Organizations directly and never patches an existing Forward setup.
 
 ```bash
 AWS_PROFILE=org-readonly ./bin/awssync discover-org \
@@ -98,6 +99,16 @@ AWS_PROFILE=org-readonly ./bin/awssync discover-org \
 ```
 
 To create the setup from automation, add `--post --yes`. Static-key collection also needs `--credential-mode static-keys --collector-access-key-id KEY_ID` and `AWSSYNC_COLLECTOR_SECRET_ACCESS_KEY`.
+
+Terraform examples for AWS-side bootstrap are in `examples/terraform`. These are useful for the CLI fallback and for the provider workflow:
+
+```bash
+terraform -chdir=examples/terraform/aws-org-discovery-role init
+terraform -chdir=examples/terraform/aws-org-discovery-role apply
+
+terraform -chdir=examples/terraform/forward-collection-role-stackset init
+terraform -chdir=examples/terraform/forward-collection-role-stackset apply
+```
 
 ## Apply
 
