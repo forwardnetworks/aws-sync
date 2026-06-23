@@ -16,6 +16,7 @@ import (
 
 	"github.com/forwardnetworks/aws-sync/internal/api"
 	"github.com/forwardnetworks/aws-sync/internal/app"
+	"github.com/forwardnetworks/aws-sync/internal/awsorg"
 	"github.com/forwardnetworks/aws-sync/internal/monitor"
 	"github.com/forwardnetworks/aws-sync/internal/webhook"
 	"github.com/spf13/cobra"
@@ -131,6 +132,7 @@ func newRootCommand() *cobra.Command {
 		newApplyPlanCommand(v),
 		newStatusCommand(v),
 		newWaitCommand(v),
+		newDiscoverOrgCommand(v),
 		newServeWebhookCommand(v),
 		newConfigureWebhookCommand(v),
 	)
@@ -364,6 +366,121 @@ func newWaitCommand(v *viper.Viper) *cobra.Command {
 	mustBind(v, cmd.Flags(), "wait-for-state")
 	mustBind(v, cmd.Flags(), "poll-interval")
 	_ = cmd.MarkFlagRequired("snapshot-id")
+	return cmd
+}
+
+func newDiscoverOrgCommand(v *viper.Viper) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:           "discover-org",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Short:         "Discover AWS Organizations accounts and write Forward onboarding payloads",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			setupIDs := cleanSetupIDs(flagStringSlice(cmd, v, "setup-id"))
+			if len(setupIDs) != 1 {
+				return fmt.Errorf("discover-org requires exactly one --setup-id for the new Forward AWS setup")
+			}
+			password := ""
+			networkID := flagString(cmd, v, "network-id")
+			if strings.TrimSpace(v.GetString("host")) != "" {
+				var err error
+				password, err = resolvePassword(v, os.Stdin, os.Stderr)
+				if err != nil {
+					return err
+				}
+				networkID, err = resolveNetworkIDForCLI(cmd.Context(), v, password, networkID, os.Stdin, os.Stderr)
+				if err != nil {
+					return err
+				}
+			}
+
+			credentialMode := flagString(cmd, v, "credential-mode")
+			collectorSecret, err := resolveCollectorSecret(v, credentialMode, flagBool(cmd, v, "post"), os.Stdin, os.Stderr)
+			if err != nil {
+				return err
+			}
+			if err := confirmPost(flagBool(cmd, v, "post"), flagBool(cmd, v, "yes"), setupIDs[0], os.Stdin, os.Stderr); err != nil {
+				return err
+			}
+			discovered, err := awsorg.Discover(cmd.Context(), awsorg.Config{
+				Profile:          flagString(cmd, v, "aws-profile"),
+				Region:           flagString(cmd, v, "aws-region"),
+				IncludeSuspended: flagBool(cmd, v, "include-suspended"),
+			})
+			if err != nil {
+				return err
+			}
+			source := app.AWSOrganizationSource{
+				OrganizationID:      discovered.OrganizationID,
+				ManagementAccountID: discovered.ManagementAccountID,
+				SkippedAccountCount: discovered.SkippedAccountCount,
+			}
+			source.Accounts = make([]app.AWSOrganizationAccount, 0, len(discovered.Accounts))
+			for _, account := range discovered.Accounts {
+				source.Accounts = append(source.Accounts, app.AWSOrganizationAccount{
+					ID:        account.ID,
+					Name:      account.Name,
+					Email:     account.Email,
+					State:     account.State,
+					Status:    account.Status,
+					ParentIDs: account.ParentIDs,
+				})
+			}
+			summary, err := app.RunAWSOrganizations(cmd.Context(), app.AWSOrganizationConfig{
+				Host:                     v.GetString("host"),
+				Username:                 v.GetString("username"),
+				Password:                 password,
+				NetworkID:                networkID,
+				SetupIDs:                 setupIDs,
+				Output:                   flagString(cmd, v, "output"),
+				ManualOutput:             flagString(cmd, v, "manual-output"),
+				RoleName:                 flagString(cmd, v, "role-name"),
+				ExternalID:               flagString(cmd, v, "external-id"),
+				Regions:                  flagStringSlice(cmd, v, "collect-region"),
+				CredentialMode:           credentialMode,
+				CollectorAccessKeyID:     flagString(cmd, v, "collector-access-key-id"),
+				CollectorSecretAccessKey: collectorSecret,
+				Post:                     flagBool(cmd, v, "post"),
+				APIPrefix:                v.GetString("api-prefix"),
+				Insecure:                 v.GetBool("insecure"),
+				Timeout:                  v.GetDuration("timeout"),
+				IncludeManual:            true,
+			}, source)
+			if err != nil {
+				return err
+			}
+			return emitResult(cmd, v, summary)
+		},
+	}
+	bindNetworkFlag(v, cmd.Flags())
+	cmd.Flags().StringSlice("setup-id", nil, "new Forward AWS setup ID/name for generated onboarding payloads")
+	cmd.Flags().String("role-name", "", "AWS IAM role name that Forward will assume in each discovered account")
+	cmd.Flags().String("external-id", "", "optional external ID; fetched from Forward when host credentials are supplied")
+	cmd.Flags().StringSlice("collect-region", nil, "AWS region for Forward to collect; repeatable or comma-separated")
+	cmd.Flags().String("credential-mode", app.CredentialModeForwardRole, "Forward collection credential mode: forward-role or static-keys")
+	cmd.Flags().String("collector-access-key-id", "", "collector AWS access key ID for static-keys mode")
+	cmd.Flags().String("collector-secret-access-key", "", "collector AWS secret access key for static-keys mode; prefer AWSSYNC_COLLECTOR_SECRET_ACCESS_KEY")
+	cmd.Flags().Bool("post", false, "POST the create payload to Forward after writing JSON files")
+	cmd.Flags().Bool("yes", false, "skip create confirmation prompt")
+	cmd.Flags().String("output", "", "Forward create-setup POST JSON path (defaults to aws_create_payload_<timestamp>.json)")
+	cmd.Flags().String("manual-output", "", "manual drag-and-drop JSON path (defaults to fwd_accounts_data_<timestamp>.json)")
+	cmd.Flags().String("aws-profile", "", "AWS shared config profile; empty uses the default AWS credential chain")
+	cmd.Flags().String("aws-region", "us-east-1", "AWS region for Organizations API client")
+	cmd.Flags().Bool("include-suspended", false, "include suspended AWS organization accounts")
+	mustBind(v, cmd.Flags(), "setup-id")
+	mustBind(v, cmd.Flags(), "role-name")
+	mustBind(v, cmd.Flags(), "external-id")
+	mustBind(v, cmd.Flags(), "collect-region")
+	mustBind(v, cmd.Flags(), "credential-mode")
+	mustBind(v, cmd.Flags(), "collector-access-key-id")
+	mustBind(v, cmd.Flags(), "collector-secret-access-key")
+	mustBind(v, cmd.Flags(), "post")
+	mustBind(v, cmd.Flags(), "yes")
+	mustBind(v, cmd.Flags(), "output")
+	mustBind(v, cmd.Flags(), "manual-output")
+	mustBind(v, cmd.Flags(), "aws-profile")
+	mustBind(v, cmd.Flags(), "aws-region")
+	mustBind(v, cmd.Flags(), "include-suspended")
 	return cmd
 }
 
@@ -750,6 +867,33 @@ func resolvePassword(v *viper.Viper, stdin *os.File, stderr io.Writer) (string, 
 	return password, nil
 }
 
+func resolveCollectorSecret(v *viper.Viper, credentialMode string, post bool, stdin *os.File, stderr io.Writer) (string, error) {
+	if strings.TrimSpace(strings.ToLower(credentialMode)) != app.CredentialModeStaticKeys {
+		return "", nil
+	}
+	secret := v.GetString("collector-secret-access-key")
+	if strings.TrimSpace(secret) != "" {
+		return secret, nil
+	}
+	if !post {
+		return "", nil
+	}
+	if !term.IsTerminal(int(stdin.Fd())) {
+		return "", fmt.Errorf("collector secret access key is required for --post with --credential-mode static-keys; use AWSSYNC_COLLECTOR_SECRET_ACCESS_KEY")
+	}
+	fmt.Fprint(stderr, "Collector AWS secret access key for Forward: ")
+	data, err := term.ReadPassword(int(stdin.Fd()))
+	fmt.Fprintln(stderr)
+	if err != nil {
+		return "", fmt.Errorf("read collector secret access key: %w", err)
+	}
+	secret = string(data)
+	if strings.TrimSpace(secret) == "" {
+		return "", fmt.Errorf("collector secret access key is required")
+	}
+	return secret, nil
+}
+
 func resolveOutputFormat(cmd *cobra.Command, v *viper.Viper) (string, error) {
 	value := strings.TrimSpace(strings.ToLower(flagString(cmd, v, "format")))
 	if value == "" {
@@ -818,9 +962,18 @@ func emitPreflightHuman(summary *app.PreflightSummary) error {
 }
 
 func emitSummaryHuman(summary *app.Summary) error {
+	if summary.Source == "aws_organizations" {
+		return emitAWSOrganizationsHuman(summary)
+	}
 	fmt.Fprintf(os.Stdout, "Sync report\n")
 	fmt.Fprintf(os.Stdout, "  host:      %s\n", summary.Host)
 	fmt.Fprintf(os.Stdout, "  network:   %s\n", summary.NetworkID)
+	if summary.Source != "" {
+		fmt.Fprintf(os.Stdout, "  source:    %s\n", summary.Source)
+	}
+	if summary.AWSOrganizationID != "" {
+		fmt.Fprintf(os.Stdout, "  aws org:   %s\n", summary.AWSOrganizationID)
+	}
 	fmt.Fprintf(os.Stdout, "  apply:     %t\n", summary.Apply)
 	if len(summary.SelectedSetupIDs) > 0 {
 		fmt.Fprintf(os.Stdout, "  setups:    %s\n", strings.Join(summary.SelectedSetupIDs, ", "))
@@ -855,6 +1008,46 @@ func emitSummaryHuman(summary *app.Summary) error {
 	return nil
 }
 
+func emitAWSOrganizationsHuman(summary *app.Summary) error {
+	fmt.Fprintf(os.Stdout, "AWS Organizations onboarding report\n")
+	if summary.Host != "" {
+		fmt.Fprintf(os.Stdout, "  host:       %s\n", summary.Host)
+	}
+	if summary.NetworkID != "" {
+		fmt.Fprintf(os.Stdout, "  network:    %s\n", summary.NetworkID)
+	}
+	if summary.AWSOrganizationID != "" {
+		fmt.Fprintf(os.Stdout, "  aws org:    %s\n", summary.AWSOrganizationID)
+	}
+	if summary.AWSManagementID != "" {
+		fmt.Fprintf(os.Stdout, "  management: %s\n", summary.AWSManagementID)
+	}
+	if len(summary.SelectedSetupIDs) > 0 {
+		fmt.Fprintf(os.Stdout, "  setup:      %s\n", strings.Join(summary.SelectedSetupIDs, ", "))
+	}
+	if summary.CredentialMode != "" {
+		fmt.Fprintf(os.Stdout, "  credential: %s\n", summary.CredentialMode)
+	}
+	if len(summary.Regions) > 0 {
+		fmt.Fprintf(os.Stdout, "  regions:    %s\n", strings.Join(summary.Regions, ", "))
+	}
+	fmt.Fprintf(os.Stdout, "  accounts:   %d active", summary.AWSAccountCount)
+	if summary.AWSSkippedCount > 0 {
+		fmt.Fprintf(os.Stdout, " (%d skipped)", summary.AWSSkippedCount)
+	}
+	fmt.Fprintln(os.Stdout)
+	fmt.Fprintf(os.Stdout, "  output:     %s\n", summary.Output)
+	if summary.ManualOutput != "" {
+		fmt.Fprintf(os.Stdout, "  manual:     %s\n", summary.ManualOutput)
+	}
+	fmt.Fprintf(os.Stdout, "  post ready: %t\n", summary.CreatePayloadReady)
+	fmt.Fprintf(os.Stdout, "  posted:     %d\n", summary.PostedSetupCount)
+	if !summary.CreatePayloadReady {
+		fmt.Fprintln(os.Stdout, "\nCreate payload contains a placeholder secret. Set AWSSYNC_COLLECTOR_SECRET_ACCESS_KEY or pass --collector-secret-access-key before POSTing.")
+	}
+	return nil
+}
+
 func confirmApply(apply, yes bool, stdin *os.File, stderr io.Writer) error {
 	if !apply || yes {
 		return nil
@@ -869,6 +1062,24 @@ func confirmApply(apply, yes bool, stdin *os.File, stderr io.Writer) error {
 	}
 	if response != "apply" {
 		return fmt.Errorf("apply cancelled")
+	}
+	return nil
+}
+
+func confirmPost(post, yes bool, setupID string, stdin *os.File, stderr io.Writer) error {
+	if !post || yes {
+		return nil
+	}
+	if !term.IsTerminal(int(stdin.Fd())) {
+		return fmt.Errorf("--post requires --yes when stdin is not interactive")
+	}
+	fmt.Fprintf(stderr, "Create new Forward AWS setup %q? Type 'create' to continue: ", setupID)
+	var response string
+	if _, err := fmt.Fscanln(stdin, &response); err != nil {
+		return fmt.Errorf("read create confirmation: %w", err)
+	}
+	if response != "create" {
+		return fmt.Errorf("create cancelled")
 	}
 	return nil
 }

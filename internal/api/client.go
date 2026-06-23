@@ -94,6 +94,23 @@ type PatchPayload struct {
 	AssumeRoleInfos       []AssumeRoleInfo  `json:"assumeRoleInfos"`
 }
 
+type CreateAWSPayload struct {
+	Type                          string            `json:"type"`
+	Name                          string            `json:"name"`
+	Collect                       bool              `json:"collect"`
+	Username                      string            `json:"username,omitempty"`
+	Password                      string            `json:"password,omitempty"`
+	Regions                       map[string]int64  `json:"regions"`
+	ProxyServerID                 string            `json:"proxyServerId,omitempty"`
+	RegionToProxyServerID         map[string]string `json:"regionToProxyServerId,omitempty"`
+	AssumeRoleInfos               []AssumeRoleInfo  `json:"assumeRoleInfos,omitempty"`
+	UseForwardAccountToAssumeRole *bool             `json:"useForwardAccountToAssumeRole,omitempty"`
+}
+
+type ExternalIDResponse struct {
+	ExternalID string `json:"externalId"`
+}
+
 type Webhook struct {
 	Name                 string             `json:"name"`
 	Description          string             `json:"description,omitempty"`
@@ -331,6 +348,24 @@ func (c *Client) PatchCloudAccount(ctx context.Context, networkID, setupID strin
 		return fmt.Errorf("setup ID is required")
 	}
 	return c.doJSON(ctx, http.MethodPatch, fmt.Sprintf("/networks/%s/cloudAccounts/%s", networkID, setupID), payload, nil)
+}
+
+func (c *Client) CreateCloudAccount(ctx context.Context, networkID string, payload any) error {
+	if strings.TrimSpace(networkID) == "" {
+		return fmt.Errorf("network ID is required")
+	}
+	return c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/networks/%s/cloudAccounts", networkID), payload, nil)
+}
+
+func (c *Client) AWSAssumeRoleExternalID(ctx context.Context, networkID string) (string, error) {
+	if strings.TrimSpace(networkID) == "" {
+		return "", fmt.Errorf("network ID is required")
+	}
+	var response ExternalIDResponse
+	if err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/networks/%s/cloudAccounts/aws/assumeRole/externalId", networkID), nil, &response); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(response.ExternalID), nil
 }
 
 func (c *Client) AddWebhook(ctx context.Context, webhook Webhook) error {

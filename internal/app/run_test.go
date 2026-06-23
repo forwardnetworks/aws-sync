@@ -61,6 +61,227 @@ func TestBuildPlanGroupsMultipleSetups(t *testing.T) {
 	}
 }
 
+func TestRunAWSOrganizationsWithoutForwardWritesManualAndFullPayloads(t *testing.T) {
+	dir := t.TempDir()
+	output := filepath.Join(dir, "payload.json")
+	manual := filepath.Join(dir, "fwd_accounts_data.json")
+	source := AWSOrganizationSource{
+		OrganizationID:      "o-example",
+		ManagementAccountID: "111111111111",
+		Accounts: []AWSOrganizationAccount{
+			{ID: "111111111111", Name: "management", ParentIDs: []string{"r-root"}},
+			{ID: "222222222222", Name: "app", ParentIDs: []string{"ou-root-apps"}},
+		},
+	}
+
+	summary, err := RunAWSOrganizations(context.Background(), AWSOrganizationConfig{
+		SetupIDs:      []string{"aws-prod"},
+		RoleName:      "ForwardRole",
+		ExternalID:    "Org:123",
+		Regions:       []string{"us-east-1", "us-west-2"},
+		Output:        output,
+		ManualOutput:  manual,
+		IncludeManual: true,
+	}, source)
+	if err != nil {
+		t.Fatalf("RunAWSOrganizations() error = %v", err)
+	}
+	if summary.Source != "aws_organizations" || summary.AWSOrganizationID != "o-example" {
+		t.Fatalf("unexpected summary source fields: %#v", summary)
+	}
+	if summary.Output != output || summary.ManualOutput != manual {
+		t.Fatalf("unexpected output paths: %#v", summary)
+	}
+	if summary.FetchedItemCount != 2 || summary.PlannedSetupCount != 1 {
+		t.Fatalf("unexpected summary counts: %#v", summary)
+	}
+	if !summary.CreatePayloadReady || summary.CredentialMode != CredentialModeForwardRole {
+		t.Fatalf("unexpected create payload status: %#v", summary)
+	}
+
+	var payload api.CreateAWSPayload
+	data, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	if payload.Type != "AWS" || payload.Name != "aws-prod" || !payload.Collect {
+		t.Fatalf("unexpected create payload metadata: %#v", payload)
+	}
+	if len(payload.Regions) != 2 || payload.Regions["us-east-1"] == 0 || payload.Regions["us-west-2"] == 0 {
+		t.Fatalf("unexpected create payload regions: %#v", payload.Regions)
+	}
+	if payload.UseForwardAccountToAssumeRole == nil || !*payload.UseForwardAccountToAssumeRole {
+		t.Fatalf("expected Forward assume-role credential mode: %#v", payload)
+	}
+	infos := payload.AssumeRoleInfos
+	if len(infos) != 2 {
+		t.Fatalf("expected two assume role entries, got %#v", infos)
+	}
+	if infos[1].RoleArn != "arn:aws:iam::222222222222:role/ForwardRole" || infos[1].ExternalID != "Org:123" {
+		t.Fatalf("unexpected assume role entry: %#v", infos[1])
+	}
+
+	var manualPayloads []ManualAccountData
+	data, err = os.ReadFile(manual)
+	if err != nil {
+		t.Fatalf("read manual: %v", err)
+	}
+	if err := json.Unmarshal(data, &manualPayloads); err != nil {
+		t.Fatalf("decode manual: %v", err)
+	}
+	if len(manualPayloads) != 2 {
+		t.Fatalf("unexpected manual payload: %#v", manualPayloads)
+	}
+	if manualPayloads[1].ID != "222222222222" || manualPayloads[1].Name != "app" || manualPayloads[1].RoleArn == nil || *manualPayloads[1].RoleArn != "arn:aws:iam::222222222222:role/ForwardRole" {
+		t.Fatalf("unexpected manual payload entry: %#v", manualPayloads[1])
+	}
+	if manualPayloads[1].ExternalID == nil || *manualPayloads[1].ExternalID != "Org:123" {
+		t.Fatalf("expected manual external id: %#v", manualPayloads[1])
+	}
+}
+
+func TestRunAWSOrganizationsWithForwardFetchesExternalIDAndPostsCreate(t *testing.T) {
+	var sawCloudAccounts bool
+	var sawExternalID bool
+	var posted api.CreateAWSPayload
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks":
+			_, _ = w.Write([]byte(`[{"id":"network-1","name":"prod"}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+			sawCloudAccounts = true
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts/aws/assumeRole/externalId":
+			sawExternalID = true
+			_, _ = w.Write([]byte(`{"externalId":"Org:55"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+			if err := json.NewDecoder(r.Body).Decode(&posted); err != nil {
+				t.Fatalf("decode posted payload: %v", err)
+			}
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	output := filepath.Join(t.TempDir(), "payload.json")
+	source := AWSOrganizationSource{Accounts: []AWSOrganizationAccount{{ID: "222222222222", Name: "new"}}}
+	summary, err := RunAWSOrganizations(context.Background(), AWSOrganizationConfig{
+		Host:      server.URL,
+		Username:  "user",
+		Password:  "pass",
+		NetworkID: "network-1",
+		SetupIDs:  []string{"aws-prod"},
+		RoleName:  "ForwardRole",
+		Regions:   []string{"us-east-1"},
+		Output:    output,
+		Post:      true,
+		APIPrefix: "/api",
+	}, source)
+	if err != nil {
+		t.Fatalf("RunAWSOrganizations() error = %v", err)
+	}
+	if !sawCloudAccounts || !sawExternalID {
+		t.Fatalf("expected Forward metadata requests: cloudAccounts=%t externalID=%t", sawCloudAccounts, sawExternalID)
+	}
+	if summary.PostedSetupCount != 1 || summary.PatchedSetupCount != 0 {
+		t.Fatalf("unexpected post/patch counts: %#v", summary)
+	}
+	if posted.Name != "aws-prod" || posted.AssumeRoleInfos[0].ExternalID != "Org:55" {
+		t.Fatalf("unexpected posted payload: %#v", posted)
+	}
+	if posted.UseForwardAccountToAssumeRole == nil || !*posted.UseForwardAccountToAssumeRole {
+		t.Fatalf("expected Forward assume-role mode in posted payload: %#v", posted)
+	}
+	var payload api.CreateAWSPayload
+	data, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	if payload.AssumeRoleInfos[0].RoleArn != "arn:aws:iam::222222222222:role/ForwardRole" {
+		t.Fatalf("unexpected generated role: %#v", payload.AssumeRoleInfos[0])
+	}
+}
+
+func TestRunAWSOrganizationsStaticKeysWritesPlaceholderWhenSecretMissing(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "payload.json")
+	source := AWSOrganizationSource{Accounts: []AWSOrganizationAccount{{ID: "222222222222", Name: "app"}}}
+
+	summary, err := RunAWSOrganizations(context.Background(), AWSOrganizationConfig{
+		SetupIDs:             []string{"aws-prod"},
+		RoleName:             "ForwardRole",
+		Regions:              []string{"us-east-1"},
+		CredentialMode:       CredentialModeStaticKeys,
+		CollectorAccessKeyID: "AKIAEXAMPLE",
+		Output:               output,
+	}, source)
+	if err != nil {
+		t.Fatalf("RunAWSOrganizations() error = %v", err)
+	}
+	if summary.CreatePayloadReady {
+		t.Fatalf("expected payload to require secret before POST: %#v", summary)
+	}
+
+	var payload api.CreateAWSPayload
+	data, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	if payload.Username != "AKIAEXAMPLE" || payload.Password != collectorSecretPlaceholder {
+		t.Fatalf("unexpected static key fields: %#v", payload)
+	}
+	if payload.UseForwardAccountToAssumeRole == nil || *payload.UseForwardAccountToAssumeRole {
+		t.Fatalf("expected static-key credential mode: %#v", payload)
+	}
+}
+
+func TestRunAWSOrganizationsRejectsExistingForwardSetup(t *testing.T) {
+	var posted bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks":
+			_, _ = w.Write([]byte(`[{"id":"network-1","name":"prod"}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+			_, _ = w.Write([]byte(`[{"type":"AWS","name":"aws-prod"}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+			posted = true
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	_, err := RunAWSOrganizations(context.Background(), AWSOrganizationConfig{
+		Host:      server.URL,
+		Username:  "user",
+		Password:  "pass",
+		NetworkID: "network-1",
+		SetupIDs:  []string{"aws-prod"},
+		RoleName:  "ForwardRole",
+		Regions:   []string{"us-east-1"},
+		Output:    filepath.Join(t.TempDir(), "payload.json"),
+		Post:      true,
+		APIPrefix: "/api",
+	}, AWSOrganizationSource{Accounts: []AWSOrganizationAccount{{ID: "222222222222", Name: "app"}}})
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("expected duplicate setup error, got %v", err)
+	}
+	if posted {
+		t.Fatal("expected no create call for existing setup")
+	}
+}
+
 func TestBuildPlanPreservesRegionProxyMap(t *testing.T) {
 	items := []map[string]any{{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111", "Cloud Account Name": "acct-a"}}
 	cloudAccounts := []api.CloudAccount{{
