@@ -1,6 +1,7 @@
 # AWS Account Sync Quick Start
 
 Use `awssync` to update a Forward AWS setup when AWS Organization accounts are added or removed.
+Use `awssync discover-org` only when Forward has not onboarded that AWS Organization yet and you need files for the initial setup.
 
 ## Before You Start
 
@@ -64,6 +65,39 @@ If you need a manual fallback format for UI drag-and-drop, also review `aws_sync
 - you can paste a single setup block into the Forward UI or use it as a reference before apply
 
 Stop if removed accounts are unexpected.
+
+## Discover Before Onboarding
+
+Use this path for a new Forward AWS setup. It reads AWS Organizations directly and never patches an existing Forward setup.
+
+```bash
+AWS_PROFILE=org-readonly ./bin/awssync discover-org \
+  --setup-id AWS-PROD \
+  --role-name ForwardRole \
+  --collect-region us-east-1 \
+  --collect-region us-west-2 \
+  --external-id Org:12345
+```
+
+Outputs:
+
+- `fwd_accounts_data_<timestamp>.json`: upload this in the Forward UI account import step.
+- `aws_create_payload_<timestamp>.json`: POST body for `POST /api/networks/{networkId}/cloudAccounts`.
+
+If Forward credentials are available, omit `--external-id`; the CLI fetches the Forward-generated external ID and checks that the setup name is not already used:
+
+```bash
+AWS_PROFILE=org-readonly ./bin/awssync discover-org \
+  --host "$FWD_HOST" \
+  --username "$FWD_USER" \
+  --password "$FWD_PASS" \
+  --network-id "$FWD_NETWORK_ID" \
+  --setup-id AWS-PROD \
+  --role-name ForwardRole \
+  --collect-region us-east-1
+```
+
+To create the setup from automation, add `--post --yes`. Static-key collection also needs `--credential-mode static-keys --collector-access-key-id KEY_ID` and `AWSSYNC_COLLECTOR_SECRET_ACCESS_KEY`.
 
 ## Apply
 

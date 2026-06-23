@@ -37,6 +37,12 @@ select {
   "Collected?": cloudAccount.collected
 };`
 
+const (
+	CredentialModeForwardRole  = "forward-role"
+	CredentialModeStaticKeys   = "static-keys"
+	collectorSecretPlaceholder = "REPLACE_WITH_COLLECTOR_SECRET_ACCESS_KEY"
+)
+
 type Config struct {
 	Host               string
 	Username           string
@@ -63,6 +69,17 @@ type Summary struct {
 	Host                string                          `json:"host"`
 	NetworkID           string                          `json:"network_id"`
 	SnapshotID          string                          `json:"snapshot_id,omitempty"`
+	Source              string                          `json:"source,omitempty"`
+	AWSOrganizationID   string                          `json:"aws_organization_id,omitempty"`
+	AWSManagementID     string                          `json:"aws_management_account_id,omitempty"`
+	AWSAccountCount     int                             `json:"aws_account_count,omitempty"`
+	AWSSkippedCount     int                             `json:"aws_skipped_account_count,omitempty"`
+	CredentialMode      string                          `json:"credential_mode,omitempty"`
+	Regions             []string                        `json:"regions,omitempty"`
+	CreatePayloadReady  bool                            `json:"create_payload_ready,omitempty"`
+	PostedSetupCount    int                             `json:"posted_setup_count,omitempty"`
+	CreatePayload       *api.CreateAWSPayload           `json:"create_payload,omitempty"`
+	ManualAccountData   []ManualAccountData             `json:"manual_account_data,omitempty"`
 	QueryID             string                          `json:"query_id,omitempty"`
 	QueryOverride       bool                            `json:"query_override"`
 	QuerySetupParam     string                          `json:"query_setup_param,omitempty"`
@@ -129,6 +146,51 @@ type SkipSummary struct {
 }
 
 type auditPayloads map[string]api.PatchPayload
+
+type AWSOrganizationAccount struct {
+	ID        string
+	Name      string
+	Email     string
+	State     string
+	Status    string
+	ParentIDs []string
+}
+
+type AWSOrganizationSource struct {
+	OrganizationID      string
+	ManagementAccountID string
+	Accounts            []AWSOrganizationAccount
+	SkippedAccountCount int
+}
+
+type ManualAccountData struct {
+	ID         string  `json:"id"`
+	Name       string  `json:"name"`
+	RoleArn    *string `json:"roleArn"`
+	ExternalID *string `json:"externalId"`
+	ErrorMsg   *string `json:"errorMsg"`
+}
+
+type AWSOrganizationConfig struct {
+	Host                     string
+	Username                 string
+	Password                 string
+	NetworkID                string
+	SetupIDs                 []string
+	Output                   string
+	ManualOutput             string
+	RoleName                 string
+	ExternalID               string
+	Regions                  []string
+	CredentialMode           string
+	CollectorAccessKeyID     string
+	CollectorSecretAccessKey string
+	Post                     bool
+	APIPrefix                string
+	Insecure                 bool
+	Timeout                  time.Duration
+	IncludeManual            bool
+}
 
 func Run(ctx context.Context, cfg Config) (*Summary, error) {
 	client, err := api.NewClient(cfg.Host, cfg.APIPrefix, cfg.Username, cfg.Password, cfg.Insecure, cfg.Timeout)
@@ -233,9 +295,317 @@ func Run(ctx context.Context, cfg Config) (*Summary, error) {
 	), nil
 }
 
+func RunAWSOrganizations(ctx context.Context, cfg AWSOrganizationConfig, source AWSOrganizationSource) (*Summary, error) {
+	setupIDs := cleanSetupIDs(cfg.SetupIDs)
+	if len(setupIDs) != 1 {
+		return nil, fmt.Errorf("discover-org requires exactly one --setup-id; use the NQE sync path to update existing setup IDs")
+	}
+	setupID := setupIDs[0]
+	roleName := strings.TrimSpace(cfg.RoleName)
+	if roleName == "" {
+		return nil, fmt.Errorf("--role-name is required")
+	}
+	regions := cleanStrings(cfg.Regions)
+	if len(regions) == 0 {
+		return nil, fmt.Errorf("at least one --collect-region is required for the Forward create payload")
+	}
+	credentialMode, err := normalizeCredentialMode(cfg.CredentialMode)
+	if err != nil {
+		return nil, err
+	}
+	accounts := awsOrganizationAccountRows(source.Accounts)
+	if len(accounts) == 0 {
+		return nil, fmt.Errorf("AWS Organizations discovery returned no active accounts")
+	}
+
+	networkID := strings.TrimSpace(cfg.NetworkID)
+	externalID := strings.TrimSpace(cfg.ExternalID)
+	var client *api.Client
+	if strings.TrimSpace(cfg.Host) != "" {
+		client, err = api.NewClient(cfg.Host, cfg.APIPrefix, cfg.Username, cfg.Password, cfg.Insecure, cfg.Timeout)
+		if err != nil {
+			return nil, err
+		}
+		networkID, err = ResolveNetworkID(ctx, client, networkID)
+		if err != nil {
+			return nil, err
+		}
+		cloudAccounts, err := client.CloudAccounts(ctx, networkID)
+		if err != nil {
+			return nil, err
+		}
+		if cloudAccountNameExists(cloudAccounts, setupID) {
+			return nil, fmt.Errorf("Forward cloud account setup %q already exists; use awssync NQE sync to update existing setups", setupID)
+		}
+		if externalID == "" {
+			externalID, err = client.AWSAssumeRoleExternalID(ctx, networkID)
+			if err != nil {
+				return nil, fmt.Errorf("get Forward AWS external ID: %w", err)
+			}
+			if externalID == "" {
+				return nil, fmt.Errorf("Forward did not return an AWS external ID; pass --external-id")
+			}
+		}
+	}
+
+	manualAccountData := buildManualAccountData(accounts, roleName, externalID)
+	createPayload, createPayloadReady, err := buildCreateAWSPayload(setupID, accounts, roleName, externalID, regions, credentialMode, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	outputPath := strings.TrimSpace(cfg.Output)
+	if outputPath == "" {
+		outputPath = defaultCreateOutputPath()
+	}
+	outputPath, payloadSHA256, err := writeJSONPayload(outputPath, createPayload)
+	if err != nil {
+		return nil, err
+	}
+
+	manualOutput := strings.TrimSpace(cfg.ManualOutput)
+	if manualOutput == "" && cfg.IncludeManual {
+		manualOutput = defaultManualOutputPath()
+	}
+	manualOutputPath := ""
+	manualPayloadSHA256 := ""
+	if manualOutput != "" {
+		manualOutputPath, manualPayloadSHA256, err = writeManualAccountData(manualOutput, manualAccountData)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	postedCount := 0
+	if cfg.Post {
+		if client == nil {
+			return nil, fmt.Errorf("--post requires Forward --host, --username, --password, and --network-id")
+		}
+		if !createPayloadReady {
+			return nil, fmt.Errorf("--post requires a complete create payload; provide --collector-secret-access-key or AWSSYNC_COLLECTOR_SECRET_ACCESS_KEY for static-keys mode")
+		}
+		if err := client.CreateCloudAccount(ctx, networkID, createPayload); err != nil {
+			return nil, fmt.Errorf("create Forward AWS setup %s: %w", setupID, err)
+		}
+		postedCount = 1
+	}
+
+	regionList := append([]string(nil), regions...)
+	sort.Strings(regionList)
+	accountSummaries := accountSummaries(accounts)
+	redactedPayload := redactCreatePayload(createPayload)
+	summary := &Summary{
+		Host:                cfg.Host,
+		NetworkID:           networkID,
+		Source:              "aws_organizations",
+		AWSOrganizationID:   source.OrganizationID,
+		AWSManagementID:     source.ManagementAccountID,
+		AWSAccountCount:     len(source.Accounts),
+		AWSSkippedCount:     source.SkippedAccountCount,
+		CredentialMode:      credentialMode,
+		Regions:             regionList,
+		CreatePayloadReady:  createPayloadReady,
+		PostedSetupCount:    postedCount,
+		CreatePayload:       &redactedPayload,
+		ManualAccountData:   manualAccountData,
+		SetupIDs:            setupIDs,
+		SelectedSetupIDs:    setupIDs,
+		Output:              outputPath,
+		PayloadSHA256:       payloadSHA256,
+		ManualOutput:        manualOutputPath,
+		ManualPayloadSHA256: manualPayloadSHA256,
+		Apply:               false,
+		FetchedItemCount:    len(accounts),
+		PlannedSetupCount:   1,
+		PatchedSetupCount:   0,
+		PlannedSetups: []SetupSummary{{
+			SetupID:                      setupID,
+			RoleName:                     roleName,
+			ExternalIDConfigured:         externalID != "",
+			Regions:                      regionList,
+			ConfiguredAccountCount:       0,
+			NQEAccountRowCount:           0,
+			NQECollectedRowCount:         0,
+			NQECandidateRowCount:         0,
+			NQEOrgUnitRowCount:           countAccountsWithOrgUnit(source.Accounts),
+			OrganizationDiscoverySignal:  "aws_organizations_api",
+			OrganizationDiscoveryMessage: "AWS Organizations DescribeOrganization, ListAccounts, and ListParents succeeded; account data came directly from AWS Organizations",
+			PlannedPayloadAccountCount:   len(createPayload.AssumeRoleInfos),
+			AddedAccounts:                accountSummaries,
+			UnchangedAccountCount:        0,
+			Patched:                      false,
+		}},
+	}
+	summary.Source = "aws_organizations"
+	summary.AWSOrganizationID = source.OrganizationID
+	summary.AWSManagementID = source.ManagementAccountID
+	summary.AWSAccountCount = len(source.Accounts)
+	summary.AWSSkippedCount = source.SkippedAccountCount
+	return summary, nil
+}
+
+func normalizeCredentialMode(mode string) (string, error) {
+	mode = strings.TrimSpace(strings.ToLower(mode))
+	if mode == "" {
+		return CredentialModeForwardRole, nil
+	}
+	switch mode {
+	case CredentialModeForwardRole, CredentialModeStaticKeys:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("invalid credential mode %q; expected %q or %q", mode, CredentialModeForwardRole, CredentialModeStaticKeys)
+	}
+}
+
+func cloudAccountNameExists(cloudAccounts []api.CloudAccount, setupID string) bool {
+	setupID = strings.TrimSpace(setupID)
+	for _, account := range cloudAccounts {
+		if strings.TrimSpace(account.Name) == setupID {
+			return true
+		}
+	}
+	return false
+}
+
+func awsOrganizationAccountRows(accounts []AWSOrganizationAccount) []accountRow {
+	rows := make([]accountRow, 0, len(accounts))
+	for _, account := range accounts {
+		accountID := strings.TrimSpace(account.ID)
+		if accountID == "" {
+			continue
+		}
+		accountName := strings.TrimSpace(account.Name)
+		if accountName == "" {
+			accountName = accountID
+		}
+		rows = append(rows, accountRow{AccountID: accountID, AccountName: accountName})
+	}
+	rows = dedupeAccounts(rows)
+	sort.Slice(rows, func(i, j int) bool {
+		return rows[i].AccountID < rows[j].AccountID
+	})
+	return rows
+}
+
+func buildManualAccountData(accounts []accountRow, roleName, externalID string) []ManualAccountData {
+	result := make([]ManualAccountData, 0, len(accounts))
+	for _, account := range accounts {
+		roleArn := fmt.Sprintf("arn:aws:iam::%s:role/%s", account.AccountID, roleName)
+		entry := ManualAccountData{
+			ID:      account.AccountID,
+			Name:    account.AccountName,
+			RoleArn: &roleArn,
+		}
+		if externalID != "" {
+			entry.ExternalID = &externalID
+		}
+		result = append(result, entry)
+	}
+	return result
+}
+
+func buildCreateAWSPayload(
+	setupID string,
+	accounts []accountRow,
+	roleName string,
+	externalID string,
+	regions []string,
+	credentialMode string,
+	cfg AWSOrganizationConfig,
+) (api.CreateAWSPayload, bool, error) {
+	payload := api.CreateAWSPayload{
+		Type:            "AWS",
+		Name:            setupID,
+		Collect:         true,
+		Regions:         selectedRegionMap(regions),
+		AssumeRoleInfos: buildAssumeRoleInfos(accounts, roleName, externalID),
+	}
+	ready := true
+	switch credentialMode {
+	case CredentialModeForwardRole:
+		useForwardAccount := true
+		payload.UseForwardAccountToAssumeRole = &useForwardAccount
+	case CredentialModeStaticKeys:
+		useForwardAccount := false
+		payload.UseForwardAccountToAssumeRole = &useForwardAccount
+		payload.Username = strings.TrimSpace(cfg.CollectorAccessKeyID)
+		if payload.Username == "" {
+			return payload, false, fmt.Errorf("--collector-access-key-id is required with --credential-mode static-keys")
+		}
+		payload.Password = cfg.CollectorSecretAccessKey
+		if strings.TrimSpace(payload.Password) == "" {
+			payload.Password = collectorSecretPlaceholder
+			ready = false
+		}
+	default:
+		return payload, false, fmt.Errorf("invalid credential mode %q", credentialMode)
+	}
+	return payload, ready, nil
+}
+
+func selectedRegionMap(regions []string) map[string]int64 {
+	result := make(map[string]int64, len(regions))
+	currentEpochMs := time.Now().UnixMilli()
+	for _, region := range regions {
+		region = strings.TrimSpace(region)
+		if region == "" {
+			continue
+		}
+		result[region] = currentEpochMs
+	}
+	return result
+}
+
+func countAccountsWithOrgUnit(accounts []AWSOrganizationAccount) int {
+	count := 0
+	for _, account := range accounts {
+		for _, parentID := range account.ParentIDs {
+			if strings.HasPrefix(strings.TrimSpace(parentID), "ou-") {
+				count++
+				break
+			}
+		}
+	}
+	return count
+}
+
+func redactCreatePayload(payload api.CreateAWSPayload) api.CreateAWSPayload {
+	if payload.Password != "" {
+		payload.Password = "<redacted>"
+	}
+	return payload
+}
+
+func cleanStrings(values []string) []string {
+	seen := make(map[string]bool)
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" || seen[part] {
+				continue
+			}
+			seen[part] = true
+			result = append(result, part)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
 func defaultOutputPath() string {
 	timestamp := time.Now().UTC().Format("20060102-150405")
 	return "aws_sync_payload_" + timestamp + ".json"
+}
+
+func defaultCreateOutputPath() string {
+	timestamp := time.Now().UTC().Format("20060102-150405")
+	return "aws_create_payload_" + timestamp + ".json"
+}
+
+func defaultManualOutputPath() string {
+	timestamp := time.Now().UTC().Format("20060102-150405")
+	return "fwd_accounts_data_" + timestamp + ".json"
 }
 
 func validateSnapshotFreshness(ctx context.Context, client *api.Client, cfg Config) error {
@@ -481,7 +851,16 @@ func (p *patchPlan) HasRemovals() bool {
 	return false
 }
 
-func buildPlan(items []map[string]any, cloudAccounts []api.CloudAccount, _ string, requestedSetupIDs []string) (*patchPlan, error) {
+type buildPlanOptions struct {
+	RoleNameBySetup   map[string]string
+	ExternalIDBySetup map[string]string
+}
+
+func buildPlan(items []map[string]any, cloudAccounts []api.CloudAccount, queryID string, requestedSetupIDs []string) (*patchPlan, error) {
+	return buildPlanWithOptions(items, cloudAccounts, queryID, requestedSetupIDs, buildPlanOptions{})
+}
+
+func buildPlanWithOptions(items []map[string]any, cloudAccounts []api.CloudAccount, _ string, requestedSetupIDs []string, opts buildPlanOptions) (*patchPlan, error) {
 	cloudMetaMap := cloudAccountMetaMap(cloudAccounts, requestedSetupIDs)
 	if len(cloudMetaMap) == 0 {
 		return nil, fmt.Errorf("no cloud account metadata available in Forward")
@@ -514,11 +893,17 @@ func buildPlan(items []map[string]any, cloudAccounts []api.CloudAccount, _ strin
 			continue
 		}
 		roleName := extractRoleName(meta.AssumeRoleInfos)
+		if override := strings.TrimSpace(opts.RoleNameBySetup[setupID]); override != "" {
+			roleName = override
+		}
 		if roleName == "" {
 			plan.Skips = append(plan.Skips, SkipSummary{SetupID: setupID, Reason: "unable to determine role ARN name from assumeRoleInfos"})
 			continue
 		}
 		externalID := extractExternalID(meta.AssumeRoleInfos)
+		if override, ok := opts.ExternalIDBySetup[setupID]; ok {
+			externalID = strings.TrimSpace(override)
+		}
 		orgID := parseOrgID(externalID)
 		nextAccounts := groupedAccounts[setupID]
 		current := currentAccounts(meta.AssumeRoleInfos)
@@ -983,6 +1368,50 @@ func writeAuditPayloads(path string, payloads auditPayloads) (string, error) {
 		return "", fmt.Errorf("write audit payloads: %w", err)
 	}
 	return fmt.Sprintf("%x", sha256.Sum256(data)), nil
+}
+
+func writeJSONPayload(path string, payload any) (string, string, error) {
+	outputPath := strings.TrimSpace(path)
+	if outputPath == "" {
+		return "", "", nil
+	}
+	outputPath, err := filepath.Abs(outputPath)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve output path: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return "", "", fmt.Errorf("create output directory: %w", err)
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "", "", fmt.Errorf("encode output payload: %w", err)
+	}
+	if err := os.WriteFile(outputPath, data, 0o644); err != nil {
+		return "", "", fmt.Errorf("write output payload: %w", err)
+	}
+	return outputPath, fmt.Sprintf("%x", sha256.Sum256(data)), nil
+}
+
+func writeManualAccountData(path string, accounts []ManualAccountData) (string, string, error) {
+	outputPath := strings.TrimSpace(path)
+	if outputPath == "" {
+		return "", "", nil
+	}
+	outputPath, err := filepath.Abs(outputPath)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve manual output path: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return "", "", fmt.Errorf("create manual output directory: %w", err)
+	}
+	data, err := json.MarshalIndent(accounts, "", "  ")
+	if err != nil {
+		return "", "", fmt.Errorf("encode manual account data: %w", err)
+	}
+	if err := os.WriteFile(outputPath, data, 0o644); err != nil {
+		return "", "", fmt.Errorf("write manual account data: %w", err)
+	}
+	return outputPath, fmt.Sprintf("%x", sha256.Sum256(data)), nil
 }
 
 func writeManualPayloads(path string, payloads map[string][]api.AssumeRoleInfo) (string, string, error) {

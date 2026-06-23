@@ -2,12 +2,15 @@
 
 ### Highlights
 
-- Added `--manual-output` to generate setup-keyed manual drag-and-drop payloads for Forward UI workflows.
-- Exposed manual payload metadata in JSON summary:
-  - `manual_output`
-  - `manual_payload_sha256`
-  - `manual_payloads`
-- Improved multi-setup AWS Organization safety checks for removals.
+- Added `discover-org` for initial AWS Organizations onboarding before Forward has collected the org.
+- Writes both onboarding artifacts:
+  - `fwd_accounts_data_<timestamp>.json` for Forward UI drag-and-drop import.
+  - `aws_create_payload_<timestamp>.json` for `POST /api/networks/{networkId}/cloudAccounts`.
+- Added AWS Organizations access checks using `DescribeOrganization`, `ListAccounts`, and `ListParents`.
+- Added optional `discover-org --post --yes` to create a new Forward AWS setup from automation.
+- Kept onboarding separate from existing setup sync: `discover-org` does not PATCH existing setups.
+- Added static-key onboarding support with explicit collector credential flags and placeholder protection when the secret is not supplied.
+- Updated docs and Mermaid architecture diagrams for NQE sync, direct Organizations onboarding, and webhook operation.
 
 ### Download and verify
 
@@ -21,7 +24,7 @@ Assets include platform binaries, tarballs, checksums, and release attestations:
 - `awssync-linux-arm64.tar.gz`
 - `awssync-darwin-amd64.tar.gz`
 - `awssync-darwin-arm64.tar.gz`
-- `awssync-checksums.txt`
+- `sha256sums.txt`
 
 ### Quick usage
 
@@ -34,4 +37,11 @@ Assets include platform binaries, tarballs, checksums, and release attestations:
 
 # Apply an exact reviewed payload file
 ./awssync apply-plan --plan aws_sync_payload.json --yes
+
+# Discover a not-yet-onboarded AWS Organization
+AWS_PROFILE=org-readonly ./awssync discover-org \
+  --setup-id AWS-PROD \
+  --role-name ForwardRole \
+  --collect-region us-east-1 \
+  --external-id Org:12345
 ```

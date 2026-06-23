@@ -13,9 +13,14 @@ For many AWS accounts in the same AWS Organization, there are two separate requi
 1. Forward must be able to discover the AWS account inventory from AWS Organizations.
 2. Forward must be able to assume a collection role in every account that should be collected.
 
-`awssync` automates the Forward-side account list update. It does not create IAM roles in AWS and does not grant Forward access to new accounts by itself. New accounts become collectable only after the expected IAM role exists in those accounts and trusts Forward.
+`awssync` automates the Forward-side account list update for existing setups. It also has a separate `discover-org` onboarding mode for new setups that Forward has not collected yet. Neither mode creates IAM roles in AWS or grants Forward access to new accounts by itself. New accounts become collectable only after the expected IAM role exists in those accounts and trusts Forward.
 
 This workflow supports both Forward IAM role and IAM user/access-key multi-account setups. In both modes, the existing Forward setup must have `assumeRoleInfos` entries with role ARNs so `awssync` can derive the role name and generate role ARNs for newly discovered accounts.
+
+Important separation:
+
+- Use the default NQE sync path for an existing Forward AWS setup. That path uses Forward's collected data and can PATCH the setup after review.
+- Use `discover-org` only for initial onboarding. It calls AWS Organizations directly, writes files, and can POST a new Forward setup, but it does not PATCH an existing setup.
 
 ## AWS Terms
 
@@ -131,6 +136,85 @@ export FWD_NETWORK_ID=NETWORK_ID
 Use the Forward base URL for `FWD_HOST`; it can be SaaS or an on-prem Forward instance.
 
 `FWD_NETWORK_ID` is optional when the Forward user can see exactly one network. In an interactive terminal, the CLI can show a numbered picker when multiple networks are visible and accepts either the menu number or the network ID. Automation should set `FWD_NETWORK_ID` or pass `--network-id` explicitly.
+
+## Onboard From AWS Organizations Directly
+
+Use this section when Forward has not collected the AWS Organization yet. The goal is to create onboarding files from AWS Organizations, not to update an existing Forward setup.
+
+`discover-org` uses AWS credentials only for discovery. It uses the AWS SDK default credential chain, or the profile named by `--aws-profile`, and checks:
+
+- `organizations:DescribeOrganization`
+- `organizations:ListAccounts`
+- `organizations:ListParents`
+
+If any of those calls returns access denied, fix AWS Organizations access before continuing. The account list would otherwise be incomplete.
+
+Generate the Forward UI upload file and create-setup POST body:
+
+```bash
+AWS_PROFILE=org-readonly ./bin/awssync discover-org \
+  --setup-id AWS-PROD \
+  --role-name ForwardRole \
+  --collect-region us-east-1 \
+  --collect-region us-west-2 \
+  --external-id Org:12345
+```
+
+Outputs:
+
+- `fwd_accounts_data_<timestamp>.json`: flat account array for Forward's manual AWS account import step.
+- `aws_create_payload_<timestamp>.json`: body for `POST /api/networks/{networkId}/cloudAccounts`.
+
+If Forward credentials are supplied, `discover-org` also resolves the network, verifies that the setup name does not already exist, and fetches the Forward-generated AWS external ID:
+
+```bash
+AWS_PROFILE=org-readonly ./bin/awssync discover-org \
+  --host "$FWD_HOST" \
+  --username "$FWD_USER" \
+  --password "$FWD_PASS" \
+  --network-id "$FWD_NETWORK_ID" \
+  --setup-id AWS-PROD \
+  --role-name ForwardRole \
+  --collect-region us-east-1
+```
+
+To create the new setup through the Forward API after writing both JSON files:
+
+```bash
+AWS_PROFILE=org-readonly ./bin/awssync discover-org \
+  --host "$FWD_HOST" \
+  --username "$FWD_USER" \
+  --password "$FWD_PASS" \
+  --network-id "$FWD_NETWORK_ID" \
+  --setup-id AWS-PROD \
+  --role-name ForwardRole \
+  --collect-region us-east-1 \
+  --post \
+  --yes
+```
+
+For static IAM key collection, do not assume the AWS discovery credentials are the collector credentials. Provide the collector key explicitly:
+
+```bash
+export AWSSYNC_COLLECTOR_SECRET_ACCESS_KEY='collector-secret'
+
+AWS_PROFILE=org-readonly ./bin/awssync discover-org \
+  --host "$FWD_HOST" \
+  --username "$FWD_USER" \
+  --password "$FWD_PASS" \
+  --network-id "$FWD_NETWORK_ID" \
+  --setup-id AWS-PROD \
+  --role-name ForwardRole \
+  --collect-region us-east-1 \
+  --credential-mode static-keys \
+  --collector-access-key-id AKIA... \
+  --post \
+  --yes
+```
+
+If `--credential-mode static-keys` is used without `AWSSYNC_COLLECTOR_SECRET_ACCESS_KEY` or `--collector-secret-access-key`, the create payload is still written, but it contains a placeholder password and `create_payload_ready` is `false`. That file is useful for review but should not be POSTed until the secret is supplied.
+
+Do not use `discover-org` for a setup that already exists. Use the NQE sync path below so Forward's collected data, regions, proxy settings, and stored credentials remain the source of truth.
 
 ## Run a Dry Plan
 
@@ -374,6 +458,26 @@ Likely causes:
 - AWS Organizations permissions are missing.
 
 Fix: verify the discovery account setup, run a new snapshot, and rerun the dry plan.
+
+### discover-org AWS Organizations Access Denied
+
+Likely causes:
+
+- The selected AWS profile or environment credentials are from a member account without Organizations read access.
+- The credentials are not from the management account or an Organizations delegated administrator.
+- IAM policy is missing `organizations:DescribeOrganization`, `organizations:ListAccounts`, or `organizations:ListParents`.
+- AWS Organizations is not enabled for that account set.
+
+Fix: switch to credentials that can read AWS Organizations, or grant those read-only Organizations permissions. `discover-org` stops on these errors because a partial account list would create an unsafe onboarding payload.
+
+### discover-org Setup Already Exists
+
+Likely causes:
+
+- The `--setup-id` name is already used by a Forward cloud account setup.
+- You are trying to use onboarding mode for an existing setup.
+
+Fix: use the NQE sync path for existing setups. `discover-org` intentionally does not PATCH existing setups.
 
 ### No Candidate Accounts Visible
 

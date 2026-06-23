@@ -1,6 +1,6 @@
 # AWS Account Sync — End-to-End Flow
 
-This document shows how `awssync` runs end to end in both operational modes,
+This document shows how `awssync` runs end to end in its operational modes,
 the connection types and direction between each component, and the permissions
 required at each layer. It is intended for architecture review and approval
 workflows.
@@ -9,9 +9,9 @@ GitHub renders the Mermaid diagrams below automatically.
 
 ---
 
-## Mode 1 — Batch / manual
+## Mode 1 — Existing Setup Sync
 
-Operator or scheduler invokes `awssync` directly.
+Operator or scheduler invokes `awssync` directly to update one or more existing Forward AWS setups from Forward NQE data.
 
 ```mermaid
 flowchart TB
@@ -63,7 +63,55 @@ flowchart TB
 
 ---
 
-## Mode 2 — Webhook daemon
+## Mode 2 — Initial AWS Organizations Onboarding
+
+`awssync discover-org` is for a new Forward AWS setup. It calls AWS Organizations directly, writes the Forward UI upload JSON, writes the Forward create-setup POST body, and can optionally POST that new setup to Forward. It does not PATCH existing setups.
+
+```mermaid
+flowchart TB
+    subgraph operator["Operator / automation"]
+        cli["awssync discover-org\nAWS SDK default chain or --aws-profile"]
+        ui_file["fwd_accounts_data_TIMESTAMP.json\nForward UI drag-and-drop file"]
+        post_file["aws_create_payload_TIMESTAMP.json\nPOST /cloudAccounts body"]
+    end
+
+    subgraph aws["AWS Organizations"]
+        describe["DescribeOrganization"]
+        list_accounts["ListAccounts"]
+        list_parents["ListParents\nOU/root parent evidence"]
+    end
+
+    subgraph fwd_create["Forward platform  (optional HTTPS · Basic Auth)"]
+        networks["GET /networks\nresolve network"]
+        existing["GET /cloudAccounts\nreject duplicate setup name"]
+        external["GET /cloudAccounts/aws/assumeRole/externalId"]
+        create["POST /cloudAccounts\ncreate new AWS setup"]
+    end
+
+    cli --> describe
+    cli --> list_accounts
+    cli --> list_parents
+    cli --> ui_file
+    cli --> post_file
+    cli -. "when Forward credentials supplied" .-> networks
+    cli -. "when Forward credentials supplied" .-> existing
+    cli -. "when external ID omitted" .-> external
+    post_file -. "--post --yes" .-> create
+
+    classDef neutral fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A;
+    classDef fwdnode fill:#E6F1FB,stroke:#185FA5,color:#042C53;
+    classDef awsnode fill:#E1F5EE,stroke:#0F6E56,color:#04342C;
+    classDef artifact fill:#FAEEDA,stroke:#854F0B,color:#412402;
+
+    class cli neutral;
+    class describe,list_accounts,list_parents awsnode;
+    class networks,existing,external,create fwdnode;
+    class ui_file,post_file artifact;
+```
+
+---
+
+## Mode 3 — Webhook Daemon
 
 `awssync serve-webhook` runs as a long-lived HTTP server. Forward calls it on
 each `SNAPSHOT_READY` event. Traffic direction is **inbound to awssync**.
@@ -104,10 +152,11 @@ flowchart TB
 
 ---
 
-## AWS credential modes (Forward → AWS)
+## AWS Credential Modes
 
-`awssync` holds no AWS credentials. The following two modes describe how
-**Forward** connects to AWS. Both end in `sts:AssumeRole` per member account.
+For existing setup sync and webhook sync, `awssync` does not connect to AWS. The following two modes describe how **Forward** connects to AWS. Both end in `sts:AssumeRole` per member account.
+
+For `discover-org`, `awssync` also uses AWS credentials locally to read AWS Organizations. Those discovery credentials are not written to Forward. Static-key Forward collection requires separate collector key material if the create payload will be posted.
 
 ```mermaid
 flowchart LR
@@ -146,8 +195,18 @@ flowchart LR
 | `GET /networks` | Resolve network ID | read networks |
 | `GET /cloudAccounts` | Read setup metadata | read cloud accounts |
 | `PATCH /cloudAccounts/{id}` | Write account list | write cloud accounts |
+| `GET /cloudAccounts/aws/assumeRole/externalId` | Fetch Forward-generated AWS external ID for onboarding | read cloud account setup metadata |
+| `POST /cloudAccounts` | Create a new AWS setup from `discover-org --post` | write cloud accounts |
 | `GET /snapshots/latestProcessed` | Check snapshot age | read snapshots |
 | `POST /webhooks` | Register webhook | manage webhooks |
+
+### awssync → AWS Organizations (`discover-org` only)
+
+| API call | Purpose |
+| --- | --- |
+| `organizations:DescribeOrganization` | Verify the credentials can see an AWS Organization and get the management account ID |
+| `organizations:ListAccounts` | Build the account list for the Forward setup |
+| `organizations:ListParents` | Record parent/root or OU evidence per account |
 
 ### Forward → AWS (both credential modes)
 
@@ -171,9 +230,11 @@ flowchart LR
 
 ## Key security properties
 
-- `awssync` **never connects to AWS** and holds no AWS credentials.
-- `awssync` only reads from and writes to the Forward platform API.
+- Existing setup sync and webhook sync do not connect to AWS; they use Forward NQE data.
+- `discover-org` connects to AWS Organizations only for initial onboarding. It does not write the discovery credentials to Forward.
 - The payload JSON is **always written to disk before any PATCH** — changes can be reviewed before or instead of applying.
+- `discover-org` writes both onboarding JSON files before any optional `POST /cloudAccounts`.
+- Static-key collector secrets are only included in the create payload when explicitly supplied. Without the secret, the file contains a placeholder and is marked not POST-ready.
 - Removals require explicit `--allow-removals` flag; `awssync` will not silently
   remove accounts from a Forward setup.
 - Webhook receiver is protected by HTTP Basic Auth with a shared secret

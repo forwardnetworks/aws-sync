@@ -1,7 +1,7 @@
 # aws-sync
 
-`awssync` discovers AWS accounts through Forward NQE, builds one PATCH payload per AWS cloud setup, writes those payloads to disk, and can optionally PATCH them back into Forward.
-It can also emit a manual drag-and-drop payload that contains just account rows for applying updates through the Forward UI.
+`awssync` discovers AWS accounts through Forward NQE, builds one PATCH payload per existing AWS cloud setup, writes those payloads to disk, and can optionally PATCH them back into Forward.
+It also has a `discover-org` onboarding mode that reads AWS Organizations directly, writes the Forward UI `fwd_accounts_data` upload JSON, and writes the Forward create-setup POST JSON for new AWS setups.
 
 The repository is structured like `awsfilter`: Cobra/Viper CLI entrypoint, raw API client package, and isolated run/planning logic with tests.
 
@@ -14,6 +14,11 @@ The repository is structured like `awsfilter`: Cobra/Viper CLI entrypoint, raw A
 5. Writes the full PATCH payload map to JSON.
 6. Optionally writes setup-keyed manual JSON for UI drag-and-drop workflows.
 7. Optionally calls `PATCH /api/networks/{networkId}/cloudAccounts/{setupId}` for each planned setup.
+
+`discover-org` is separate. It is for a new Forward AWS setup that is not onboarded yet, and it does not PATCH existing setups. It uses the AWS SDK default credential chain or `--aws-profile` to call `organizations:DescribeOrganization`, `organizations:ListAccounts`, and `organizations:ListParents`, then writes:
+
+- `fwd_accounts_data_<timestamp>.json`: flat account array for the Forward UI drag-and-drop flow.
+- `aws_create_payload_<timestamp>.json`: body for `POST /api/networks/{networkId}/cloudAccounts`.
 
 The Forward collection IAM role name must be the same in every AWS account that should be collected. `awssync` uses the role name from the existing Forward AWS setup as the template for generated role ARNs.
 
@@ -74,6 +79,32 @@ Use `--manual-output` if you also want UI-friendly drag-and-drop JSON:
 ./bin/awssync \
   --manual-output aws_sync_manual_payload.json
 ```
+
+Discover an AWS Organization before Forward has collected it:
+
+```bash
+AWS_PROFILE=org-readonly ./bin/awssync discover-org \
+  --setup-id AWS-PROD \
+  --role-name ForwardRole \
+  --collect-region us-east-1 \
+  --collect-region us-west-2 \
+  --external-id Org:12345
+```
+
+If Forward credentials are supplied, `discover-org` can fetch the Forward-generated AWS external ID and validate that the setup name does not already exist:
+
+```bash
+AWS_PROFILE=org-readonly ./bin/awssync discover-org \
+  --host "$FWD_HOST" \
+  --username "$FWD_USER" \
+  --password "$FWD_PASS" \
+  --network-id "$FWD_NETWORK_ID" \
+  --setup-id AWS-PROD \
+  --role-name ForwardRole \
+  --collect-region us-east-1
+```
+
+To create the new Forward setup through the API after writing both JSON files, add `--post --yes`. For static IAM key collection, use `--credential-mode static-keys --collector-access-key-id KEY_ID` and provide the secret through `AWSSYNC_COLLECTOR_SECRET_ACCESS_KEY`; otherwise the create payload contains a placeholder and is not POST-ready.
 
 Apply the generated payloads back into Forward:
 
@@ -201,6 +232,7 @@ Example output:
     }
   ]
 }
+```
 
 Manual payload example:
 
@@ -217,6 +249,19 @@ Manual payload example:
   ]
 }
 ```
+
+`discover-org` manual upload example:
+
+```json
+[
+  {
+    "id": "111111111111",
+    "name": "acct-a",
+    "roleArn": "arn:aws:iam::111111111111:role/ForwardRole",
+    "externalId": "Org:12345",
+    "errorMsg": null
+  }
+]
 ```
 
 
