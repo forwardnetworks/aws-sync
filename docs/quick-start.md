@@ -11,6 +11,10 @@ For new AWS Organizations onboarding, prefer the Forward Terraform provider as t
 - Forward IAM role and IAM user/access-key multi-account setups are supported.
 - Run a dry plan first. Do not apply removals until the account list is reviewed.
 
+Grant AWS Organizations read permissions only to the management or delegated discovery account used for inventory. Do not grant organization-wide permissions to every member role. Member accounts need the Forward collection policy and trust policy for `sts:AssumeRole`.
+
+A cloud setup or snapshot can succeed while individual member accounts fail collection. Inspect per-account logs for role assumption, trust-policy, external-ID, or collection-permission errors.
+
 ## Set Forward Login
 
 ```bash
@@ -128,15 +132,54 @@ If removals are expected and there is no candidate signal and no OU signal for a
 
 ## Multiple AWS Setups
 
-To sync one setup:
+Preflight two selected setups:
 
 ```bash
-./bin/awssync --setup-id AWS_SETUP_ID --max-snapshot-age 24h
+./bin/awssync preflight \
+  --setup-id AWS-PROD \
+  --setup-id AWS-SANDBOX \
+  --max-snapshot-age 24h \
+  --format human
 ```
 
-Repeat `--setup-id` for multiple setups.
+Create a dry plan for the same setups:
+
+```bash
+./bin/awssync \
+  --setup-id AWS-PROD \
+  --setup-id AWS-SANDBOX \
+  --max-snapshot-age 24h \
+  --output aws_sync_payload.json
+```
+
+Recompute and apply after reviewing the expected changes:
+
+```bash
+./bin/awssync \
+  --setup-id AWS-PROD \
+  --setup-id AWS-SANDBOX \
+  --max-snapshot-age 24h \
+  --output aws_sync_payload.json \
+  --apply \
+  --yes
+```
+
+For one setup, pass a single `--setup-id AWS_SETUP_ID`. Repeat `--setup-id` for other setup combinations. Add `--allow-removals` only after reviewing and confirming every proposed removal.
 
 When exactly one setup is selected, the default inline NQE query is parameterized by that setup ID to reduce returned rows. Multiple setup IDs are still separated by `Cloud Setup ID` in the NQE result.
+
+For automation, run without `--allow-removals` so normal additions can proceed when no removals are planned. A removal plan stops the run and should be applied only after an operator confirms the account lifecycle in AWS.
+
+## Troubleshoot Account State
+
+Use AWS Organizations visibility together with the member account's `sts:AssumeRole` result:
+
+| Visible in AWS Organizations | `sts:AssumeRole` | Action |
+| --- | --- | --- |
+| Yes | Succeeds | Keep the account configured. |
+| Yes | Fails | Repair the member collection role, trust policy, external ID, or permissions. Do not remove the account. |
+| No | Succeeds | Verify discovery scope and Organization membership. Do not remove based only on discovery. |
+| No | Fails | Confirm whether the account was closed, removed, or moved. Remove only after independent confirmation; otherwise repair discovery or IAM. |
 
 ## Webhook Option
 

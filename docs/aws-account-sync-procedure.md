@@ -39,6 +39,8 @@ One AWS account must be available for Forward to use as the Organizations discov
 
 That discovery account must allow Forward to call AWS Organizations read APIs, including account-listing APIs such as `organizations:ListAccounts`. Forward uses that visibility to learn which AWS accounts exist.
 
+Keep Organizations discovery permissions separate from member-account collection permissions. Grant organization-wide read APIs only to the management or delegated discovery account used for inventory. Do not grant AWS Organizations permissions to every member-account role. Member accounts instead need the consistent Forward collection role, its collection policy, and a trust policy that allows the configured Forward principal to call `sts:AssumeRole`.
+
 Each collectable member account must also have a Forward collection role. The role name must be consistent across accounts because `awssync` builds role ARNs by taking the existing Forward setup role name and applying it to each discovered account ID. This same-role-name requirement applies to both Forward IAM role and IAM user/access-key multi-account setups.
 
 Example:
@@ -55,6 +57,8 @@ arn:aws:iam::222222222222:role/ForwardRole
 ```
 
 If the role is missing in account `222222222222`, Forward can add the account to the setup, but collection for that account will fail until AWS IAM is fixed.
+
+A Forward cloud setup or snapshot can complete successfully even when collection fails for individual member accounts. Treat setup-level success as confirmation that the overall collection ran, not that every account was collected. Inspect the per-account collection logs for `sts:AssumeRole`, trust-policy, external-ID, and permission errors.
 
 ## Preflight Checklist
 
@@ -279,6 +283,27 @@ If the network has multiple Forward AWS setups and only some should be synchroni
 
 Repeat `--setup-id` to target more than one setup.
 
+For example, preflight both selected setups before planning them:
+
+```bash
+./bin/awssync preflight \
+  --setup-id AWS-PROD \
+  --setup-id AWS-SANDBOX \
+  --max-snapshot-age 24h \
+  --format human
+```
+
+Create a dry plan for the same setup pair:
+
+```bash
+./bin/awssync \
+  --setup-id AWS-PROD \
+  --setup-id AWS-SANDBOX \
+  --max-snapshot-age 24h \
+  --output aws_sync_payload.json \
+  --manual-output aws_sync_manual_payload.json
+```
+
 If the network has multiple AWS setups:
 - interactive terminal: a setup picker is shown and accepts setup numbers or case-insensitive setup IDs.
 - non-interactive: pass `--setup-id` values explicitly, or the run exits with a setup selection error.
@@ -380,6 +405,20 @@ To apply the exact reviewed payload file later without recomputing the plan:
   --yes
 ```
 
+To recompute and apply for two selected setups after reviewing the expected changes:
+
+```bash
+./bin/awssync \
+  --setup-id AWS-PROD \
+  --setup-id AWS-SANDBOX \
+  --max-snapshot-age 24h \
+  --output aws_sync_payload.json \
+  --apply \
+  --yes
+```
+
+Add `--allow-removals` only when the reviewed plan contains expected removals.
+
 ## Validate After Apply
 
 After applying:
@@ -405,6 +444,8 @@ If a new account appears in the Forward setup but fails collection, the most lik
 ## Ongoing Automation
 
 Run `awssync` on a schedule or after AWS account lifecycle events.
+
+The recommended automation policy is to allow routine additions while keeping removals review-gated. Run scheduled automation without `--allow-removals`; a plan containing removals will stop before changing Forward. After an operator verifies the account lifecycle in AWS and reviews `removed_accounts`, apply the reviewed plan with explicit removal approval.
 
 Recommended sequence:
 
@@ -562,6 +603,17 @@ Likely causes:
 - The role policy lacks required read permissions.
 
 Fix: repair IAM in the AWS account, then rerun collection. The account list may already be correct in Forward.
+
+### Organizations Visibility and AssumeRole Decision Table
+
+Use both AWS Organizations inventory and the per-account `sts:AssumeRole` result before deciding whether to repair IAM or remove an account.
+
+| Visible in AWS Organizations | `sts:AssumeRole` | Interpretation | Recommended action |
+| --- | --- | --- | --- |
+| Yes | Succeeds | Account discovery and collection access are healthy. | Keep the account configured. |
+| Yes | Fails | The account is active and discoverable, but its collection role, trust policy, external ID, or permissions are incorrect. | Repair IAM in the member account; do not remove it from Forward. |
+| No | Succeeds | Forward can still reach the configured role, but the discovery account does not report the account. Organization membership or discovery scope may have changed. | Verify the management or delegated discovery account and the account's Organization membership; do not remove it based only on discovery. |
+| No | Fails | The account may be closed, removed, or moved, or its IAM configuration may also be broken. | Confirm the account lifecycle independently in AWS. Remove it only after that confirmation; otherwise repair discovery or IAM. |
 
 ## Summary
 
