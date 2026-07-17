@@ -30,7 +30,7 @@ Important separation:
 - **Member account**: Any AWS account that belongs to the Organization.
 - **IAM role**: An AWS identity with permissions. In multi-account AWS setups, Forward assumes this role in each collected account.
 - **IAM user/access key**: A stored AWS credential that Forward can use to assume the per-account roles in a multi-account setup.
-- **External ID**: An optional safety value used in the IAM trust policy when Forward assumes a role. IAM user/access-key setups commonly do not use a Forward external ID.
+- **External ID**: An optional safety value used in the IAM trust policy when Forward assumes a role. An IAM user/access-key setup can use either no External ID or a customer-defined value, as long as Forward and the target role trust policy use the same value.
 - **Forward AWS setup**: The cloud account setup configured in Forward for AWS collection.
 
 ## Required AWS Model
@@ -335,7 +335,7 @@ Review the JSON summary printed by the command:
 - `candidate_check`: whether uncollected candidate accounts were visible in the snapshot. If none are visible, verify the management or delegated discovery account before applying removals.
 - `organization_discovery_signal`: whether an Organization-level signal was visible for the setup (`visible_candidates`, `visible_ou_ids`, `visible_candidates_and_ou_ids`, or `no_org_signal`).
 - `role_name`: IAM role name that will be used in each generated role ARN.
-- `external_id_configured`: whether an external ID from the existing setup will be preserved. This can be `false` for IAM user/access-key setups.
+- `external_id_configured`: whether the normal sync payload preserves an External ID from the existing setup.
 - `payload_sha256`: fingerprint of the payload written to disk.
 - `manual_output`: optional path of setup-keyed manual payload for UI drag-and-drop.
 - `manual_payload_sha256`: fingerprint of the manual payload written to disk.
@@ -348,7 +348,7 @@ Then review `aws_sync_payload.json`. Confirm:
 - Account IDs are expected 12-digit AWS account IDs.
 - Account names look correct.
 - Role ARNs use the intended role name.
-- External ID is present only when the existing setup uses one.
+- External ID matches the existing setup. Use the separate `external-id` command below when intentionally adding, replacing, or clearing it.
 - Regions and proxy settings match the existing Forward setup.
 - The PATCH payload does not include access keys or secrets; those stored credentials remain unchanged in Forward.
 - Removed accounts are expected. If removals are not expected, stop and inspect the Forward snapshot and NQE query before applying.
@@ -357,6 +357,82 @@ If `--manual-output` is used, also confirm that manual payload file by opening i
 
 - Setup keys match `selected_setup_ids`.
 - Each setup value is an array of account records with generated role ARNs and external IDs (if configured).
+
+## Add a Customer-Defined External ID to an Existing Setup
+
+This is a separate, one-time hardening change, not a prerequisite for AWS Organizations discovery. It is supported for an existing IAM user/access-key setup: Forward keeps using the stored IAM user credentials, but includes the configured External ID when it calls `sts:AssumeRole` for each target account.
+
+Choose one customer-defined value per Forward AWS setup. Use the same value in Forward and in every target role trust policy for that setup. External IDs are not passwords, but use an unguessable, customer-specific value and do not reuse it across unrelated customers.
+
+Use the dedicated `external-id` command rather than the normal NQE synchronization path. It reads the existing Forward setup directly, preserves its account list, role ARNs, regions, and proxy settings, and changes only the External ID on each `assumeRoleInfos` entry. It does not depend on NQE account discovery or a new snapshot.
+
+First run a dry plan:
+
+```bash
+./bin/awssync external-id \
+  --setup-id AWS-PROD \
+  --value customer-defined-value \
+  --output aws_external_id_payload.json \
+  --format human
+```
+
+Review the prior-state fields and confirm every entry in `aws_external_id_payload.json` contains the intended `externalId`. The command requires exactly one setup and either `--value VALUE` or `--clear`; without `--apply`, it writes the payload but does not modify Forward. It does not change or expose the setup's stored IAM access key or secret.
+
+Prepare the matching collection-role trust policy change for each target AWS account, but do not make the condition mandatory until the Forward payload has been applied and tested. For an IAM user in the connectivity account, the trust statement has this form:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "TrustForwardCollectorUser",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::<CONNECTIVITY_ACCOUNT_ID>:user/forward-collector"
+      },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": {
+          "sts:ExternalId": "customer-defined-value"
+        }
+      }
+    }
+  ]
+}
+```
+
+Apply the reviewed Forward payload before making the condition mandatory in AWS. AWS can receive an External ID on `AssumeRole` even while the existing trust statement does not yet require one, which makes it possible to stage the change without intentionally breaking collection:
+
+```bash
+./bin/awssync external-id \
+  --setup-id AWS-PROD \
+  --value customer-defined-value \
+  --output aws_external_id_payload.json \
+  --apply \
+  --yes
+```
+
+Run a Forward snapshot and verify one representative account still collects. Then roll out the matching trust-policy condition with the existing StackSet, Terraform module, or account-vending automation. Test the representative account again before enforcing it everywhere. After this one-time PATCH stores the new value, later normal syncs read and preserve it without rerunning `external-id`.
+
+An `sts:AssumeRole` failure after the trust-policy rollout usually means the trust policy principal or `sts:ExternalId` value does not exactly match the Forward setup payload.
+
+To roll back intentionally, first remove the mandatory External ID condition from the affected role trust policies, then dry-run and apply the clear operation:
+
+```bash
+./bin/awssync external-id \
+  --setup-id AWS-PROD \
+  --clear \
+  --output aws_external_id_clear_payload.json
+
+./bin/awssync external-id \
+  --setup-id AWS-PROD \
+  --clear \
+  --output aws_external_id_clear_payload.json \
+  --apply \
+  --yes
+```
+
+The clear payload omits `externalId` from every `assumeRoleInfos` entry, which stores it as null in Forward. Test a representative account again after the rollback.
 
 ## Run Preflight Checks
 

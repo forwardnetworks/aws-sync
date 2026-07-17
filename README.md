@@ -28,6 +28,25 @@ The Forward collection IAM role name must be the same in every AWS account that 
 
 Both Forward IAM role and IAM user/access-key multi-account setups are supported. In IAM user/access-key mode, Forward still uses the configured access key to assume the per-account role ARNs in `assumeRoleInfos`; the PATCH updates those account entries and leaves stored credentials unchanged.
 
+An existing setup can add, replace, or clear its per-account External ID without changing those stored credentials. Use the dedicated one-time migration command; its dry run reads the current setup directly and does not depend on NQE or a new snapshot:
+
+```bash
+./bin/awssync external-id \
+  --setup-id AWS-PROD \
+  --value customer-defined-value \
+  --output aws_external_id_payload.json \
+  --format human
+
+./bin/awssync external-id \
+  --setup-id AWS-PROD \
+  --value customer-defined-value \
+  --output aws_external_id_payload.json \
+  --apply \
+  --yes
+```
+
+The value is written to every existing `assumeRoleInfos` entry for that setup. Review and apply the Forward payload first, test a representative account, and then update the target-role trust policies to require the identical value. After the migration PATCH, normal syncs preserve the stored External ID without rerunning this command. Use `external-id --clear` for an intentional rollback to null. Stored IAM access keys and secrets are not included in or changed by the PATCH.
+
 ## Procedure
 
 For an end-to-end flow diagram showing connection types and required permissions, see [AWS Account Sync End-to-End Flow](docs/architecture-flow.md).

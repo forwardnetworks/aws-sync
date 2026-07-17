@@ -129,6 +129,7 @@ func newRootCommand() *cobra.Command {
 	bindRunFlags(v, cmd.Flags())
 	cmd.AddCommand(
 		newPreflightCommand(v),
+		newExternalIDCommand(v),
 		newApplyPlanCommand(v),
 		newStatusCommand(v),
 		newWaitCommand(v),
@@ -136,6 +137,60 @@ func newRootCommand() *cobra.Command {
 		newServeWebhookCommand(v),
 		newConfigureWebhookCommand(v),
 	)
+	return cmd
+}
+
+func newExternalIDCommand(v *viper.Viper) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:           "external-id",
+		Short:         "Set or clear the External ID on an existing AWS setup",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			password, err := resolvePassword(v, os.Stdin, os.Stderr)
+			if err != nil {
+				return err
+			}
+			networkID, err := resolveNetworkIDForCLI(cmd.Context(), v, password, flagString(cmd, v, "network-id"), os.Stdin, os.Stderr)
+			if err != nil {
+				return err
+			}
+			setupID, _ := cmd.Flags().GetString("setup-id")
+			value, _ := cmd.Flags().GetString("value")
+			clearValue, _ := cmd.Flags().GetBool("clear")
+			apply, _ := cmd.Flags().GetBool("apply")
+			yes, _ := cmd.Flags().GetBool("yes")
+			if err := confirmApply(apply, yes, os.Stdin, os.Stderr); err != nil {
+				return err
+			}
+			output, _ := cmd.Flags().GetString("output")
+			summary, err := app.ChangeExternalID(cmd.Context(), app.ExternalIDConfig{
+				Host:       v.GetString("host"),
+				Username:   v.GetString("username"),
+				Password:   password,
+				NetworkID:  networkID,
+				SetupID:    setupID,
+				ExternalID: value,
+				Clear:      clearValue,
+				Output:     output,
+				APIPrefix:  v.GetString("api-prefix"),
+				Insecure:   v.GetBool("insecure"),
+				Timeout:    v.GetDuration("timeout"),
+				Apply:      apply,
+			})
+			if err != nil {
+				return err
+			}
+			return emitResult(cmd, v, summary)
+		},
+	}
+	bindNetworkFlag(v, cmd.Flags())
+	cmd.Flags().String("setup-id", "", "existing Forward AWS setup ID")
+	cmd.Flags().String("value", "", "customer-defined External ID to set")
+	cmd.Flags().Bool("clear", false, "clear the External ID back to null")
+	cmd.Flags().String("output", "", "output JSON path for the generated PATCH payload")
+	cmd.Flags().Bool("apply", false, "PATCH the generated setup payload into Forward")
+	cmd.Flags().Bool("yes", false, "skip apply confirmation prompt")
 	return cmd
 }
 
@@ -920,9 +975,30 @@ func emitResult(cmd *cobra.Command, v *viper.Viper, value any) error {
 		return emitPreflightHuman(summary)
 	case *app.Summary:
 		return emitSummaryHuman(summary)
+	case *app.ExternalIDSummary:
+		return emitExternalIDHuman(summary)
 	default:
 		return emitJSON(value)
 	}
+}
+
+func emitExternalIDHuman(summary *app.ExternalIDSummary) error {
+	action := "set"
+	if !summary.TargetExternalIDConfigured {
+		action = "clear"
+	}
+	fmt.Fprintln(os.Stdout, "External ID migration report")
+	fmt.Fprintf(os.Stdout, "  host:       %s\n", summary.Host)
+	fmt.Fprintf(os.Stdout, "  network:    %s\n", summary.NetworkID)
+	fmt.Fprintf(os.Stdout, "  setup:      %s\n", summary.SetupID)
+	fmt.Fprintf(os.Stdout, "  action:     %s\n", action)
+	fmt.Fprintf(os.Stdout, "  accounts:   %d\n", summary.AccountCount)
+	fmt.Fprintf(os.Stdout, "  prior ID:   configured=%t consistent=%t\n", summary.PreviousExternalIDConfigured, summary.PreviousExternalIDConsistent)
+	fmt.Fprintf(os.Stdout, "  apply:      %t\n", summary.Apply)
+	fmt.Fprintf(os.Stdout, "  patched:    %t\n", summary.Patched)
+	fmt.Fprintf(os.Stdout, "  output:     %s\n", summary.Output)
+	fmt.Fprintf(os.Stdout, "  sha256:     %s\n", summary.PayloadSHA256)
+	return nil
 }
 
 func emitPreflightHuman(summary *app.PreflightSummary) error {

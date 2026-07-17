@@ -71,6 +71,29 @@ If you need a manual fallback format for UI drag-and-drop, also review `aws_sync
 
 Stop if removed accounts are unexpected.
 
+## Add an External ID to an Existing IAM User Setup
+
+This is a one-time change separate from the AWS Organizations setup checklist. To add a customer-defined External ID while keeping the existing IAM user/access-key credentials, use the dedicated command. It reads the existing setup directly, so it does not need NQE account discovery or a new snapshot:
+
+```bash
+./bin/awssync external-id \
+  --setup-id AWS-PROD \
+  --value customer-defined-value \
+  --output aws_external_id_payload.json \
+  --format human
+
+./bin/awssync external-id \
+  --setup-id AWS-PROD \
+  --value customer-defined-value \
+  --output aws_external_id_payload.json \
+  --apply \
+  --yes
+```
+
+Confirm the dry run reports the expected prior and target state and verify every generated account entry has the expected `externalId`. Apply the reviewed command and test one account. Then configure the identical `sts:ExternalId` condition in each target collection role trust policy, preferably through the existing StackSet or account-vending automation, and test again before broad rollout.
+
+Run the command once per Forward AWS setup if different setups require different values. It does not replace or expose the IAM user's stored access key or secret. After the migration PATCH, later syncs preserve the stored External ID without rerunning it. To roll back intentionally, replace `--value VALUE` with `--clear`, review the dry run, and apply it.
+
 ## Discover Before Onboarding
 
 Prefer the Forward Terraform provider for native IaC onboarding. Use this CLI path for a new Forward AWS setup when you need manual review artifacts or cannot use the provider. It reads AWS Organizations directly and never patches an existing Forward setup.
