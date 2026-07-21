@@ -2,6 +2,7 @@
 
 ### Highlights
 
+- Fixed the release checksum manifest so downloaded assets verify directly with `sha256sum -c sha256sums.txt`.
 - Added reversible one-time External ID migration for existing AWS setups with `external-id --value` and `external-id --clear`.
 - Added AWS GovCloud workflows for both regular Forward Organizations/NQE discovery and reviewed standalone-account manifests.
 - Added `onboard-accounts` and `sync-accounts` for environments where AWS Organizations is unavailable by policy.

@@ -81,19 +81,10 @@ jobs:
             [ -f "$file" ] || continue
             tar -czf "${file}.tar.gz" -C dist "$(basename "$file")"
           done
-          for file in dist/awssync-*; do
-            [ -f "$file" ] || continue
-            case "$file" in
-              *.tar.gz|*.txt)
-                continue
-                ;;
-            esac
-            sha256sum "$file" >> dist/sha256sums.txt
-          done
-          for file in dist/awssync-*.tar.gz; do
-            [ -f "$file" ] || continue
-            sha256sum "$file" >> dist/sha256sums.txt
-          done
+          (
+            cd dist
+            sha256sum awssync-* > sha256sums.txt
+          )
       - name: Verify artifacts are executable and checksums match
         run: |
           for file in \
@@ -107,7 +98,10 @@ jobs:
               exit 1
             fi
           done
-          sha256sum -c dist/sha256sums.txt
+          (
+            cd dist
+            sha256sum -c sha256sums.txt
+          )
       - name: Generate build provenance
         uses: actions/attest-build-provenance@v4
         with:
