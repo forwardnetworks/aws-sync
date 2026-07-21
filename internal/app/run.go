@@ -38,9 +38,10 @@ select {
 };`
 
 const (
-	CredentialModeForwardRole  = "forward-role"
-	CredentialModeStaticKeys   = "static-keys"
-	collectorSecretPlaceholder = "REPLACE_WITH_COLLECTOR_SECRET_ACCESS_KEY"
+	CredentialModeForwardRole     = "forward-role"
+	CredentialModeStaticKeys      = "static-keys"
+	CredentialModeInstanceProfile = "instance-profile"
+	collectorSecretPlaceholder    = "REPLACE_WITH_COLLECTOR_SECRET_ACCESS_KEY"
 )
 
 type Config struct {
@@ -63,6 +64,8 @@ type Config struct {
 	AllowNoCandidates  bool
 	AllowNoOrgEvidence bool
 	MaxSnapshotAge     time.Duration
+	Source             string
+	AuthoritativeInput bool
 }
 
 type Summary struct {
@@ -161,6 +164,9 @@ type AWSOrganizationSource struct {
 	ManagementAccountID string
 	Accounts            []AWSOrganizationAccount
 	SkippedAccountCount int
+	Partition           string
+	Source              string
+	DiscoveryMessage    string
 }
 
 type ManualAccountData struct {
@@ -190,6 +196,7 @@ type AWSOrganizationConfig struct {
 	Insecure                 bool
 	Timeout                  time.Duration
 	IncludeManual            bool
+	Partition                string
 }
 
 func Run(ctx context.Context, cfg Config) (*Summary, error) {
@@ -217,6 +224,16 @@ func Run(ctx context.Context, cfg Config) (*Summary, error) {
 	if err != nil {
 		return nil, err
 	}
+	return runPlannedSync(ctx, cfg, client, items, cloudAccounts)
+}
+
+func runPlannedSync(
+	ctx context.Context,
+	cfg Config,
+	client *api.Client,
+	items []map[string]any,
+	cloudAccounts []api.CloudAccount,
+) (*Summary, error) {
 	plan, err := buildPlan(items, cloudAccounts, cfg.QueryID, cfg.SetupIDs)
 	if err != nil {
 		return nil, err
@@ -263,11 +280,15 @@ func Run(ctx context.Context, cfg Config) (*Summary, error) {
 		summary.RemovalBlocked = true
 		return summary, fmt.Errorf("planned account removals require --allow-removals")
 	}
-	if cfg.Apply && plan.HasCandidateRemovalRisk() && !cfg.AllowNoCandidates {
+	if cfg.Apply && !cfg.AuthoritativeInput && plan.HasCandidateRemovalRisk() && !cfg.AllowNoCandidates {
 		summary.RemovalBlocked = true
 		return summary, fmt.Errorf("planned removals with no uncollected candidate accounts visible require --allow-no-candidates")
 	}
-	if cfg.Apply && plan.HasNoOrganizationEvidenceForRemovals() && !cfg.AllowNoOrgEvidence {
+	if cfg.Apply && !cfg.AuthoritativeInput && plan.HasGovCloudRemovalsWithoutOrganizationEvidence() {
+		summary.RemovalBlocked = true
+		return summary, fmt.Errorf("GovCloud account removals require positive AWS Organizations evidence; use sync-accounts with an authoritative reviewed manifest when Organizations is unavailable")
+	}
+	if cfg.Apply && !cfg.AuthoritativeInput && plan.HasNoOrganizationEvidenceForRemovals() && !cfg.AllowNoOrgEvidence {
 		missingSetups := strings.Join(plan.setupsWithoutOrganizationEvidenceForRemovals(), ", ")
 		summary.RemovalBlocked = true
 		return summary, fmt.Errorf("planned removals with no AWS Organizations evidence in NQE for setup(s): %s require --allow-no-org-evidence", missingSetups)
@@ -313,9 +334,28 @@ func RunAWSOrganizations(ctx context.Context, cfg AWSOrganizationConfig, source 
 	if err != nil {
 		return nil, err
 	}
+	sourceName := strings.TrimSpace(source.Source)
+	if sourceName == "" {
+		sourceName = "aws_organizations"
+	}
+	discoveryMessage := strings.TrimSpace(source.DiscoveryMessage)
+	if discoveryMessage == "" {
+		discoveryMessage = "AWS Organizations DescribeOrganization, ListAccounts, and ListParents succeeded; account data came directly from AWS Organizations"
+	}
+	partitionValue := strings.TrimSpace(source.Partition)
+	if partitionValue == "" {
+		partitionValue = cfg.Partition
+	}
+	partition, err := normalizeAWSPartition(partitionValue)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateRegionsForPartition(regions, partition); err != nil {
+		return nil, err
+	}
 	accounts := awsOrganizationAccountRows(source.Accounts)
 	if len(accounts) == 0 {
-		return nil, fmt.Errorf("AWS Organizations discovery returned no active accounts")
+		return nil, fmt.Errorf("%s returned no accounts", sourceName)
 	}
 
 	networkID := strings.TrimSpace(cfg.NetworkID)
@@ -348,8 +388,8 @@ func RunAWSOrganizations(ctx context.Context, cfg AWSOrganizationConfig, source 
 		}
 	}
 
-	manualAccountData := buildManualAccountData(accounts, roleName, externalID)
-	createPayload, createPayloadReady, err := buildCreateAWSPayload(setupID, accounts, roleName, externalID, regions, credentialMode, cfg)
+	manualAccountData := buildManualAccountData(accounts, roleName, externalID, partition)
+	createPayload, createPayloadReady, err := buildCreateAWSPayload(setupID, accounts, roleName, externalID, regions, credentialMode, partition, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -397,7 +437,7 @@ func RunAWSOrganizations(ctx context.Context, cfg AWSOrganizationConfig, source 
 	summary := &Summary{
 		Host:                cfg.Host,
 		NetworkID:           networkID,
-		Source:              "aws_organizations",
+		Source:              sourceName,
 		AWSOrganizationID:   source.OrganizationID,
 		AWSManagementID:     source.ManagementAccountID,
 		AWSAccountCount:     len(source.Accounts),
@@ -428,15 +468,15 @@ func RunAWSOrganizations(ctx context.Context, cfg AWSOrganizationConfig, source 
 			NQECollectedRowCount:         0,
 			NQECandidateRowCount:         0,
 			NQEOrgUnitRowCount:           countAccountsWithOrgUnit(source.Accounts),
-			OrganizationDiscoverySignal:  "aws_organizations_api",
-			OrganizationDiscoveryMessage: "AWS Organizations DescribeOrganization, ListAccounts, and ListParents succeeded; account data came directly from AWS Organizations",
+			OrganizationDiscoverySignal:  sourceName,
+			OrganizationDiscoveryMessage: discoveryMessage,
 			PlannedPayloadAccountCount:   len(createPayload.AssumeRoleInfos),
 			AddedAccounts:                accountSummaries,
 			UnchangedAccountCount:        0,
 			Patched:                      false,
 		}},
 	}
-	summary.Source = "aws_organizations"
+	summary.Source = sourceName
 	summary.AWSOrganizationID = source.OrganizationID
 	summary.AWSManagementID = source.ManagementAccountID
 	summary.AWSAccountCount = len(source.Accounts)
@@ -450,11 +490,52 @@ func normalizeCredentialMode(mode string) (string, error) {
 		return CredentialModeForwardRole, nil
 	}
 	switch mode {
-	case CredentialModeForwardRole, CredentialModeStaticKeys:
+	case CredentialModeForwardRole, CredentialModeStaticKeys, CredentialModeInstanceProfile:
 		return mode, nil
 	default:
-		return "", fmt.Errorf("invalid credential mode %q; expected %q or %q", mode, CredentialModeForwardRole, CredentialModeStaticKeys)
+		return "", fmt.Errorf(
+			"invalid credential mode %q; expected %q, %q, or %q",
+			mode,
+			CredentialModeForwardRole,
+			CredentialModeStaticKeys,
+			CredentialModeInstanceProfile,
+		)
 	}
+}
+
+func normalizeAWSPartition(partition string) (string, error) {
+	partition = strings.TrimSpace(strings.ToLower(partition))
+	if partition == "" {
+		return "aws", nil
+	}
+	switch partition {
+	case "aws", "aws-us-gov", "aws-cn":
+		return partition, nil
+	default:
+		return "", fmt.Errorf("invalid AWS partition %q; expected aws, aws-us-gov, or aws-cn", partition)
+	}
+}
+
+func validateRegionsForPartition(regions []string, partition string) error {
+	for _, region := range regions {
+		region = strings.TrimSpace(strings.ToLower(region))
+		if region == "" {
+			continue
+		}
+		valid := false
+		switch partition {
+		case "aws-us-gov":
+			valid = strings.HasPrefix(region, "us-gov-")
+		case "aws-cn":
+			valid = strings.HasPrefix(region, "cn-")
+		case "aws":
+			valid = !strings.HasPrefix(region, "us-gov-") && !strings.HasPrefix(region, "cn-")
+		}
+		if !valid {
+			return fmt.Errorf("AWS region %q does not belong to partition %q", region, partition)
+		}
+	}
+	return nil
 }
 
 func cloudAccountNameExists(cloudAccounts []api.CloudAccount, setupID string) bool {
@@ -487,10 +568,10 @@ func awsOrganizationAccountRows(accounts []AWSOrganizationAccount) []accountRow 
 	return rows
 }
 
-func buildManualAccountData(accounts []accountRow, roleName, externalID string) []ManualAccountData {
+func buildManualAccountData(accounts []accountRow, roleName, externalID, partition string) []ManualAccountData {
 	result := make([]ManualAccountData, 0, len(accounts))
 	for _, account := range accounts {
-		roleArn := fmt.Sprintf("arn:aws:iam::%s:role/%s", account.AccountID, roleName)
+		roleArn := roleARN(partition, account.AccountID, roleName)
 		entry := ManualAccountData{
 			ID:      account.AccountID,
 			Name:    account.AccountName,
@@ -511,6 +592,7 @@ func buildCreateAWSPayload(
 	externalID string,
 	regions []string,
 	credentialMode string,
+	partition string,
 	cfg AWSOrganizationConfig,
 ) (api.CreateAWSPayload, bool, error) {
 	payload := api.CreateAWSPayload{
@@ -518,7 +600,7 @@ func buildCreateAWSPayload(
 		Name:            setupID,
 		Collect:         true,
 		Regions:         selectedRegionMap(regions),
-		AssumeRoleInfos: buildAssumeRoleInfos(accounts, roleName, externalID),
+		AssumeRoleInfos: buildAssumeRoleInfosForPartition(accounts, roleName, externalID, partition),
 	}
 	ready := true
 	switch credentialMode {
@@ -537,6 +619,9 @@ func buildCreateAWSPayload(
 			payload.Password = collectorSecretPlaceholder
 			ready = false
 		}
+	case CredentialModeInstanceProfile:
+		useForwardAccount := false
+		payload.UseForwardAccountToAssumeRole = &useForwardAccount
 	default:
 		return payload, false, fmt.Errorf("invalid credential mode %q", credentialMode)
 	}
@@ -713,6 +798,12 @@ func buildSummary(
 			regions = append(regions, region)
 		}
 		sort.Strings(regions)
+		discoverySignal := organizationDiscoveryStatus(setup.DiscoveredCandidateCount, setup.DiscoveredOrgUnitRowCount)
+		discoveryMessage := organizationDiscoveryMessage(setup.DiscoveredCandidateCount, setup.DiscoveredOrgUnitRowCount)
+		if cfg.AuthoritativeInput {
+			discoverySignal = "account_manifest"
+			discoveryMessage = "Account inventory came from the explicitly reviewed manifest; AWS Organizations was not queried"
+		}
 		setupSummaries = append(setupSummaries, SetupSummary{
 			SetupID:                      setup.SetupID,
 			RoleName:                     setup.RoleName,
@@ -726,8 +817,8 @@ func buildSummary(
 			NQECollectedRowCount:         setup.DiscoveredCollectedCount,
 			NQECandidateRowCount:         setup.DiscoveredCandidateCount,
 			NQEOrgUnitRowCount:           setup.DiscoveredOrgUnitRowCount,
-			OrganizationDiscoverySignal:  organizationDiscoveryStatus(setup.DiscoveredCandidateCount, setup.DiscoveredOrgUnitRowCount),
-			OrganizationDiscoveryMessage: organizationDiscoveryMessage(setup.DiscoveredCandidateCount, setup.DiscoveredOrgUnitRowCount),
+			OrganizationDiscoverySignal:  discoverySignal,
+			OrganizationDiscoveryMessage: discoveryMessage,
 			PlannedPayloadAccountCount:   len(setup.Payload.AssumeRoleInfos),
 			AddedAccounts:                accountSummaries(setup.AddedAccounts),
 			RemovedAccounts:              accountSummaries(setup.RemovedAccounts),
@@ -739,6 +830,7 @@ func buildSummary(
 	return &Summary{
 		Host:                cfg.Host,
 		NetworkID:           cfg.NetworkID,
+		Source:              strings.TrimSpace(cfg.Source),
 		SnapshotID:          cfg.SnapshotID,
 		QueryID:             strings.TrimSpace(cfg.QueryID),
 		QueryOverride:       strings.TrimSpace(cfg.QueryID) != "",
@@ -851,6 +943,21 @@ func (p *patchPlan) HasRemovals() bool {
 	return false
 }
 
+func (p *patchPlan) HasGovCloudRemovalsWithoutOrganizationEvidence() bool {
+	for _, setup := range p.Setups {
+		if len(setup.RemovedAccounts) == 0 || organizationDiscoveryVisible(
+			setup.DiscoveredCandidateCount,
+			setup.DiscoveredOrgUnitRowCount,
+		) {
+			continue
+		}
+		if extractRolePartition(setup.Payload.AssumeRoleInfos) == "aws-us-gov" {
+			return true
+		}
+	}
+	return false
+}
+
 type buildPlanOptions struct {
 	RoleNameBySetup   map[string]string
 	ExternalIDBySetup map[string]string
@@ -892,6 +999,9 @@ func buildPlanWithOptions(items []map[string]any, cloudAccounts []api.CloudAccou
 			plan.Skips = append(plan.Skips, SkipSummary{SetupID: setupID, Reason: "setup metadata not found in Forward"})
 			continue
 		}
+		if err := validateCloudAccountPartition(meta); err != nil {
+			return nil, fmt.Errorf("setup %s: %w", setupID, err)
+		}
 		roleName := extractRoleName(meta.AssumeRoleInfos)
 		if override := strings.TrimSpace(opts.RoleNameBySetup[setupID]); override != "" {
 			roleName = override
@@ -905,6 +1015,7 @@ func buildPlanWithOptions(items []map[string]any, cloudAccounts []api.CloudAccou
 			externalID = strings.TrimSpace(override)
 		}
 		orgID := parseOrgID(externalID)
+		partition := extractRolePartition(meta.AssumeRoleInfos)
 		nextAccounts := groupedAccounts[setupID]
 		current := currentAccounts(meta.AssumeRoleInfos)
 		payload := api.PatchPayload{
@@ -912,7 +1023,7 @@ func buildPlanWithOptions(items []map[string]any, cloudAccounts []api.CloudAccou
 			Name:                  setupID,
 			Regions:               regionMap(meta.Regions),
 			RegionToProxyServerID: stringMap(meta.RegionToProxyServerID),
-			AssumeRoleInfos:       buildAssumeRoleInfos(nextAccounts, roleName, externalID),
+			AssumeRoleInfos:       buildAssumeRoleInfosForPartition(nextAccounts, roleName, externalID, partition),
 		}
 		if strings.TrimSpace(meta.ProxyServerID) != "" {
 			payload.ProxyServerID = meta.ProxyServerID
@@ -1205,6 +1316,56 @@ func extractRoleName(assumeRoleInfos []api.AssumeRoleInfo) string {
 	return ""
 }
 
+func extractRolePartition(assumeRoleInfos []api.AssumeRoleInfo) string {
+	for _, info := range assumeRoleInfos {
+		parts := strings.Split(strings.TrimSpace(info.RoleArn), ":")
+		if len(parts) >= 6 && parts[0] == "arn" && parts[2] == "iam" {
+			if partition, err := normalizeAWSPartition(parts[1]); err == nil {
+				return partition
+			}
+		}
+	}
+	return "aws"
+}
+
+func validateCloudAccountPartition(account api.CloudAccount) error {
+	rolePartitions := make(map[string]bool)
+	for _, info := range account.AssumeRoleInfos {
+		parts := strings.Split(strings.TrimSpace(info.RoleArn), ":")
+		if len(parts) < 6 || parts[0] != "arn" || parts[2] != "iam" {
+			continue
+		}
+		partition, err := normalizeAWSPartition(parts[1])
+		if err != nil {
+			return err
+		}
+		rolePartitions[partition] = true
+	}
+	if len(rolePartitions) > 1 {
+		partitions := make([]string, 0, len(rolePartitions))
+		for partition := range rolePartitions {
+			partitions = append(partitions, partition)
+		}
+		sort.Strings(partitions)
+		return fmt.Errorf("mixed IAM role ARN partitions are unsafe: %s", strings.Join(partitions, ", "))
+	}
+	if len(rolePartitions) == 0 || len(account.Regions) == 0 {
+		return nil
+	}
+	var rolePartition string
+	for partition := range rolePartitions {
+		rolePartition = partition
+	}
+	regions := make([]string, 0, len(account.Regions))
+	for region := range account.Regions {
+		regions = append(regions, region)
+	}
+	if err := validateRegionsForPartition(regions, rolePartition); err != nil {
+		return fmt.Errorf("role ARN partition and configured regions disagree: %w", err)
+	}
+	return nil
+}
+
 func extractExternalID(assumeRoleInfos []api.AssumeRoleInfo) string {
 	for _, info := range assumeRoleInfos {
 		extID := strings.TrimSpace(info.ExternalID)
@@ -1224,12 +1385,16 @@ func parseOrgID(externalID string) int {
 }
 
 func buildAssumeRoleInfos(accounts []accountRow, roleName, externalID string) []api.AssumeRoleInfo {
+	return buildAssumeRoleInfosForPartition(accounts, roleName, externalID, "aws")
+}
+
+func buildAssumeRoleInfosForPartition(accounts []accountRow, roleName, externalID, partition string) []api.AssumeRoleInfo {
 	result := make([]api.AssumeRoleInfo, 0, len(accounts))
 	for _, account := range accounts {
 		info := api.AssumeRoleInfo{
 			AccountID:   account.AccountID,
 			AccountName: account.AccountName,
-			RoleArn:     fmt.Sprintf("arn:aws:iam::%s:role/%s", account.AccountID, roleName),
+			RoleArn:     roleARN(partition, account.AccountID, roleName),
 			Enabled:     true,
 		}
 		if externalID != "" {
@@ -1238,6 +1403,10 @@ func buildAssumeRoleInfos(accounts []accountRow, roleName, externalID string) []
 		result = append(result, info)
 	}
 	return result
+}
+
+func roleARN(partition, accountID, roleName string) string {
+	return fmt.Sprintf("arn:%s:iam::%s:role/%s", partition, accountID, roleName)
 }
 
 func currentAccounts(infos []api.AssumeRoleInfo) []accountRow {

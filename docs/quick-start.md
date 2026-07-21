@@ -4,6 +4,8 @@ Use `awssync` to update an existing Forward AWS setup when AWS Organization acco
 
 For new AWS Organizations onboarding, prefer the Forward Terraform provider as the native IaC workflow. It supports Forward assume-role, static-key, and collector instance-profile credential models. Use `awssync discover-org` only when Forward has not onboarded that AWS Organization yet and you need manual JSON files, a break-glass create payload, or a static-key workflow that should stay outside Terraform state.
 
+For AWS GovCloud, use the dedicated [AWS GovCloud Account Workflow](govcloud-workflow.md). It covers both the regular Forward Organizations/NQE path and an authoritative account-manifest path for customers without Organizations access.
+
 ## Before You Start
 
 - Forward must collect the AWS management account or a delegated account that can list AWS Organizations accounts.

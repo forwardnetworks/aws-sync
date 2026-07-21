@@ -2,6 +2,12 @@
 
 ### Highlights
 
+- Added AWS GovCloud workflows for both regular Forward Organizations/NQE discovery and reviewed standalone-account manifests.
+- Added `onboard-accounts` and `sync-accounts` for environments where AWS Organizations is unavailable by policy.
+- Preserved `arn:aws-us-gov` IAM role partitions and rejected mixed or region-mismatched role ARNs.
+- Blocked GovCloud removals without positive Organizations evidence; authoritative manifest removals require explicit review and `--allow-removals`.
+- Added collector instance-profile onboarding payloads for self-managed GovCloud collectors.
+
 - Positioned the Forward Terraform provider as the native IaC workflow for new AWS Organizations onboarding.
 - Kept `awssync` focused on existing Forward setup synchronization from NQE data plus manual/break-glass onboarding artifacts.
 - Added `discover-org` for initial AWS Organizations onboarding before Forward has collected the org.
