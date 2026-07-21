@@ -23,6 +23,7 @@ flowchart TD
     removals{"Plan contains removals?"}
     review["Review exact account IDs"]
     approve["Explicit --allow-removals\nall removal paths"]
+    blast{"Within --max-removals\nand --max-removal-percent?"}
     apply["PATCH Forward setup"]
     block["BLOCK\nno empty/unproven inventory apply"]
 
@@ -32,7 +33,9 @@ flowchart TD
     removals -- "no" --> apply
     removals -- "yes, NQE evidence present" --> review
     removals -- "yes, authoritative manifest" --> review
-    review --> approve --> apply
+    review --> approve --> blast
+    blast -- "yes" --> apply
+    blast -- "no" --> block
     removals -- "yes, NQE evidence absent" --> block
 
     classDef neutral fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A;
@@ -41,7 +44,7 @@ flowchart TD
     classDef blocked fill:#FCEBEB,stroke:#A32D2D,color:#501313;
 
     class start,snapshot,org_check,nqe,manifest,removals,review neutral;
-    class approve,apply safe;
+    class approve,blast,apply safe;
     class block blocked;
 ```
 
@@ -63,6 +66,7 @@ flowchart TB
     subgraph plan_apply["awssync — plan and apply"]
         plan["plan / dry-run\nPOST /nqe + GET /cloudAccounts"]
         disk["payload.json\nwritten to disk before any change"]
+        safety["Removal gates\nexplicit approval + count/% ceilings"]
         apply["--apply\nPATCH /cloudAccounts/{setupId}"]
         apply_plan["apply-plan\nreload current state + validate\nGovCloud removals refused"]
     end
@@ -81,8 +85,9 @@ flowchart TB
 
     preflight -- "read-only" --> fwd
     plan --> disk
-    disk --> apply
+    disk --> safety --> apply
     disk --> apply_plan
+    apply_plan --> safety
     apply --> patch_accts
     apply_plan --> patch_accts
     plan --> nqe
@@ -94,7 +99,7 @@ flowchart TB
     classDef artifact fill:#FAEEDA,stroke:#854F0B,color:#412402;
 
     class cli,cron,preflight neutral;
-    class plan,apply,apply_plan neutral;
+    class plan,safety,apply,apply_plan neutral;
     class nqe,get_accts,patch_accts,get_snap fwdnode;
     class disk artifact;
 ```
@@ -170,13 +175,14 @@ flowchart TB
         removal{"Any removals?"}
         patch["--apply --yes\nPATCH /cloudAccounts/{setupId}"]
         approved["--allow-removals\nexplicit approval"]
+        blast["--max-removals\n--max-removal-percent"]
     end
 
     manifest --> validate
     validate --> onboard --> create_files --> post
     validate --> sync --> diff --> removal
     removal -- "no" --> patch
-    removal -- "yes" --> approved --> patch
+    removal -- "yes" --> approved --> blast --> patch
 
     classDef neutral fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A;
     classDef fwdnode fill:#E6F1FB,stroke:#185FA5,color:#042C53;
@@ -186,7 +192,7 @@ flowchart TB
     class manifest,validate,onboard,sync,diff,removal neutral;
     class create_files artifact;
     class post,patch fwdnode;
-    class approved safe;
+    class approved,blast safe;
 ```
 
 For GovCloud, use `--partition aws-us-gov` when onboarding. Existing-setup sync derives and preserves the partition from the current role ARNs. Mixed partitions or a mismatch between role ARNs and configured regions fail before a payload can be applied.
@@ -404,6 +410,7 @@ flowchart LR
 - Static-key collector secrets are only included in the create payload when explicitly supplied. Without the secret, the file contains a placeholder and is marked not POST-ready.
 - Removals require explicit `--allow-removals` flag; `awssync` will not silently
   remove accounts from a Forward setup.
+- Optional `--max-removals` and `--max-removal-percent` ceilings limit aggregate and per-setup removal blast radius and are rechecked immediately before apply.
 - GovCloud NQE removals additionally require positive Organizations evidence. Generic no-evidence flags cannot override this gate.
 - Manifest removals require an authoritative complete manifest plus `--allow-removals`.
 - `apply-plan` reloads current state and refuses GovCloud removals, so a saved payload cannot bypass the source workflow's safety checks.

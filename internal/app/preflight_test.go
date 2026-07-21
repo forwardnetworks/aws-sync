@@ -46,6 +46,8 @@ func TestPreflightReportsSetupSpecificOrgEvidenceFailures(t *testing.T) {
 		SetupIDs:           nil,
 		MaxSnapshotAge:     0,
 		AllowNoOrgEvidence: false,
+		MaxRemovals:        10,
+		MaxRemovalPercent:  40,
 	})
 	if err != nil {
 		t.Fatalf("Preflight() error = %v", err)
@@ -69,6 +71,17 @@ func TestPreflightReportsSetupSpecificOrgEvidenceFailures(t *testing.T) {
 	}
 	if !strings.Contains(checkMessage, "--allow-no-org-evidence") {
 		t.Fatalf("expected guidance for --allow-no-org-evidence, got: %q", checkMessage)
+	}
+
+	var blastRadiusStatus, blastRadiusMessage string
+	for _, check := range summary.Checks {
+		if check.Name == "removal_blast_radius" {
+			blastRadiusStatus = check.Status
+			blastRadiusMessage = check.Message
+		}
+	}
+	if blastRadiusStatus != "fail" || !strings.Contains(blastRadiusMessage, "setup-b") {
+		t.Fatalf("expected setup-b percentage limit failure, got status=%q message=%q", blastRadiusStatus, blastRadiusMessage)
 	}
 }
 

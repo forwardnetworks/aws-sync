@@ -417,6 +417,8 @@ func TestRunBlocksGovCloudRemovalWithoutOrgEvidenceEvenWithBreakGlassFlags(t *te
 		Insecure:           true,
 		Apply:              true,
 		AllowRemovals:      true,
+		MaxRemovals:        1,
+		MaxRemovalPercent:  50,
 		AllowNoCandidates:  true,
 		AllowNoOrgEvidence: true,
 	})

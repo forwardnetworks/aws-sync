@@ -80,6 +80,8 @@ func newRootCommand() *cobra.Command {
 					Insecure:           v.GetBool("insecure"),
 					Timeout:            v.GetDuration("timeout"),
 					AllowRemovals:      flagBool(cmd, v, "allow-removals"),
+					MaxRemovals:        flagInt(cmd, v, "max-removals"),
+					MaxRemovalPercent:  flagFloat64(cmd, v, "max-removal-percent"),
 					AllowNoCandidates:  flagBool(cmd, v, "allow-no-candidates"),
 					AllowNoOrgEvidence: flagBool(cmd, v, "allow-no-org-evidence"),
 					MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
@@ -112,6 +114,8 @@ func newRootCommand() *cobra.Command {
 				Timeout:            v.GetDuration("timeout"),
 				Apply:              apply,
 				AllowRemovals:      flagBool(cmd, v, "allow-removals"),
+				MaxRemovals:        flagInt(cmd, v, "max-removals"),
+				MaxRemovalPercent:  flagFloat64(cmd, v, "max-removal-percent"),
 				AllowNoCandidates:  flagBool(cmd, v, "allow-no-candidates"),
 				AllowNoOrgEvidence: flagBool(cmd, v, "allow-no-org-evidence"),
 				MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
@@ -230,12 +234,16 @@ func bindPreflightFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	flags.String("query-setup-param", "", "optional saved-query String parameter name to receive the single selected --setup-id")
 	flags.StringSlice("setup-id", nil, "optional Forward AWS setup ID to sync; repeatable")
 	flags.Bool("allow-no-org-evidence", false, "allow removals when no AWS Organizations evidence is visible in NQE")
+	flags.Int("max-removals", 0, "maximum aggregate account removals allowed during apply; 0 disables the limit")
+	flags.Float64("max-removal-percent", 0, "maximum removal percentage allowed per setup during apply; 0 disables the limit")
 	flags.Duration("max-snapshot-age", 0, "fail if latest processed snapshot is older than this duration; 0 disables the check")
 	mustBind(v, flags, "snapshot-id")
 	mustBind(v, flags, "query-id")
 	mustBind(v, flags, "query-setup-param")
 	mustBind(v, flags, "setup-id")
 	mustBind(v, flags, "allow-no-org-evidence")
+	mustBind(v, flags, "max-removals")
+	mustBind(v, flags, "max-removal-percent")
 	mustBind(v, flags, "max-snapshot-age")
 }
 
@@ -248,6 +256,8 @@ func bindProcessingFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	flags.Bool("apply", false, "PATCH the generated setup payloads back into Forward")
 	flags.Bool("yes", false, "skip apply confirmation prompt")
 	flags.Bool("allow-removals", false, "allow planned account removals during apply")
+	flags.Int("max-removals", 0, "maximum aggregate account removals allowed during apply; 0 disables the limit")
+	flags.Float64("max-removal-percent", 0, "maximum removal percentage allowed per setup during apply; 0 disables the limit")
 	flags.Bool("allow-no-candidates", false, "allow removals when no uncollected candidate accounts are visible")
 	flags.Bool("allow-no-org-evidence", false, "allow removals when no AWS Organizations evidence is visible in NQE")
 	flags.Duration("max-snapshot-age", 0, "fail if latest processed snapshot is older than this duration; 0 disables the check")
@@ -259,6 +269,8 @@ func bindProcessingFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	mustBind(v, flags, "apply")
 	mustBind(v, flags, "yes")
 	mustBind(v, flags, "allow-removals")
+	mustBind(v, flags, "max-removals")
+	mustBind(v, flags, "max-removal-percent")
 	mustBind(v, flags, "allow-no-candidates")
 	mustBind(v, flags, "allow-no-org-evidence")
 	mustBind(v, flags, "max-snapshot-age")
@@ -296,6 +308,8 @@ func newPreflightCommand(v *viper.Viper) *cobra.Command {
 				Insecure:           v.GetBool("insecure"),
 				Timeout:            v.GetDuration("timeout"),
 				AllowNoOrgEvidence: flagBool(cmd, v, "allow-no-org-evidence"),
+				MaxRemovals:        flagInt(cmd, v, "max-removals"),
+				MaxRemovalPercent:  flagFloat64(cmd, v, "max-removal-percent"),
 				MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
 			})
 			if err != nil {
@@ -361,15 +375,17 @@ func newApplyPlanCommand(v *viper.Viper) *cobra.Command {
 				return err
 			}
 			summary, err := app.ApplyPlan(cmd.Context(), app.ApplyPlanConfig{
-				Host:          v.GetString("host"),
-				Username:      v.GetString("username"),
-				Password:      password,
-				NetworkID:     networkID,
-				PlanPath:      flagString(cmd, v, "plan"),
-				APIPrefix:     v.GetString("api-prefix"),
-				Insecure:      v.GetBool("insecure"),
-				Timeout:       v.GetDuration("timeout"),
-				AllowRemovals: flagBool(cmd, v, "allow-removals"),
+				Host:              v.GetString("host"),
+				Username:          v.GetString("username"),
+				Password:          password,
+				NetworkID:         networkID,
+				PlanPath:          flagString(cmd, v, "plan"),
+				APIPrefix:         v.GetString("api-prefix"),
+				Insecure:          v.GetBool("insecure"),
+				Timeout:           v.GetDuration("timeout"),
+				AllowRemovals:     flagBool(cmd, v, "allow-removals"),
+				MaxRemovals:       flagInt(cmd, v, "max-removals"),
+				MaxRemovalPercent: flagFloat64(cmd, v, "max-removal-percent"),
 			})
 			if err != nil {
 				return err
@@ -381,9 +397,13 @@ func newApplyPlanCommand(v *viper.Viper) *cobra.Command {
 	cmd.Flags().String("plan", "aws_sync_payload.json", "reviewed payload file to apply")
 	cmd.Flags().Bool("yes", false, "confirm applying the reviewed payload file")
 	cmd.Flags().Bool("allow-removals", false, "allow reviewed commercial-partition account removals; GovCloud removals must use their source workflow")
+	cmd.Flags().Int("max-removals", 0, "maximum aggregate account removals allowed; 0 disables the limit")
+	cmd.Flags().Float64("max-removal-percent", 0, "maximum removal percentage allowed per setup; 0 disables the limit")
 	mustBind(v, cmd.Flags(), "plan")
 	mustBind(v, cmd.Flags(), "yes")
 	mustBind(v, cmd.Flags(), "allow-removals")
+	mustBind(v, cmd.Flags(), "max-removals")
+	mustBind(v, cmd.Flags(), "max-removal-percent")
 	return cmd
 }
 
@@ -656,18 +676,20 @@ func newSyncAccountsCommand(v *viper.Viper) *cobra.Command {
 				return err
 			}
 			summary, err := app.SyncAWSAccountManifest(cmd.Context(), app.Config{
-				Host:          v.GetString("host"),
-				Username:      v.GetString("username"),
-				Password:      password,
-				NetworkID:     networkID,
-				SetupIDs:      setupIDs,
-				Output:        flagString(cmd, v, "output"),
-				ManualOutput:  flagString(cmd, v, "manual-output"),
-				APIPrefix:     v.GetString("api-prefix"),
-				Insecure:      v.GetBool("insecure"),
-				Timeout:       v.GetDuration("timeout"),
-				Apply:         apply,
-				AllowRemovals: flagBool(cmd, v, "allow-removals"),
+				Host:              v.GetString("host"),
+				Username:          v.GetString("username"),
+				Password:          password,
+				NetworkID:         networkID,
+				SetupIDs:          setupIDs,
+				Output:            flagString(cmd, v, "output"),
+				ManualOutput:      flagString(cmd, v, "manual-output"),
+				APIPrefix:         v.GetString("api-prefix"),
+				Insecure:          v.GetBool("insecure"),
+				Timeout:           v.GetDuration("timeout"),
+				Apply:             apply,
+				AllowRemovals:     flagBool(cmd, v, "allow-removals"),
+				MaxRemovals:       flagInt(cmd, v, "max-removals"),
+				MaxRemovalPercent: flagFloat64(cmd, v, "max-removal-percent"),
 			}, accounts)
 			if err != nil {
 				return err
@@ -683,7 +705,9 @@ func newSyncAccountsCommand(v *viper.Viper) *cobra.Command {
 	cmd.Flags().Bool("apply", false, "PATCH the generated setup payload into Forward")
 	cmd.Flags().Bool("yes", false, "skip apply confirmation prompt")
 	cmd.Flags().Bool("allow-removals", false, "allow reviewed manifest entries to remove accounts from the setup")
-	for _, name := range []string{"accounts-file", "setup-id", "output", "manual-output", "apply", "yes", "allow-removals"} {
+	cmd.Flags().Int("max-removals", 0, "maximum aggregate account removals allowed; 0 disables the limit")
+	cmd.Flags().Float64("max-removal-percent", 0, "maximum removal percentage allowed for the setup; 0 disables the limit")
+	for _, name := range []string{"accounts-file", "setup-id", "output", "manual-output", "apply", "yes", "allow-removals", "max-removals", "max-removal-percent"} {
 		mustBind(v, cmd.Flags(), name)
 	}
 	return cmd
@@ -722,6 +746,8 @@ func newServeWebhookCommand(v *viper.Viper) *cobra.Command {
 					Timeout:            v.GetDuration("timeout"),
 					Apply:              flagBool(cmd, v, "apply"),
 					AllowRemovals:      flagBool(cmd, v, "allow-removals"),
+					MaxRemovals:        flagInt(cmd, v, "max-removals"),
+					MaxRemovalPercent:  flagFloat64(cmd, v, "max-removal-percent"),
 					AllowNoCandidates:  flagBool(cmd, v, "allow-no-candidates"),
 					AllowNoOrgEvidence: flagBool(cmd, v, "allow-no-org-evidence"),
 					MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
@@ -1041,6 +1067,22 @@ func flagBool(cmd *cobra.Command, v *viper.Viper, name string) bool {
 		return value
 	}
 	return v.GetBool(name)
+}
+
+func flagInt(cmd *cobra.Command, v *viper.Viper, name string) int {
+	if flag := cmd.Flags().Lookup(name); flag != nil && flag.Changed {
+		value, _ := cmd.Flags().GetInt(name)
+		return value
+	}
+	return v.GetInt(name)
+}
+
+func flagFloat64(cmd *cobra.Command, v *viper.Viper, name string) float64 {
+	if flag := cmd.Flags().Lookup(name); flag != nil && flag.Changed {
+		value, _ := cmd.Flags().GetFloat64(name)
+		return value
+	}
+	return v.GetFloat64(name)
 }
 
 func flagDuration(cmd *cobra.Command, v *viper.Viper, name string) time.Duration {

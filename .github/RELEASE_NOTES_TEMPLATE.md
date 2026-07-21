@@ -2,6 +2,8 @@
 
 ### Highlights
 
+- Added `--max-removals` and `--max-removal-percent` blast-radius ceilings across NQE sync, manifest sync, saved-plan apply, preflight, and webhook workflows.
+- Added release installation, checksum, provenance verification, automation audit handling, and explicit External ID rollback guidance.
 - Fixed the release checksum manifest so downloaded assets verify directly with `sha256sum -c sha256sums.txt`.
 - Added reversible one-time External ID migration for existing AWS setups with `external-id --value` and `external-id --clear`.
 - Added AWS GovCloud workflows for both regular Forward Organizations/NQE discovery and reviewed standalone-account manifests.
