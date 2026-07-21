@@ -2,17 +2,14 @@
 
 ### Highlights
 
-- Positioned the Forward Terraform provider as the native IaC workflow for new AWS Organizations onboarding.
-- Kept `awssync` focused on existing Forward setup synchronization from NQE data plus manual/break-glass onboarding artifacts.
-- Added `discover-org` for initial AWS Organizations onboarding before Forward has collected the org.
-- Writes both onboarding artifacts:
-  - `fwd_accounts_data_<timestamp>.json` for Forward UI drag-and-drop import.
-  - `aws_create_payload_<timestamp>.json` for `POST /api/networks/{networkId}/cloudAccounts`.
-- Added AWS Organizations access checks using `DescribeOrganization`, `ListAccounts`, and `ListParents`.
-- Added optional `discover-org --post --yes` to create a new Forward AWS setup from automation.
-- Kept onboarding separate from existing setup sync: `discover-org` does not PATCH existing setups.
-- Added static-key onboarding support with explicit collector credential flags and placeholder protection when the secret is not supplied.
-- Updated docs and Mermaid architecture diagrams for NQE sync, direct Organizations onboarding, and webhook operation.
+- Added reversible one-time External ID migration for existing AWS setups with `external-id --value` and `external-id --clear`.
+- Added AWS GovCloud workflows for both regular Forward Organizations/NQE discovery and reviewed standalone-account manifests.
+- Added `onboard-accounts` and `sync-accounts` for environments where AWS Organizations is unavailable by policy.
+- Preserved `arn:aws-us-gov` IAM role partitions and rejected mixed or region-mismatched role ARNs.
+- Blocked GovCloud removals without positive Organizations evidence; authoritative manifest removals require explicit review and `--allow-removals`.
+- Added collector instance-profile onboarding payloads for self-managed GovCloud collectors.
+- Hardened `apply-plan` so saved payloads cannot bypass current-state or GovCloud removal validation.
+- Added a dedicated GovCloud operator guide with product-enhancement escalation criteria.
 
 ### Download and verify
 
@@ -31,19 +28,35 @@ Assets include platform binaries, tarballs, checksums, and release attestations:
 ### Quick usage
 
 ```bash
-# Dry run + payload review
-./awssync --network-id <NETWORK_ID> --output aws_sync_payload.json --manual-output aws_sync_manual_payload.json
+# Add a customer-defined External ID to an existing setup
+./awssync external-id \
+  --network-id <NETWORK_ID> \
+  --setup-id <SETUP_ID> \
+  --value <CUSTOMER_VALUE> \
+  --output aws_external_id_payload.json
 
-# Apply safely in automation
-./awssync --network-id <NETWORK_ID> --apply --yes --output aws_sync_payload.json
+# Generate a GovCloud onboarding payload from a reviewed manifest
+./awssync onboard-accounts \
+  --accounts-file govcloud-accounts.json \
+  --partition aws-us-gov \
+  --credential-mode instance-profile \
+  --setup-id <SETUP_ID> \
+  --role-name ForwardReadOnlyAccess \
+  --collect-region us-gov-west-1
 
-# Apply an exact reviewed payload file
-./awssync apply-plan --plan aws_sync_payload.json --yes
+# Dry-run an existing setup against an authoritative manifest
+./awssync sync-accounts \
+  --network-id <NETWORK_ID> \
+  --setup-id <SETUP_ID> \
+  --accounts-file govcloud-accounts.json \
+  --format human
 
-# Discover a not-yet-onboarded AWS Organization
-AWS_PROFILE=org-readonly ./awssync discover-org \
-  --setup-id AWS-PROD \
-  --role-name ForwardRole \
-  --collect-region us-east-1 \
-  --external-id Org:12345
+# Verify the regular Organizations/NQE path before applying
+./awssync preflight \
+  --network-id <NETWORK_ID> \
+  --setup-id <SETUP_ID> \
+  --max-snapshot-age 24h \
+  --format human
 ```
+
+See `docs/govcloud-workflow.md` for the complete GovCloud Organizations and standalone-account procedures.

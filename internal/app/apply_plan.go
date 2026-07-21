@@ -14,14 +14,15 @@ import (
 )
 
 type ApplyPlanConfig struct {
-	Host      string
-	Username  string
-	Password  string
-	NetworkID string
-	PlanPath  string
-	APIPrefix string
-	Insecure  bool
-	Timeout   time.Duration
+	Host          string
+	Username      string
+	Password      string
+	NetworkID     string
+	PlanPath      string
+	APIPrefix     string
+	Insecure      bool
+	Timeout       time.Duration
+	AllowRemovals bool
 }
 
 type ApplyPlanSummary struct {
@@ -68,6 +69,44 @@ func ApplyPlan(ctx context.Context, cfg ApplyPlanConfig) (*ApplyPlanSummary, err
 	}
 	if len(setupIDs) == 0 {
 		return nil, fmt.Errorf("plan contains no setup payloads")
+	}
+	cloudAccounts, err := client.CloudAccounts(ctx, cfg.NetworkID)
+	if err != nil {
+		return nil, fmt.Errorf("load current cloud setups before apply: %w", err)
+	}
+	currentByName := make(map[string]api.CloudAccount, len(cloudAccounts))
+	for _, account := range cloudAccounts {
+		currentByName[strings.TrimSpace(account.Name)] = account
+	}
+	for _, setupID := range setupIDs {
+		current, ok := currentByName[setupID]
+		if !ok {
+			return nil, fmt.Errorf("plan setup %s does not exist in Forward", setupID)
+		}
+		if err := validateCloudAccountPartition(current); err != nil {
+			return nil, fmt.Errorf("setup %s: %w", setupID, err)
+		}
+		payload := payloads[setupID]
+		planned := api.CloudAccount{Name: setupID, AssumeRoleInfos: payload.AssumeRoleInfos}
+		if len(payload.Regions) > 0 {
+			planned.Regions = make(map[string]api.RegionMeta, len(payload.Regions))
+			for region, instant := range payload.Regions {
+				planned.Regions[region] = api.RegionMeta{TestInstant: instant}
+			}
+		}
+		if err := validateCloudAccountPartition(planned); err != nil {
+			return nil, fmt.Errorf("plan setup %s: %w", setupID, err)
+		}
+		_, removed, _ := accountDiff(currentAccounts(current.AssumeRoleInfos), currentAccounts(payload.AssumeRoleInfos))
+		if len(removed) == 0 {
+			continue
+		}
+		if extractRolePartition(current.AssumeRoleInfos) == "aws-us-gov" {
+			return nil, fmt.Errorf("apply-plan cannot remove GovCloud accounts; rerun preflight/NQE with positive Organizations evidence or use sync-accounts with the authoritative manifest")
+		}
+		if !cfg.AllowRemovals {
+			return nil, fmt.Errorf("plan removes %d account(s) from setup %s; apply-plan requires --allow-removals", len(removed), setupID)
+		}
 	}
 	sort.Strings(setupIDs)
 	for _, setupID := range setupIDs {

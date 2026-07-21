@@ -9,6 +9,44 @@ GitHub renders the Mermaid diagrams below automatically.
 
 ---
 
+## GovCloud Inventory Decision
+
+GovCloud resource collection and Organizations inventory are separate capabilities. Use the regular Forward snapshot/NQE path when Forward has positive GovCloud Organizations evidence. Use a complete, reviewed manifest when Organizations is unavailable or cannot be delegated.
+
+```mermaid
+flowchart TD
+    start["GovCloud AWS setup\narn:aws-us-gov roles"]
+    snapshot["Run connectivity test\nand fresh Forward snapshot"]
+    org_check{"Forward NQE shows positive\nOrganizations evidence?"}
+    nqe["Regular preflight + NQE plan"]
+    manifest["Authoritative account manifest\nonboard-accounts or sync-accounts"]
+    removals{"Plan contains removals?"}
+    review["Review exact account IDs"]
+    approve["Explicit --allow-removals\nall removal paths"]
+    apply["PATCH Forward setup"]
+    block["BLOCK\nno empty/unproven inventory apply"]
+
+    start --> snapshot --> org_check
+    org_check -- "yes" --> nqe --> removals
+    org_check -- "no / unavailable" --> manifest --> removals
+    removals -- "no" --> apply
+    removals -- "yes, NQE evidence present" --> review
+    removals -- "yes, authoritative manifest" --> review
+    review --> approve --> apply
+    removals -- "yes, NQE evidence absent" --> block
+
+    classDef neutral fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A;
+    classDef safe fill:#E1F5EE,stroke:#0F6E56,color:#04342C;
+    classDef warn fill:#FAEEDA,stroke:#854F0B,color:#412402;
+    classDef blocked fill:#FCEBEB,stroke:#A32D2D,color:#501313;
+
+    class start,snapshot,org_check,nqe,manifest,removals,review neutral;
+    class approve,apply safe;
+    class block blocked;
+```
+
+---
+
 ## Mode 1 — Existing Setup Sync
 
 Operator or scheduler invokes `awssync` directly to update one or more existing Forward AWS setups from Forward NQE data.
@@ -26,7 +64,7 @@ flowchart TB
         plan["plan / dry-run\nPOST /nqe + GET /cloudAccounts"]
         disk["payload.json\nwritten to disk before any change"]
         apply["--apply\nPATCH /cloudAccounts/{setupId}"]
-        apply_plan["apply-plan\napply pre-reviewed file from disk"]
+        apply_plan["apply-plan\nreload current state + validate\nGovCloud removals refused"]
     end
 
     subgraph fwd["Forward platform  (HTTPS · Basic Auth)"]
@@ -111,7 +149,51 @@ flowchart TB
 
 ---
 
-## Mode 3 — Native IaC Onboarding With Terraform
+## Mode 3 — Manual Account-Manifest Workflow
+
+This mode does not call AWS Organizations. The manifest is the authoritative inventory and must contain every account that should remain in the setup. `onboard-accounts` creates review artifacts for a new setup; `sync-accounts` plans or updates an existing setup.
+
+```mermaid
+flowchart TB
+    manifest["Reviewed accounts.json\nunique 12-digit IDs"]
+    validate["Validate manifest\nand AWS partition"]
+
+    subgraph create_path["New setup"]
+        onboard["onboard-accounts\ndry run by default"]
+        create_files["create payload + UI import JSON\narn:aws-us-gov for GovCloud"]
+        post["--post --yes\nPOST /cloudAccounts"]
+    end
+
+    subgraph update_path["Existing setup"]
+        sync["sync-accounts\nGET current setup"]
+        diff["Print exact add/remove IDs\nwrite payload before change"]
+        removal{"Any removals?"}
+        patch["--apply --yes\nPATCH /cloudAccounts/{setupId}"]
+        approved["--allow-removals\nexplicit approval"]
+    end
+
+    manifest --> validate
+    validate --> onboard --> create_files --> post
+    validate --> sync --> diff --> removal
+    removal -- "no" --> patch
+    removal -- "yes" --> approved --> patch
+
+    classDef neutral fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A;
+    classDef fwdnode fill:#E6F1FB,stroke:#185FA5,color:#042C53;
+    classDef artifact fill:#FAEEDA,stroke:#854F0B,color:#412402;
+    classDef safe fill:#E1F5EE,stroke:#0F6E56,color:#04342C;
+
+    class manifest,validate,onboard,sync,diff,removal neutral;
+    class create_files artifact;
+    class post,patch fwdnode;
+    class approved safe;
+```
+
+For GovCloud, use `--partition aws-us-gov` when onboarding. Existing-setup sync derives and preserves the partition from the current role ARNs. Mixed partitions or a mismatch between role ARNs and configured regions fail before a payload can be applied.
+
+---
+
+## Mode 4 — Native IaC Onboarding With Terraform
 
 For new AWS Organizations onboarding, the preferred automation path is the Forward Terraform provider. Terraform can prepare AWS-side roles, read AWS Organizations, fetch Forward's external ID when needed, and create or update the Forward AWS cloud setup in one plan/apply workflow. The provider supports Forward assume-role, static-key, and collector instance-profile credential models.
 
@@ -183,7 +265,7 @@ flowchart TB
 
 ---
 
-## Mode 4 — Webhook Daemon
+## Mode 5 — Webhook Daemon
 
 `awssync serve-webhook` runs as a long-lived HTTP server. Forward calls it on
 each `SNAPSHOT_READY` event. Traffic direction is **inbound to awssync**.
@@ -226,7 +308,7 @@ flowchart TB
 
 ## AWS Credential Modes
 
-For existing setup sync and webhook sync, `awssync` does not connect to AWS. The following two modes describe how **Forward** connects to AWS. Both end in `sts:AssumeRole` per member account.
+For existing setup sync, manifest sync, and webhook sync, `awssync` does not connect to AWS. The following three modes describe how **Forward** connects to AWS. Multi-account modes end in `sts:AssumeRole` per member account.
 
 For `discover-org`, `awssync` also uses AWS credentials locally to read AWS Organizations. Those discovery credentials are not written to Forward. Static-key Forward collection requires separate collector key material if the create payload will be posted.
 
@@ -248,11 +330,19 @@ flowchart LR
         fwd_key --> member_key
     end
 
+    subgraph mode_profile["Collector instance-profile mode"]
+        collector["Self-managed Forward collector\nEC2 instance profile"]
+        org_profile["AWS Organizations\nmanagement / delegated acct\noptional inventory"]
+        member_profile["Member / standalone accounts\nForwardRole\nsts:AssumeRole"]
+        collector --> org_profile
+        collector --> member_profile
+    end
+
     classDef fwdnode fill:#E6F1FB,stroke:#185FA5,color:#042C53;
     classDef awsnode fill:#E1F5EE,stroke:#0F6E56,color:#04342C;
 
-    class fwd_role,fwd_key fwdnode;
-    class org_role,member_role,org_key,member_key awsnode;
+    class fwd_role,fwd_key,collector fwdnode;
+    class org_role,member_role,org_key,member_key,org_profile,member_profile awsnode;
 ```
 
 ---
@@ -268,7 +358,7 @@ flowchart LR
 | `GET /cloudAccounts` | Read setup metadata | read cloud accounts |
 | `PATCH /cloudAccounts/{id}` | Write account list | write cloud accounts |
 | `GET /cloudAccounts/aws/assumeRole/externalId` | Fetch Forward-generated AWS external ID for onboarding | read cloud account setup metadata |
-| `POST /cloudAccounts` | Create a new AWS setup from `discover-org --post` | write cloud accounts |
+| `POST /cloudAccounts` | Create a new AWS setup from `discover-org --post` or `onboard-accounts --post` | write cloud accounts |
 | `GET /snapshots/latestProcessed` | Check snapshot age | read snapshots |
 | `POST /webhooks` | Register webhook | manage webhooks |
 
@@ -280,11 +370,14 @@ flowchart LR
 | `organizations:ListAccounts` | Build the account list for the Forward setup |
 | `organizations:ListParents` | Record parent/root or OU evidence per account |
 
-### Forward → AWS (both credential modes)
+### Forward → AWS (all credential modes)
 
 | Where | Permission | Purpose |
 | --- | --- | --- |
+| Org management / delegated account | `organizations:DescribeAccount` | resolve account metadata |
 | Org management / delegated account | `organizations:ListAccounts` | discover account inventory |
+| Org management / delegated account | `organizations:ListRoots` | discover root organization units |
+| Org management / delegated account | `organizations:ListOrganizationalUnitsForParent` | discover child organization units |
 | Each member account | `ForwardRole` IAM role exists | collection target |
 | Each member account | Trust policy allows Forward to assume role | `sts:AssumeRole` |
 | Each member account | Read permissions on network resources | collection |
@@ -304,13 +397,19 @@ flowchart LR
 
 - Existing setup sync and webhook sync do not connect to AWS; they use Forward NQE data.
 - `discover-org` connects to AWS Organizations only for initial onboarding. It does not write the discovery credentials to Forward.
+- `onboard-accounts` and `sync-accounts` do not connect to AWS; they use a locally supplied, explicitly reviewed account manifest.
 - The payload JSON is **always written to disk before any PATCH** — changes can be reviewed before or instead of applying.
 - `discover-org` writes both onboarding JSON files before any optional `POST /cloudAccounts`.
+- `onboard-accounts` writes both onboarding JSON files before any optional `POST /cloudAccounts`.
 - Static-key collector secrets are only included in the create payload when explicitly supplied. Without the secret, the file contains a placeholder and is marked not POST-ready.
 - Removals require explicit `--allow-removals` flag; `awssync` will not silently
   remove accounts from a Forward setup.
+- GovCloud NQE removals additionally require positive Organizations evidence. Generic no-evidence flags cannot override this gate.
+- Manifest removals require an authoritative complete manifest plus `--allow-removals`.
+- `apply-plan` reloads current state and refuses GovCloud removals, so a saved payload cannot bypass the source workflow's safety checks.
 - Webhook receiver is protected by HTTP Basic Auth with a shared secret
   independent of Forward user credentials.
 
 For the full operational procedure see
-[AWS Account Sync Procedure](aws-account-sync-procedure.md).
+[AWS Account Sync Procedure](aws-account-sync-procedure.md) and
+[AWS GovCloud Account Workflow](govcloud-workflow.md).

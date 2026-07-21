@@ -4,6 +4,8 @@ Use `awssync` to update an existing Forward AWS setup when AWS Organization acco
 
 For new AWS Organizations onboarding, prefer the Forward Terraform provider as the native IaC workflow. It supports Forward assume-role, static-key, and collector instance-profile credential models. Use `awssync discover-org` only when Forward has not onboarded that AWS Organization yet and you need manual JSON files, a break-glass create payload, or a static-key workflow that should stay outside Terraform state.
 
+For AWS GovCloud, use the dedicated [AWS GovCloud Account Workflow](govcloud-workflow.md). It covers both the regular Forward Organizations/NQE path and an authoritative account-manifest path for customers without Organizations access.
+
 ## Before You Start
 
 - Forward must collect the AWS management account or a delegated account that can list AWS Organizations accounts.
@@ -70,6 +72,29 @@ If you need a manual fallback format for UI drag-and-drop, also review `aws_sync
 - you can paste a single setup block into the Forward UI or use it as a reference before apply
 
 Stop if removed accounts are unexpected.
+
+## Add an External ID to an Existing IAM User Setup
+
+This is a one-time change separate from the AWS Organizations setup checklist. To add a customer-defined External ID while keeping the existing IAM user/access-key credentials, use the dedicated command. It reads the existing setup directly, so it does not need NQE account discovery or a new snapshot:
+
+```bash
+./bin/awssync external-id \
+  --setup-id AWS-PROD \
+  --value customer-defined-value \
+  --output aws_external_id_payload.json \
+  --format human
+
+./bin/awssync external-id \
+  --setup-id AWS-PROD \
+  --value customer-defined-value \
+  --output aws_external_id_payload.json \
+  --apply \
+  --yes
+```
+
+Confirm the dry run reports the expected prior and target state and verify every generated account entry has the expected `externalId`. Apply the reviewed command and test one account. Then configure the identical `sts:ExternalId` condition in each target collection role trust policy, preferably through the existing StackSet or account-vending automation, and test again before broad rollout.
+
+Run the command once per Forward AWS setup if different setups require different values. It does not replace or expose the IAM user's stored access key or secret. After the migration PATCH, later syncs preserve the stored External ID without rerunning it. To roll back intentionally, replace `--value VALUE` with `--clear`, review the dry run, and apply it.
 
 ## Discover Before Onboarding
 

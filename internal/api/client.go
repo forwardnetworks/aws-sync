@@ -82,6 +82,7 @@ type AssumeRoleInfo struct {
 	AccountName string `json:"accountName,omitempty"`
 	RoleArn     string `json:"roleArn,omitempty"`
 	ExternalID  string `json:"externalId,omitempty"`
+	ErrorMsg    string `json:"errorMsg,omitempty"`
 	Enabled     bool   `json:"enabled"`
 }
 
@@ -340,7 +341,7 @@ func (c *Client) CloudAccounts(ctx context.Context, networkID string) ([]CloudAc
 	return accounts, nil
 }
 
-func (c *Client) PatchCloudAccount(ctx context.Context, networkID, setupID string, payload PatchPayload) error {
+func (c *Client) PatchCloudAccount(ctx context.Context, networkID, setupID string, payload any) error {
 	if strings.TrimSpace(networkID) == "" {
 		return fmt.Errorf("network ID is required")
 	}

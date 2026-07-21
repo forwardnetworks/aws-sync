@@ -22,6 +22,7 @@ type Config struct {
 type Result struct {
 	OrganizationID      string    `json:"organization_id,omitempty"`
 	ManagementAccountID string    `json:"management_account_id,omitempty"`
+	Partition           string    `json:"partition,omitempty"`
 	Accounts            []Account `json:"accounts"`
 	SkippedAccountCount int       `json:"skipped_account_count,omitempty"`
 }
@@ -49,7 +50,14 @@ func Discover(ctx context.Context, cfg Config) (*Result, error) {
 		return nil, fmt.Errorf("load AWS credentials/config: %w", err)
 	}
 	client := organizations.NewFromConfig(awsCfg)
-	return DiscoverWithClient(ctx, client, cfg.IncludeSuspended)
+	result, err := DiscoverWithClient(ctx, client, cfg.IncludeSuspended)
+	if err != nil {
+		return nil, err
+	}
+	if result.Partition == "" {
+		result.Partition = partitionFromRegion(region)
+	}
+	return result, nil
 }
 
 type Client interface {
@@ -67,6 +75,7 @@ func DiscoverWithClient(ctx context.Context, client Client, includeSuspended boo
 	if orgOutput.Organization != nil {
 		result.OrganizationID = aws.ToString(orgOutput.Organization.Id)
 		result.ManagementAccountID = aws.ToString(orgOutput.Organization.MasterAccountId)
+		result.Partition = partitionFromARN(aws.ToString(orgOutput.Organization.Arn))
 	}
 	if result.OrganizationID == "" {
 		return nil, fmt.Errorf("describe AWS organization: response did not include organization id")
@@ -96,6 +105,26 @@ func DiscoverWithClient(ctx context.Context, client Client, includeSuspended boo
 		}
 	}
 	return result, nil
+}
+
+func partitionFromARN(arn string) string {
+	parts := strings.Split(strings.TrimSpace(arn), ":")
+	if len(parts) >= 2 && parts[0] == "arn" {
+		return parts[1]
+	}
+	return ""
+}
+
+func partitionFromRegion(region string) string {
+	region = strings.TrimSpace(strings.ToLower(region))
+	switch {
+	case strings.HasPrefix(region, "us-gov-"):
+		return "aws-us-gov"
+	case strings.HasPrefix(region, "cn-"):
+		return "aws-cn"
+	default:
+		return "aws"
+	}
 }
 
 func accountFromAWS(account orgtypes.Account) Account {
