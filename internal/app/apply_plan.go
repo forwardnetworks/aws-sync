@@ -14,15 +14,17 @@ import (
 )
 
 type ApplyPlanConfig struct {
-	Host          string
-	Username      string
-	Password      string
-	NetworkID     string
-	PlanPath      string
-	APIPrefix     string
-	Insecure      bool
-	Timeout       time.Duration
-	AllowRemovals bool
+	Host              string
+	Username          string
+	Password          string
+	NetworkID         string
+	PlanPath          string
+	APIPrefix         string
+	Insecure          bool
+	Timeout           time.Duration
+	AllowRemovals     bool
+	MaxRemovals       int
+	MaxRemovalPercent float64
 }
 
 type ApplyPlanSummary struct {
@@ -35,6 +37,9 @@ type ApplyPlanSummary struct {
 }
 
 func ApplyPlan(ctx context.Context, cfg ApplyPlanConfig) (*ApplyPlanSummary, error) {
+	if err := validateRemovalLimitValues(cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
+		return nil, err
+	}
 	client, err := api.NewClient(cfg.Host, cfg.APIPrefix, cfg.Username, cfg.Password, cfg.Insecure, cfg.Timeout)
 	if err != nil {
 		return nil, err
@@ -78,6 +83,7 @@ func ApplyPlan(ctx context.Context, cfg ApplyPlanConfig) (*ApplyPlanSummary, err
 	for _, account := range cloudAccounts {
 		currentByName[strings.TrimSpace(account.Name)] = account
 	}
+	removalStats := make([]removalStat, 0, len(setupIDs))
 	for _, setupID := range setupIDs {
 		current, ok := currentByName[setupID]
 		if !ok {
@@ -97,7 +103,13 @@ func ApplyPlan(ctx context.Context, cfg ApplyPlanConfig) (*ApplyPlanSummary, err
 		if err := validateCloudAccountPartition(planned); err != nil {
 			return nil, fmt.Errorf("plan setup %s: %w", setupID, err)
 		}
-		_, removed, _ := accountDiff(currentAccounts(current.AssumeRoleInfos), currentAccounts(payload.AssumeRoleInfos))
+		currentRows := currentAccounts(current.AssumeRoleInfos)
+		_, removed, _ := accountDiff(currentRows, currentAccounts(payload.AssumeRoleInfos))
+		removalStats = append(removalStats, removalStat{
+			SetupID:         setupID,
+			ConfiguredCount: len(currentRows),
+			RemovedCount:    len(removed),
+		})
 		if len(removed) == 0 {
 			continue
 		}
@@ -107,6 +119,9 @@ func ApplyPlan(ctx context.Context, cfg ApplyPlanConfig) (*ApplyPlanSummary, err
 		if !cfg.AllowRemovals {
 			return nil, fmt.Errorf("plan removes %d account(s) from setup %s; apply-plan requires --allow-removals", len(removed), setupID)
 		}
+	}
+	if err := validateRemovalStats(removalStats, cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
+		return nil, err
 	}
 	sort.Strings(setupIDs)
 	for _, setupID := range setupIDs {

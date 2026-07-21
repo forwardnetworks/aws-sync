@@ -41,6 +41,8 @@ Configure at least `us-gov-west-1` in the Forward AWS setup. Run a Forward conne
   --network-id NETWORK_ID \
   --setup-id GOVCLOUD_SETUP \
   --max-snapshot-age 24h \
+  --max-removals 5 \
+  --max-removal-percent 5 \
   --format human
 ```
 
@@ -134,8 +136,12 @@ If removals are intentional, the apply is blocked unless the operator also suppl
   --output govcloud-sync-plan.json \
   --apply \
   --allow-removals \
+  --max-removals 5 \
+  --max-removal-percent 5 \
   --yes
 ```
+
+Set the ceilings to the reviewed change, not to the full account population. `--max-removals` limits the total removals in the run, and `--max-removal-percent` prevents a single setup from losing more than the approved percentage. Exceeding either value blocks before PATCH.
 
 After any update, run a Forward connectivity test for representative accounts, run a new snapshot, and inspect per-account collection errors.
 

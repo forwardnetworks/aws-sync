@@ -159,6 +159,8 @@ func TestSyncAWSAccountManifestDryRunReportsRemovalAndApplyRequiresApproval(t *t
 
 	approved := blocked
 	approved.AllowRemovals = true
+	approved.MaxRemovals = 1
+	approved.MaxRemovalPercent = 50
 	approved.Output = filepath.Join(t.TempDir(), "approved.json")
 	if _, err := SyncAWSAccountManifest(context.Background(), approved, accounts); err != nil {
 		t.Fatalf("approved apply error = %v", err)

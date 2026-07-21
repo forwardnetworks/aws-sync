@@ -32,6 +32,9 @@ type PreflightCheck struct {
 }
 
 func Preflight(ctx context.Context, cfg Config) (*PreflightSummary, error) {
+	if err := validateRemovalLimitValues(cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
+		return nil, err
+	}
 	client, err := api.NewClient(cfg.Host, cfg.APIPrefix, cfg.Username, cfg.Password, cfg.Insecure, cfg.Timeout)
 	if err != nil {
 		return nil, err
@@ -133,6 +136,13 @@ func Preflight(ctx context.Context, cfg Config) (*PreflightSummary, error) {
 		result.fail("account_removals", "planned account removals require review and --allow-removals for apply")
 	} else {
 		result.pass("account_removals", "no account removals planned")
+	}
+	if cfg.MaxRemovals > 0 || cfg.MaxRemovalPercent > 0 {
+		if err := validateRemovalStats(plan.removalStats(), cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
+			result.fail("removal_blast_radius", err.Error())
+		} else {
+			result.pass("removal_blast_radius", "planned removals are within the configured count and percentage limits")
+		}
 	}
 	if plan.HasCandidateRisk() {
 		result.fail("management_account_discovery", "one or more selected setups have no uncollected candidate accounts visible")

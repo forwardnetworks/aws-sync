@@ -45,7 +45,7 @@ An existing setup can add, replace, or clear its per-account External ID without
   --yes
 ```
 
-The value is written to every existing `assumeRoleInfos` entry for that setup. Review and apply the Forward payload first, test a representative account, and then update the target-role trust policies to require the identical value. After the migration PATCH, normal syncs preserve the stored External ID without rerunning this command. Use `external-id --clear` for an intentional rollback to null. Stored IAM access keys and secrets are not included in or changed by the PATCH.
+The value is written to every existing `assumeRoleInfos` entry for that setup. Review and apply the Forward payload first, test a representative account, and then update the target-role trust policies to require the identical value. After the migration PATCH, normal syncs preserve the stored External ID without rerunning this command. For rollback, relax or remove the mandatory `sts:ExternalId` trust-policy condition first, confirm the role can still be assumed, and only then apply `external-id --clear`. Stored IAM access keys and secrets are not included in or changed by the PATCH.
 
 ## Procedure
 
@@ -62,6 +62,30 @@ For GovCloud Organizations and standalone-account workflows, including collector
 ```bash
 make build
 ```
+
+## Install a Release
+
+Prefer the tarball because it preserves the executable bit. Download the tarball and checksum manifest for the required platform, verify both the checksum and GitHub build provenance, then extract it:
+
+```bash
+VERSION=v2.1.2
+PLATFORM=linux-amd64
+
+gh release download "$VERSION" \
+  --repo forwardnetworks/aws-sync \
+  --pattern "awssync-${PLATFORM}.tar.gz" \
+  --pattern sha256sums.txt
+
+grep "  awssync-${PLATFORM}.tar.gz$" sha256sums.txt | sha256sum -c -
+gh attestation verify "awssync-${PLATFORM}.tar.gz" \
+  --repo forwardnetworks/aws-sync \
+  --signer-workflow forwardnetworks/aws-sync/.github/workflows/release.yml
+
+tar -xzf "awssync-${PLATFORM}.tar.gz"
+./"awssync-${PLATFORM}" --help
+```
+
+On macOS, use `PLATFORM=darwin-amd64` or `PLATFORM=darwin-arm64` and replace `sha256sum -c -` with `shasum -a 256 -c -`. A raw binary downloaded directly from GitHub may need `chmod +x`; the tarball does not.
 
 ## Usage
 
@@ -160,9 +184,21 @@ Type 'apply' to continue:
 ```
 
 If the plan removes accounts from a Forward setup, `--apply` fails unless `--allow-removals` is also provided.
+Use `--max-removals` to cap the aggregate removal count across all selected setups and `--max-removal-percent` to cap each setup independently. Both are optional, apply-time safety ceilings; a value of `0` disables that limit.
 If removals are included and no uncollected candidate rows are visible, add `--allow-no-candidates` only after confirming AWS Organizations discovery.
 If removals are included and there is no candidate or Organizational Unit signal, add `--allow-no-org-evidence` only after independent discovery verification.
 In a run with multiple `--setup-id` values, this is enforced per setup and the check output includes the setup IDs that are missing signals.
+
+For example, an approved removal run can still be limited to no more than 10 accounts overall and no more than 5% of any setup:
+
+```bash
+./bin/awssync \
+  --apply \
+  --yes \
+  --allow-removals \
+  --max-removals 10 \
+  --max-removal-percent 5
+```
 
 Apply a reviewed payload file without recomputing the plan:
 
