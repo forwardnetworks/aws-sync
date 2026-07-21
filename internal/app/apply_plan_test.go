@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -17,8 +18,12 @@ func TestApplyPlanPatchesReviewedPayload(t *testing.T) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
+		if r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts" {
+			_, _ = w.Write([]byte(`[{"type":"AWS","name":"setup-a","assumeRoleInfos":[]}]`))
+			return
+		}
 		if r.Method != http.MethodPatch {
-			w.WriteHeader(http.StatusNotFound)
+			http.NotFound(w, r)
 			return
 		}
 		patched = append(patched, r.URL.Path)
@@ -55,5 +60,45 @@ func TestApplyPlanPatchesReviewedPayload(t *testing.T) {
 	}
 	if summary.PayloadSHA256 == "" {
 		t.Fatalf("expected payload sha: %+v", summary)
+	}
+}
+
+func TestApplyPlanCannotBypassGovCloudRemovalSafety(t *testing.T) {
+	patched := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+			_, _ = w.Write([]byte(`[{"type":"AWS","name":"gov-prod","regions":{"us-gov-west-1":{"testInstant":1}},"assumeRoleInfos":[
+              {"accountId":"111111111111","roleArn":"arn:aws-us-gov:iam::111111111111:role/ForwardRole","enabled":true},
+              {"accountId":"222222222222","roleArn":"arn:aws-us-gov:iam::222222222222:role/ForwardRole","enabled":true}
+            ]}]`))
+		case r.Method == http.MethodPatch:
+			patched = true
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	planPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(planPath, []byte(`{"gov-prod":{"type":"AWS","name":"gov-prod","regions":{"us-gov-west-1":1},"assumeRoleInfos":[
+      {"accountId":"111111111111","roleArn":"arn:aws-us-gov:iam::111111111111:role/ForwardRole","enabled":true}
+    ]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ApplyPlan(context.Background(), ApplyPlanConfig{
+		Host:          server.URL,
+		Username:      "user",
+		Password:      "pass",
+		NetworkID:     "network-1",
+		PlanPath:      planPath,
+		APIPrefix:     "/api",
+		AllowRemovals: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot remove GovCloud accounts") {
+		t.Fatalf("expected GovCloud apply-plan block, got %v", err)
+	}
+	if patched {
+		t.Fatal("unsafe GovCloud apply-plan reached PATCH")
 	}
 }

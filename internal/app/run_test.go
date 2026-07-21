@@ -337,6 +337,97 @@ func TestBuildPlanSupportsRoleARNsWithoutExternalID(t *testing.T) {
 	}
 }
 
+func TestBuildPlanPreservesGovCloudRolePartition(t *testing.T) {
+	items := []map[string]any{
+		{"Cloud Setup ID": "setup-gov", "Cloud Account ID": "111111111111", "Cloud Account Name": "kept"},
+		{"Cloud Setup ID": "setup-gov", "Cloud Account ID": "222222222222", "Cloud Account Name": "added"},
+	}
+	cloudAccounts := []api.CloudAccount{{
+		Name: "setup-gov",
+		AssumeRoleInfos: []api.AssumeRoleInfo{{
+			AccountID: "111111111111",
+			RoleArn:   "arn:aws-us-gov:iam::111111111111:role/ForwardRole",
+			Enabled:   true,
+		}},
+	}}
+
+	plan, err := buildPlan(items, cloudAccounts, "", nil)
+	if err != nil {
+		t.Fatalf("buildPlan() error = %v", err)
+	}
+	want := "arn:aws-us-gov:iam::222222222222:role/ForwardRole"
+	if got := plan.Payloads["setup-gov"].AssumeRoleInfos[1].RoleArn; got != want {
+		t.Fatalf("new account role ARN = %q, want %q", got, want)
+	}
+}
+
+func TestBuildPlanRejectsMixedOrMismatchedAWSPartitions(t *testing.T) {
+	items := []map[string]any{{"Cloud Setup ID": "setup-gov", "Cloud Account ID": "111111111111"}}
+	for name, setup := range map[string]api.CloudAccount{
+		"mixed roles": {
+			Name: "setup-gov",
+			AssumeRoleInfos: []api.AssumeRoleInfo{
+				{RoleArn: "arn:aws-us-gov:iam::111111111111:role/ForwardRole"},
+				{RoleArn: "arn:aws:iam::222222222222:role/ForwardRole"},
+			},
+		},
+		"region mismatch": {
+			Name:            "setup-gov",
+			Regions:         map[string]api.RegionMeta{"us-gov-west-1": {TestInstant: 1}},
+			AssumeRoleInfos: []api.AssumeRoleInfo{{RoleArn: "arn:aws:iam::111111111111:role/ForwardRole"}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := buildPlan(items, []api.CloudAccount{setup}, "", nil); err == nil {
+				t.Fatal("expected unsafe partition plan to fail")
+			}
+		})
+	}
+}
+
+func TestRunBlocksGovCloudRemovalWithoutOrgEvidenceEvenWithBreakGlassFlags(t *testing.T) {
+	patched := false
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
+			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"gov-prod","Cloud Account ID":"111111111111","Cloud Account Name":"keep","Collected?":true}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+			_, _ = w.Write([]byte(`[{"type":"AWS","name":"gov-prod","regions":{"us-gov-west-1":{"testInstant":1}},"assumeRoleInfos":[
+              {"accountId":"111111111111","roleArn":"arn:aws-us-gov:iam::111111111111:role/ForwardRole","enabled":true},
+              {"accountId":"222222222222","roleArn":"arn:aws-us-gov:iam::222222222222:role/ForwardRole","enabled":true}
+            ]}]`))
+		case r.Method == http.MethodPatch:
+			patched = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	_, err := Run(context.Background(), Config{
+		Host:               server.URL,
+		Username:           "user",
+		Password:           "pass",
+		NetworkID:          "network-1",
+		SnapshotID:         "snapshot-1",
+		SetupIDs:           []string{"gov-prod"},
+		Output:             filepath.Join(t.TempDir(), "plan.json"),
+		APIPrefix:          "/api",
+		Insecure:           true,
+		Apply:              true,
+		AllowRemovals:      true,
+		AllowNoCandidates:  true,
+		AllowNoOrgEvidence: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "GovCloud account removals require positive AWS Organizations evidence") {
+		t.Fatalf("expected GovCloud Organizations safety block, got %v", err)
+	}
+	if patched {
+		t.Fatal("unsafe GovCloud removal reached PATCH")
+	}
+}
+
 func TestBuildPlanFiltersRequestedSetupIDs(t *testing.T) {
 	items := []map[string]any{
 		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111", "Cloud Account Name": "acct-a"},

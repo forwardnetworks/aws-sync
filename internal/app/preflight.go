@@ -99,6 +99,18 @@ func Preflight(ctx context.Context, cfg Config) (*PreflightSummary, error) {
 	}
 	setupIDValues := nqeSetupIDValues(items)
 	awsSetups := cloudAccountMetaMap(cloudAccounts, cfg.SetupIDs)
+	partitionIssues := make([]string, 0)
+	for setupID, setup := range awsSetups {
+		if err := validateCloudAccountPartition(setup); err != nil {
+			partitionIssues = append(partitionIssues, fmt.Sprintf("%s: %s", setupID, err))
+		}
+	}
+	sort.Strings(partitionIssues)
+	if len(partitionIssues) > 0 {
+		result.fail("aws_partition_consistency", strings.Join(partitionIssues, "; "))
+		return result, nil
+	}
+	result.pass("aws_partition_consistency", "IAM role ARN partitions match the configured AWS regions")
 	if len(setupIDValues) == 0 && len(awsSetups) > 1 {
 		result.fail("nqe_setup_id_differentiator", "NQE rows did not include Cloud Setup ID; multiple AWS setups cannot be separated. Use the default inline query or a saved query that selects cloudAccount.cloudSetupId as Cloud Setup ID.")
 	} else if len(setupIDValues) == 0 {
@@ -130,6 +142,11 @@ func Preflight(ctx context.Context, cfg Config) (*PreflightSummary, error) {
 	missingOrgEvidenceSetups := plansWithoutOrganizationEvidence(plan)
 	if len(missingOrgEvidenceSetups) == 0 {
 		result.pass("aws_organizations_evidence", "Forward NQE exposes candidate rows or Organizational Unit IDs for every selected setup")
+	} else if plan.HasGovCloudRemovalsWithoutOrganizationEvidence() {
+		result.fail(
+			"aws_organizations_evidence",
+			fmt.Sprintf("GovCloud removals are blocked without positive Organizations evidence for: %s; use sync-accounts with an authoritative reviewed manifest if Organizations is unavailable", strings.Join(missingOrgEvidenceSetups, ", ")),
+		)
 	} else if plan.HasNoOrganizationEvidenceForRemovals() {
 		result.fail(
 			"aws_organizations_evidence",

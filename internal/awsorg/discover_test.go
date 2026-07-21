@@ -26,6 +26,7 @@ func (f fakeOrganizationsClient) DescribeOrganization(context.Context, *organiza
 	return &organizations.DescribeOrganizationOutput{
 		Organization: &orgtypes.Organization{
 			Id:              aws.String("o-example"),
+			Arn:             aws.String("arn:aws-us-gov:organizations::111111111111:organization/o-example"),
 			MasterAccountId: aws.String("111111111111"),
 		},
 	}, nil
@@ -62,7 +63,7 @@ func TestDiscoverWithClientChecksOrganizationAndParents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DiscoverWithClient() error = %v", err)
 	}
-	if result.OrganizationID != "o-example" || result.ManagementAccountID != "111111111111" {
+	if result.OrganizationID != "o-example" || result.ManagementAccountID != "111111111111" || result.Partition != "aws-us-gov" {
 		t.Fatalf("unexpected organization metadata: %#v", result)
 	}
 	if len(result.Accounts) != 2 || result.SkippedAccountCount != 1 {

@@ -129,13 +129,70 @@ func newRootCommand() *cobra.Command {
 	bindRunFlags(v, cmd.Flags())
 	cmd.AddCommand(
 		newPreflightCommand(v),
+		newExternalIDCommand(v),
 		newApplyPlanCommand(v),
 		newStatusCommand(v),
 		newWaitCommand(v),
 		newDiscoverOrgCommand(v),
+		newOnboardAccountsCommand(v),
+		newSyncAccountsCommand(v),
 		newServeWebhookCommand(v),
 		newConfigureWebhookCommand(v),
 	)
+	return cmd
+}
+
+func newExternalIDCommand(v *viper.Viper) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:           "external-id",
+		Short:         "Set or clear the External ID on an existing AWS setup",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			password, err := resolvePassword(v, os.Stdin, os.Stderr)
+			if err != nil {
+				return err
+			}
+			networkID, err := resolveNetworkIDForCLI(cmd.Context(), v, password, flagString(cmd, v, "network-id"), os.Stdin, os.Stderr)
+			if err != nil {
+				return err
+			}
+			setupID, _ := cmd.Flags().GetString("setup-id")
+			value, _ := cmd.Flags().GetString("value")
+			clearValue, _ := cmd.Flags().GetBool("clear")
+			apply, _ := cmd.Flags().GetBool("apply")
+			yes, _ := cmd.Flags().GetBool("yes")
+			if err := confirmApply(apply, yes, os.Stdin, os.Stderr); err != nil {
+				return err
+			}
+			output, _ := cmd.Flags().GetString("output")
+			summary, err := app.ChangeExternalID(cmd.Context(), app.ExternalIDConfig{
+				Host:       v.GetString("host"),
+				Username:   v.GetString("username"),
+				Password:   password,
+				NetworkID:  networkID,
+				SetupID:    setupID,
+				ExternalID: value,
+				Clear:      clearValue,
+				Output:     output,
+				APIPrefix:  v.GetString("api-prefix"),
+				Insecure:   v.GetBool("insecure"),
+				Timeout:    v.GetDuration("timeout"),
+				Apply:      apply,
+			})
+			if err != nil {
+				return err
+			}
+			return emitResult(cmd, v, summary)
+		},
+	}
+	bindNetworkFlag(v, cmd.Flags())
+	cmd.Flags().String("setup-id", "", "existing Forward AWS setup ID")
+	cmd.Flags().String("value", "", "customer-defined External ID to set")
+	cmd.Flags().Bool("clear", false, "clear the External ID back to null")
+	cmd.Flags().String("output", "", "output JSON path for the generated PATCH payload")
+	cmd.Flags().Bool("apply", false, "PATCH the generated setup payload into Forward")
+	cmd.Flags().Bool("yes", false, "skip apply confirmation prompt")
 	return cmd
 }
 
@@ -304,14 +361,15 @@ func newApplyPlanCommand(v *viper.Viper) *cobra.Command {
 				return err
 			}
 			summary, err := app.ApplyPlan(cmd.Context(), app.ApplyPlanConfig{
-				Host:      v.GetString("host"),
-				Username:  v.GetString("username"),
-				Password:  password,
-				NetworkID: networkID,
-				PlanPath:  flagString(cmd, v, "plan"),
-				APIPrefix: v.GetString("api-prefix"),
-				Insecure:  v.GetBool("insecure"),
-				Timeout:   v.GetDuration("timeout"),
+				Host:          v.GetString("host"),
+				Username:      v.GetString("username"),
+				Password:      password,
+				NetworkID:     networkID,
+				PlanPath:      flagString(cmd, v, "plan"),
+				APIPrefix:     v.GetString("api-prefix"),
+				Insecure:      v.GetBool("insecure"),
+				Timeout:       v.GetDuration("timeout"),
+				AllowRemovals: flagBool(cmd, v, "allow-removals"),
 			})
 			if err != nil {
 				return err
@@ -322,8 +380,10 @@ func newApplyPlanCommand(v *viper.Viper) *cobra.Command {
 	bindNetworkFlag(v, cmd.Flags())
 	cmd.Flags().String("plan", "aws_sync_payload.json", "reviewed payload file to apply")
 	cmd.Flags().Bool("yes", false, "confirm applying the reviewed payload file")
+	cmd.Flags().Bool("allow-removals", false, "allow reviewed commercial-partition account removals; GovCloud removals must use their source workflow")
 	mustBind(v, cmd.Flags(), "plan")
 	mustBind(v, cmd.Flags(), "yes")
+	mustBind(v, cmd.Flags(), "allow-removals")
 	return cmd
 }
 
@@ -414,6 +474,7 @@ func newDiscoverOrgCommand(v *viper.Viper) *cobra.Command {
 				OrganizationID:      discovered.OrganizationID,
 				ManagementAccountID: discovered.ManagementAccountID,
 				SkippedAccountCount: discovered.SkippedAccountCount,
+				Partition:           discovered.Partition,
 			}
 			source.Accounts = make([]app.AWSOrganizationAccount, 0, len(discovered.Accounts))
 			for _, account := range discovered.Accounts {
@@ -457,7 +518,7 @@ func newDiscoverOrgCommand(v *viper.Viper) *cobra.Command {
 	cmd.Flags().String("role-name", "", "AWS IAM role name that Forward will assume in each discovered account")
 	cmd.Flags().String("external-id", "", "optional external ID; fetched from Forward when host credentials are supplied")
 	cmd.Flags().StringSlice("collect-region", nil, "AWS region for Forward to collect; repeatable or comma-separated")
-	cmd.Flags().String("credential-mode", app.CredentialModeForwardRole, "Forward collection credential mode: forward-role or static-keys")
+	cmd.Flags().String("credential-mode", app.CredentialModeForwardRole, "Forward collection credential mode: forward-role, static-keys, or instance-profile")
 	cmd.Flags().String("collector-access-key-id", "", "collector AWS access key ID for static-keys mode")
 	cmd.Flags().String("collector-secret-access-key", "", "collector AWS secret access key for static-keys mode; prefer AWSSYNC_COLLECTOR_SECRET_ACCESS_KEY")
 	cmd.Flags().Bool("post", false, "POST the create payload to Forward after writing JSON files")
@@ -481,6 +542,150 @@ func newDiscoverOrgCommand(v *viper.Viper) *cobra.Command {
 	mustBind(v, cmd.Flags(), "aws-profile")
 	mustBind(v, cmd.Flags(), "aws-region")
 	mustBind(v, cmd.Flags(), "include-suspended")
+	return cmd
+}
+
+func newOnboardAccountsCommand(v *viper.Viper) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:           "onboard-accounts",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Short:         "Write Forward onboarding payloads from a reviewed AWS account manifest",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			setupIDs := cleanSetupIDs(flagStringSlice(cmd, v, "setup-id"))
+			if len(setupIDs) != 1 {
+				return fmt.Errorf("onboard-accounts requires exactly one --setup-id for the new Forward AWS setup")
+			}
+			accounts, err := app.LoadAWSAccountManifest(flagString(cmd, v, "accounts-file"))
+			if err != nil {
+				return err
+			}
+			password := ""
+			networkID := flagString(cmd, v, "network-id")
+			if strings.TrimSpace(v.GetString("host")) != "" {
+				password, err = resolvePassword(v, os.Stdin, os.Stderr)
+				if err != nil {
+					return err
+				}
+				networkID, err = resolveNetworkIDForCLI(cmd.Context(), v, password, networkID, os.Stdin, os.Stderr)
+				if err != nil {
+					return err
+				}
+			}
+
+			credentialMode := flagString(cmd, v, "credential-mode")
+			collectorSecret, err := resolveCollectorSecret(v, credentialMode, flagBool(cmd, v, "post"), os.Stdin, os.Stderr)
+			if err != nil {
+				return err
+			}
+			if err := confirmPost(flagBool(cmd, v, "post"), flagBool(cmd, v, "yes"), setupIDs[0], os.Stdin, os.Stderr); err != nil {
+				return err
+			}
+			summary, err := app.RunAWSAccountManifest(cmd.Context(), app.AWSOrganizationConfig{
+				Host:                     v.GetString("host"),
+				Username:                 v.GetString("username"),
+				Password:                 password,
+				NetworkID:                networkID,
+				SetupIDs:                 setupIDs,
+				Output:                   flagString(cmd, v, "output"),
+				ManualOutput:             flagString(cmd, v, "manual-output"),
+				RoleName:                 flagString(cmd, v, "role-name"),
+				ExternalID:               flagString(cmd, v, "external-id"),
+				Regions:                  flagStringSlice(cmd, v, "collect-region"),
+				CredentialMode:           credentialMode,
+				CollectorAccessKeyID:     flagString(cmd, v, "collector-access-key-id"),
+				CollectorSecretAccessKey: collectorSecret,
+				Post:                     flagBool(cmd, v, "post"),
+				APIPrefix:                v.GetString("api-prefix"),
+				Insecure:                 v.GetBool("insecure"),
+				Timeout:                  v.GetDuration("timeout"),
+				IncludeManual:            true,
+				Partition:                flagString(cmd, v, "partition"),
+			}, accounts)
+			if err != nil {
+				return err
+			}
+			return emitResult(cmd, v, summary)
+		},
+	}
+	bindNetworkFlag(v, cmd.Flags())
+	cmd.Flags().String("accounts-file", "", "reviewed JSON array of AWS accounts with id and optional name")
+	cmd.Flags().StringSlice("setup-id", nil, "new Forward AWS setup ID/name for generated onboarding payloads")
+	cmd.Flags().String("role-name", "", "AWS IAM role name that Forward will assume in each account")
+	cmd.Flags().String("external-id", "", "optional external ID; fetched from Forward when host credentials are supplied")
+	cmd.Flags().StringSlice("collect-region", nil, "AWS region for Forward to collect; repeatable or comma-separated")
+	cmd.Flags().String("partition", "aws", "AWS ARN partition: aws, aws-us-gov, or aws-cn")
+	cmd.Flags().String("credential-mode", app.CredentialModeForwardRole, "Forward collection credential mode: forward-role, static-keys, or instance-profile")
+	cmd.Flags().String("collector-access-key-id", "", "collector AWS access key ID for static-keys mode")
+	cmd.Flags().String("collector-secret-access-key", "", "collector AWS secret access key for static-keys mode; prefer AWSSYNC_COLLECTOR_SECRET_ACCESS_KEY")
+	cmd.Flags().Bool("post", false, "POST the create payload to Forward after writing JSON files")
+	cmd.Flags().Bool("yes", false, "skip create confirmation prompt")
+	cmd.Flags().String("output", "", "Forward create-setup POST JSON path (defaults to aws_create_payload_<timestamp>.json)")
+	cmd.Flags().String("manual-output", "", "manual drag-and-drop JSON path (defaults to fwd_accounts_data_<timestamp>.json)")
+	for _, name := range []string{"accounts-file", "setup-id", "role-name", "external-id", "collect-region", "partition", "credential-mode", "collector-access-key-id", "collector-secret-access-key", "post", "yes", "output", "manual-output"} {
+		mustBind(v, cmd.Flags(), name)
+	}
+	return cmd
+}
+
+func newSyncAccountsCommand(v *viper.Viper) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:           "sync-accounts",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Short:         "Plan or apply an existing AWS setup from an authoritative account manifest",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			setupIDs := cleanSetupIDs(flagStringSlice(cmd, v, "setup-id"))
+			if len(setupIDs) != 1 {
+				return fmt.Errorf("sync-accounts requires exactly one --setup-id")
+			}
+			accounts, err := app.LoadAWSAccountManifest(flagString(cmd, v, "accounts-file"))
+			if err != nil {
+				return err
+			}
+			password, err := resolvePassword(v, os.Stdin, os.Stderr)
+			if err != nil {
+				return err
+			}
+			networkID, err := resolveNetworkIDForCLI(cmd.Context(), v, password, flagString(cmd, v, "network-id"), os.Stdin, os.Stderr)
+			if err != nil {
+				return err
+			}
+			apply := flagBool(cmd, v, "apply")
+			if err := confirmApply(apply, flagBool(cmd, v, "yes"), os.Stdin, os.Stderr); err != nil {
+				return err
+			}
+			summary, err := app.SyncAWSAccountManifest(cmd.Context(), app.Config{
+				Host:          v.GetString("host"),
+				Username:      v.GetString("username"),
+				Password:      password,
+				NetworkID:     networkID,
+				SetupIDs:      setupIDs,
+				Output:        flagString(cmd, v, "output"),
+				ManualOutput:  flagString(cmd, v, "manual-output"),
+				APIPrefix:     v.GetString("api-prefix"),
+				Insecure:      v.GetBool("insecure"),
+				Timeout:       v.GetDuration("timeout"),
+				Apply:         apply,
+				AllowRemovals: flagBool(cmd, v, "allow-removals"),
+			}, accounts)
+			if err != nil {
+				return err
+			}
+			return emitResult(cmd, v, summary)
+		},
+	}
+	bindNetworkFlag(v, cmd.Flags())
+	cmd.Flags().String("accounts-file", "", "authoritative reviewed JSON array of AWS accounts with id and optional name")
+	cmd.Flags().StringSlice("setup-id", nil, "existing Forward AWS setup ID")
+	cmd.Flags().String("output", "", "output JSON path for the generated PATCH payload")
+	cmd.Flags().String("manual-output", "", "optional UI-friendly account JSON output path")
+	cmd.Flags().Bool("apply", false, "PATCH the generated setup payload into Forward")
+	cmd.Flags().Bool("yes", false, "skip apply confirmation prompt")
+	cmd.Flags().Bool("allow-removals", false, "allow reviewed manifest entries to remove accounts from the setup")
+	for _, name := range []string{"accounts-file", "setup-id", "output", "manual-output", "apply", "yes", "allow-removals"} {
+		mustBind(v, cmd.Flags(), name)
+	}
 	return cmd
 }
 
@@ -920,9 +1125,30 @@ func emitResult(cmd *cobra.Command, v *viper.Viper, value any) error {
 		return emitPreflightHuman(summary)
 	case *app.Summary:
 		return emitSummaryHuman(summary)
+	case *app.ExternalIDSummary:
+		return emitExternalIDHuman(summary)
 	default:
 		return emitJSON(value)
 	}
+}
+
+func emitExternalIDHuman(summary *app.ExternalIDSummary) error {
+	action := "set"
+	if !summary.TargetExternalIDConfigured {
+		action = "clear"
+	}
+	fmt.Fprintln(os.Stdout, "External ID migration report")
+	fmt.Fprintf(os.Stdout, "  host:       %s\n", summary.Host)
+	fmt.Fprintf(os.Stdout, "  network:    %s\n", summary.NetworkID)
+	fmt.Fprintf(os.Stdout, "  setup:      %s\n", summary.SetupID)
+	fmt.Fprintf(os.Stdout, "  action:     %s\n", action)
+	fmt.Fprintf(os.Stdout, "  accounts:   %d\n", summary.AccountCount)
+	fmt.Fprintf(os.Stdout, "  prior ID:   configured=%t consistent=%t\n", summary.PreviousExternalIDConfigured, summary.PreviousExternalIDConsistent)
+	fmt.Fprintf(os.Stdout, "  apply:      %t\n", summary.Apply)
+	fmt.Fprintf(os.Stdout, "  patched:    %t\n", summary.Patched)
+	fmt.Fprintf(os.Stdout, "  output:     %s\n", summary.Output)
+	fmt.Fprintf(os.Stdout, "  sha256:     %s\n", summary.PayloadSHA256)
+	return nil
 }
 
 func emitPreflightHuman(summary *app.PreflightSummary) error {
@@ -950,6 +1176,12 @@ func emitPreflightHuman(summary *app.PreflightSummary) error {
 			len(setup.AddedAccounts),
 			len(setup.RemovedAccounts),
 		)
+		if len(setup.AddedAccounts) > 0 {
+			fmt.Fprintf(os.Stdout, "    added:   %s\n", accountSummaryIDs(setup.AddedAccounts))
+		}
+		if len(setup.RemovedAccounts) > 0 {
+			fmt.Fprintf(os.Stdout, "    removed: %s\n", accountSummaryIDs(setup.RemovedAccounts))
+		}
 		fmt.Fprintf(os.Stdout, "    %s\n", setup.OrganizationDiscoveryMessage)
 	}
 	if summary.Ready {
@@ -962,7 +1194,7 @@ func emitPreflightHuman(summary *app.PreflightSummary) error {
 }
 
 func emitSummaryHuman(summary *app.Summary) error {
-	if summary.Source == "aws_organizations" {
+	if summary.Source == "aws_organizations" || (summary.Source == "account_manifest" && summary.CreatePayload != nil) {
 		return emitAWSOrganizationsHuman(summary)
 	}
 	fmt.Fprintf(os.Stdout, "Sync report\n")
@@ -1001,6 +1233,12 @@ func emitSummaryHuman(summary *app.Summary) error {
 			len(setup.RemovedAccounts),
 			setup.UnchangedAccountCount,
 		)
+		if len(setup.AddedAccounts) > 0 {
+			fmt.Fprintf(os.Stdout, "    added:   %s\n", accountSummaryIDs(setup.AddedAccounts))
+		}
+		if len(setup.RemovedAccounts) > 0 {
+			fmt.Fprintf(os.Stdout, "    removed: %s\n", accountSummaryIDs(setup.RemovedAccounts))
+		}
 		fmt.Fprintf(os.Stdout, "    %s\n", setup.OrganizationDiscoveryMessage)
 	}
 	fmt.Fprintln(os.Stdout, "\nSummary:")
@@ -1008,8 +1246,21 @@ func emitSummaryHuman(summary *app.Summary) error {
 	return nil
 }
 
+func accountSummaryIDs(accounts []app.AccountSummary) string {
+	ids := make([]string, 0, len(accounts))
+	for _, account := range accounts {
+		ids = append(ids, account.AccountID)
+	}
+	sort.Strings(ids)
+	return strings.Join(ids, ", ")
+}
+
 func emitAWSOrganizationsHuman(summary *app.Summary) error {
-	fmt.Fprintf(os.Stdout, "AWS Organizations onboarding report\n")
+	title := "AWS Organizations onboarding report"
+	if summary.Source == "account_manifest" {
+		title = "AWS account-manifest onboarding report"
+	}
+	fmt.Fprintln(os.Stdout, title)
 	if summary.Host != "" {
 		fmt.Fprintf(os.Stdout, "  host:       %s\n", summary.Host)
 	}
