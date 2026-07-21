@@ -61,6 +61,8 @@ type Config struct {
 	Timeout            time.Duration
 	Apply              bool
 	AllowRemovals      bool
+	MaxRemovals        int
+	MaxRemovalPercent  float64
 	AllowNoCandidates  bool
 	AllowNoOrgEvidence bool
 	MaxSnapshotAge     time.Duration
@@ -200,6 +202,9 @@ type AWSOrganizationConfig struct {
 }
 
 func Run(ctx context.Context, cfg Config) (*Summary, error) {
+	if err := validateRemovalLimitValues(cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
+		return nil, err
+	}
 	client, err := api.NewClient(cfg.Host, cfg.APIPrefix, cfg.Username, cfg.Password, cfg.Insecure, cfg.Timeout)
 	if err != nil {
 		return nil, err
@@ -279,6 +284,12 @@ func runPlannedSync(
 	if cfg.Apply && plan.HasRemovals() && !cfg.AllowRemovals {
 		summary.RemovalBlocked = true
 		return summary, fmt.Errorf("planned account removals require --allow-removals")
+	}
+	if cfg.Apply {
+		if err := validateRemovalStats(plan.removalStats(), cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
+			summary.RemovalBlocked = true
+			return summary, err
+		}
 	}
 	if cfg.Apply && !cfg.AuthoritativeInput && plan.HasCandidateRemovalRisk() && !cfg.AllowNoCandidates {
 		summary.RemovalBlocked = true

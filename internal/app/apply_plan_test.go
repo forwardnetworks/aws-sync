@@ -102,3 +102,44 @@ func TestApplyPlanCannotBypassGovCloudRemovalSafety(t *testing.T) {
 		t.Fatal("unsafe GovCloud apply-plan reached PATCH")
 	}
 }
+
+func TestApplyPlanBlocksRemovalPercentageAboveLimit(t *testing.T) {
+	patched := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+			_, _ = w.Write([]byte(`[{"type":"AWS","name":"prod","assumeRoleInfos":[
+              {"accountId":"111","roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true},
+              {"accountId":"222","roleArn":"arn:aws:iam::222:role/ForwardRole","enabled":true}
+            ]}]`))
+		case r.Method == http.MethodPatch:
+			patched = true
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	planPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(planPath, []byte(`{"prod":{"type":"AWS","name":"prod","assumeRoleInfos":[
+      {"accountId":"111","roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true}
+    ]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ApplyPlan(context.Background(), ApplyPlanConfig{
+		Host:              server.URL,
+		Username:          "user",
+		Password:          "pass",
+		NetworkID:         "network-1",
+		PlanPath:          planPath,
+		APIPrefix:         "/api",
+		AllowRemovals:     true,
+		MaxRemovalPercent: 49,
+	})
+	if err == nil || !strings.Contains(err.Error(), "50.00%") {
+		t.Fatalf("expected removal percentage block, got %v", err)
+	}
+	if patched {
+		t.Fatal("removal above percentage limit reached PATCH")
+	}
+}

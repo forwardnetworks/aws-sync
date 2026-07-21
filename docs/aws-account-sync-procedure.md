@@ -440,7 +440,9 @@ The clear payload omits `externalId` from every `assumeRoleInfos` entry, which s
 
 ```bash
 ./bin/awssync preflight \
-  --max-snapshot-age 24h
+  --max-snapshot-age 24h \
+  --max-removals 10 \
+  --max-removal-percent 5
 ```
 
 Expected result: `ready` is `true`, `nqe_aws_accounts` passes, `patch_plan` passes, and `account_removals` either passes or is understood and approved.
@@ -450,6 +452,7 @@ If `management_account_discovery` fails, the snapshot did not show any uncollect
 `aws_organizations_evidence` reports if the plan has either candidate visibility or OU ID visibility for each selected setup. In multi-setup runs, the check lists the setup IDs that lack this signal. Treat both as supporting evidence only. The safer destructive-sync guard is:
 
 - `account_removals` requires `--allow-removals`.
+- `removal_blast_radius` confirms the aggregate count and per-setup percentage remain within the operator-supplied ceilings.
 - `management_account_discovery` fails: add `--allow-no-candidates` only after confirming discovery is complete.
 - `aws_organizations_evidence` fails: add `--allow-no-org-evidence` only after independent verification that Forward has complete AWS Organizations visibility for that setup.
 
@@ -468,6 +471,21 @@ After the dry plan is reviewed, run with `--apply`.
 Expected result: the command prints `patched_setup_count` greater than zero and each patched setup shows `patched: true`.
 
 If the plan includes account removals, `--apply` fails unless `--allow-removals` is included. Use that flag only after reviewing `removed_accounts`.
+
+For an approved removal, also set both blast-radius ceilings. `--max-removals` applies to the total across every selected setup, while `--max-removal-percent` applies independently to each setup's current configured-account count:
+
+```bash
+./bin/awssync \
+  --max-snapshot-age 24h \
+  --output aws_sync_payload.json \
+  --apply \
+  --yes \
+  --allow-removals \
+  --max-removals 10 \
+  --max-removal-percent 5
+```
+
+Choose limits from the reviewed plan, leaving enough room only for the approved account IDs. The command stops before any PATCH if either ceiling is exceeded. The same flags are enforced by `sync-accounts`, `apply-plan`, and webhook-driven apply runs.
 
 If the plan includes account removals and no uncollected candidate accounts are visible, `--apply` also requires `--allow-no-candidates`. Use that flag only after confirming the management or delegated discovery account is collected and AWS Organizations discovery is working.
 
@@ -521,7 +539,7 @@ If a new account appears in the Forward setup but fails collection, the most lik
 
 Run `awssync` on a schedule or after AWS account lifecycle events.
 
-The recommended automation policy is to allow routine additions while keeping removals review-gated. Run scheduled automation without `--allow-removals`; a plan containing removals will stop before changing Forward. After an operator verifies the account lifecycle in AWS and reviews `removed_accounts`, apply the reviewed plan with explicit removal approval.
+The recommended automation policy is to allow routine additions while keeping removals review-gated. Run scheduled automation without `--allow-removals`; a plan containing removals will stop before changing Forward. Treat any nonzero exit as an alert requiring operator review. Retain the JSON plan, its `payload_sha256`, and the `.applied.json` audit copy from successful applies according to the customer's audit policy. After an operator verifies the account lifecycle in AWS and reviews `removed_accounts`, apply the reviewed plan with explicit removal approval and narrow `--max-removals` and `--max-removal-percent` ceilings.
 
 Recommended sequence:
 

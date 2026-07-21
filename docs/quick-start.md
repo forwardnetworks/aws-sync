@@ -94,7 +94,9 @@ This is a one-time change separate from the AWS Organizations setup checklist. T
 
 Confirm the dry run reports the expected prior and target state and verify every generated account entry has the expected `externalId`. Apply the reviewed command and test one account. Then configure the identical `sts:ExternalId` condition in each target collection role trust policy, preferably through the existing StackSet or account-vending automation, and test again before broad rollout.
 
-Run the command once per Forward AWS setup if different setups require different values. It does not replace or expose the IAM user's stored access key or secret. After the migration PATCH, later syncs preserve the stored External ID without rerunning it. To roll back intentionally, replace `--value VALUE` with `--clear`, review the dry run, and apply it.
+Run the command once per Forward AWS setup if different setups require different values. It does not replace or expose the IAM user's stored access key or secret. After the migration PATCH, later syncs preserve the stored External ID without rerunning it.
+
+Rollback order matters: first relax or remove the mandatory `sts:ExternalId` condition from the target-role trust policies and confirm a representative role can still be assumed. Then replace `--value VALUE` with `--clear`, review the dry run, apply it, and test collection again. Clearing Forward first while AWS still requires the External ID will interrupt collection.
 
 ## Discover Before Onboarding
 
@@ -148,8 +150,17 @@ terraform -chdir=examples/terraform/forward-collection-role-stackset apply
 If removals are expected:
 
 ```bash
-./bin/awssync --max-snapshot-age 24h --output aws_sync_payload.json --apply --yes --allow-removals
+./bin/awssync \
+  --max-snapshot-age 24h \
+  --output aws_sync_payload.json \
+  --apply \
+  --yes \
+  --allow-removals \
+  --max-removals 10 \
+  --max-removal-percent 5
 ```
+
+`--max-removals` is the aggregate ceiling across selected setups. `--max-removal-percent` is evaluated separately for each setup against its current configured-account count. Preflight accepts the same limits and reports `removal_blast_radius` before anything is patched.
 
 If removals are expected and no uncollected candidate accounts are visible, also add `--allow-no-candidates` only after confirming AWS Organizations discovery is working.
 
