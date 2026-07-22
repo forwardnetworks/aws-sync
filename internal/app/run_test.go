@@ -476,6 +476,90 @@ func TestBuildPlanPreservesNonOrgExternalID(t *testing.T) {
 	}
 }
 
+func TestBuildPlanPreservesMixedPerAccountExternalIDs(t *testing.T) {
+	items := []map[string]any{
+		{"Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Cloud Account Name": "one"},
+		{"Setup ID": "setup-a", "Cloud Account ID": "222222222222", "Cloud Account Name": "two"},
+	}
+	cloudAccounts := []api.CloudAccount{{
+		Name: "setup-a",
+		AssumeRoleInfos: []api.AssumeRoleInfo{
+			{AccountID: "111111111111", RoleArn: "arn:aws:iam::111111111111:role/ForwardRole", ExternalID: "one-id", Enabled: true},
+			{AccountID: "222222222222", RoleArn: "arn:aws:iam::222222222222:role/ForwardRole", ExternalID: "two-id", Enabled: true},
+		},
+	}}
+
+	plan, err := buildPlan(items, cloudAccounts, "", nil)
+	if err != nil {
+		t.Fatalf("buildPlan() error = %v", err)
+	}
+	infos := plan.Payloads["setup-a"].AssumeRoleInfos
+	if infos[0].ExternalID != "one-id" || infos[1].ExternalID != "two-id" {
+		t.Fatalf("mixed External IDs were not preserved: %#v", infos)
+	}
+	if !plan.Setups[0].ExternalIDConfigured || plan.Setups[0].ExternalIDConsistent || plan.Setups[0].OrgID != 0 {
+		t.Fatalf("unexpected mixed External ID summary: %#v", plan.Setups[0])
+	}
+}
+
+func TestBuildPlanRequiresAssignmentsForNewAccountsInMixedSetup(t *testing.T) {
+	items := []map[string]any{
+		{"Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Cloud Account Name": "one"},
+		{"Setup ID": "setup-a", "Cloud Account ID": "222222222222", "Cloud Account Name": "two"},
+		{"Setup ID": "setup-a", "Cloud Account ID": "333333333333", "Cloud Account Name": "three"},
+	}
+	cloudAccounts := []api.CloudAccount{{
+		Name: "setup-a",
+		AssumeRoleInfos: []api.AssumeRoleInfo{
+			{AccountID: "111111111111", RoleArn: "arn:aws:iam::111111111111:role/ForwardRole", ExternalID: "one-id", Enabled: true},
+			{AccountID: "222222222222", RoleArn: "arn:aws:iam::222222222222:role/ForwardRole", ExternalID: "two-id", Enabled: true},
+		},
+	}}
+
+	if _, err := buildPlan(items, cloudAccounts, "", nil); err == nil || !strings.Contains(err.Error(), "provide --external-id-file assignments") {
+		t.Fatalf("expected fail-closed mixed-ID addition error, got %v", err)
+	}
+	plan, err := buildPlanWithOptions(items, cloudAccounts, "", nil, buildPlanOptions{
+		ExternalIDByAccount: externalIDAssignments{
+			"setup-a": {"333333333333": "three-id"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildPlanWithOptions() error = %v", err)
+	}
+	infos := plan.Payloads["setup-a"].AssumeRoleInfos
+	if infos[0].ExternalID != "one-id" || infos[1].ExternalID != "two-id" || infos[2].ExternalID != "three-id" {
+		t.Fatalf("unexpected assigned mixed-ID payload: %#v", infos)
+	}
+}
+
+func TestBuildPlanForConfigLoadsPerAccountExternalIDFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "external-ids.csv")
+	contents := "setup_id,account_id,action,external_id\nsetup-a,333333333333,set,three-id\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	items := []map[string]any{
+		{"Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Cloud Account Name": "one"},
+		{"Setup ID": "setup-a", "Cloud Account ID": "222222222222", "Cloud Account Name": "two"},
+		{"Setup ID": "setup-a", "Cloud Account ID": "333333333333", "Cloud Account Name": "three"},
+	}
+	cloudAccounts := []api.CloudAccount{{
+		Name: "setup-a",
+		AssumeRoleInfos: []api.AssumeRoleInfo{
+			{AccountID: "111111111111", RoleArn: "arn:aws:iam::111111111111:role/ForwardRole", ExternalID: "one-id", Enabled: true},
+			{AccountID: "222222222222", RoleArn: "arn:aws:iam::222222222222:role/ForwardRole", ExternalID: "two-id", Enabled: true},
+		},
+	}}
+	plan, err := buildPlanForConfig(Config{ExternalIDFile: path}, items, cloudAccounts)
+	if err != nil {
+		t.Fatalf("buildPlanForConfig() error = %v", err)
+	}
+	if got := plan.Payloads["setup-a"].AssumeRoleInfos[2].ExternalID; got != "three-id" {
+		t.Fatalf("new account External ID = %q, want three-id", got)
+	}
+}
+
 func TestBuildPlanAllowsMultipleSetupsWithDefaultQueryWhenRowsHaveSetupIDs(t *testing.T) {
 	items := []map[string]any{
 		{"Setup ID": "setup-a", "Cloud Account ID": "111", "Cloud Account Name": "acct-a"},

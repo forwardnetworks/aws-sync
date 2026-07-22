@@ -92,6 +92,7 @@ func newRootCommand() *cobra.Command {
 					AllowNoCandidates:  flagBool(cmd, v, "allow-no-candidates"),
 					AllowNoOrgEvidence: flagBool(cmd, v, "allow-no-org-evidence"),
 					MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
+					ExternalIDFile:     flagString(cmd, v, "external-id-file"),
 				}
 				previewSummary, err := app.Run(cmd.Context(), preview)
 				if err != nil {
@@ -126,6 +127,7 @@ func newRootCommand() *cobra.Command {
 				AllowNoCandidates:  flagBool(cmd, v, "allow-no-candidates"),
 				AllowNoOrgEvidence: flagBool(cmd, v, "allow-no-org-evidence"),
 				MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
+				ExternalIDFile:     flagString(cmd, v, "external-id-file"),
 			}
 			summary, err := app.Run(cmd.Context(), cfg)
 			if err != nil {
@@ -171,6 +173,8 @@ func newExternalIDCommand(v *viper.Viper) *cobra.Command {
 			setupID, _ := cmd.Flags().GetString("setup-id")
 			value, _ := cmd.Flags().GetString("value")
 			clearValue, _ := cmd.Flags().GetBool("clear")
+			accountIDs, _ := cmd.Flags().GetStringSlice("account-id")
+			externalIDFile, _ := cmd.Flags().GetString("external-id-file")
 			apply, _ := cmd.Flags().GetBool("apply")
 			yes, _ := cmd.Flags().GetBool("yes")
 			if err := confirmApply(apply, yes, os.Stdin, os.Stderr); err != nil {
@@ -178,18 +182,20 @@ func newExternalIDCommand(v *viper.Viper) *cobra.Command {
 			}
 			output, _ := cmd.Flags().GetString("output")
 			summary, err := app.ChangeExternalID(cmd.Context(), app.ExternalIDConfig{
-				Host:       v.GetString("host"),
-				Username:   v.GetString("username"),
-				Password:   password,
-				NetworkID:  networkID,
-				SetupID:    setupID,
-				ExternalID: value,
-				Clear:      clearValue,
-				Output:     output,
-				APIPrefix:  v.GetString("api-prefix"),
-				Insecure:   v.GetBool("insecure"),
-				Timeout:    v.GetDuration("timeout"),
-				Apply:      apply,
+				Host:           v.GetString("host"),
+				Username:       v.GetString("username"),
+				Password:       password,
+				NetworkID:      networkID,
+				SetupID:        setupID,
+				AccountIDs:     accountIDs,
+				ExternalID:     value,
+				Clear:          clearValue,
+				ExternalIDFile: externalIDFile,
+				Output:         output,
+				APIPrefix:      v.GetString("api-prefix"),
+				Insecure:       v.GetBool("insecure"),
+				Timeout:        v.GetDuration("timeout"),
+				Apply:          apply,
 			})
 			if err != nil {
 				return err
@@ -201,6 +207,8 @@ func newExternalIDCommand(v *viper.Viper) *cobra.Command {
 	cmd.Flags().String("setup-id", "", "existing Forward AWS setup ID")
 	cmd.Flags().String("value", "", "customer-defined External ID to set")
 	cmd.Flags().Bool("clear", false, "clear the External ID back to null")
+	cmd.Flags().StringSlice("account-id", nil, "optional AWS account ID to change; repeatable or comma-separated")
+	cmd.Flags().String("external-id-file", "", "CSV file of per-account External ID set/clear actions")
 	cmd.Flags().String("output", "", "output JSON path for the generated PATCH payload")
 	cmd.Flags().Bool("apply", false, "PATCH the generated setup payload into Forward")
 	cmd.Flags().Bool("yes", false, "skip apply confirmation prompt")
@@ -244,6 +252,7 @@ func bindPreflightFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	flags.Int("max-removals", 0, "maximum aggregate account removals allowed during apply; 0 disables the limit")
 	flags.Float64("max-removal-percent", 0, "maximum removal percentage allowed per setup during apply; 0 disables the limit")
 	flags.Duration("max-snapshot-age", 0, "fail if latest processed snapshot is older than this duration; 0 disables the check")
+	flags.String("external-id-file", "", "CSV file of explicit per-account External IDs for mixed-ID setups")
 	mustBind(v, flags, "snapshot-id")
 	mustBind(v, flags, "query-id")
 	mustBind(v, flags, "query-setup-param")
@@ -252,6 +261,7 @@ func bindPreflightFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	mustBind(v, flags, "max-removals")
 	mustBind(v, flags, "max-removal-percent")
 	mustBind(v, flags, "max-snapshot-age")
+	mustBind(v, flags, "external-id-file")
 }
 
 func bindProcessingFlags(v *viper.Viper, flags *pflag.FlagSet) {
@@ -268,6 +278,7 @@ func bindProcessingFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	flags.Bool("allow-no-candidates", false, "allow removals when no uncollected candidate accounts are visible")
 	flags.Bool("allow-no-org-evidence", false, "allow removals when no AWS Organizations evidence is visible in NQE")
 	flags.Duration("max-snapshot-age", 0, "fail if latest processed snapshot is older than this duration; 0 disables the check")
+	flags.String("external-id-file", "", "CSV file of explicit per-account External IDs for mixed-ID setups")
 	mustBind(v, flags, "query-id")
 	mustBind(v, flags, "query-setup-param")
 	mustBind(v, flags, "setup-id")
@@ -281,6 +292,7 @@ func bindProcessingFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	mustBind(v, flags, "allow-no-candidates")
 	mustBind(v, flags, "allow-no-org-evidence")
 	mustBind(v, flags, "max-snapshot-age")
+	mustBind(v, flags, "external-id-file")
 }
 
 func newPreflightCommand(v *viper.Viper) *cobra.Command {
@@ -318,6 +330,7 @@ func newPreflightCommand(v *viper.Viper) *cobra.Command {
 				MaxRemovals:        flagInt(cmd, v, "max-removals"),
 				MaxRemovalPercent:  flagFloat64(cmd, v, "max-removal-percent"),
 				MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
+				ExternalIDFile:     flagString(cmd, v, "external-id-file"),
 			})
 			if err != nil {
 				return err
@@ -697,6 +710,7 @@ func newSyncAccountsCommand(v *viper.Viper) *cobra.Command {
 				AllowRemovals:     flagBool(cmd, v, "allow-removals"),
 				MaxRemovals:       flagInt(cmd, v, "max-removals"),
 				MaxRemovalPercent: flagFloat64(cmd, v, "max-removal-percent"),
+				ExternalIDFile:    flagString(cmd, v, "external-id-file"),
 			}, accounts)
 			if err != nil {
 				return err
@@ -714,7 +728,8 @@ func newSyncAccountsCommand(v *viper.Viper) *cobra.Command {
 	cmd.Flags().Bool("allow-removals", false, "allow reviewed manifest entries to remove accounts from the setup")
 	cmd.Flags().Int("max-removals", 0, "maximum aggregate account removals allowed; 0 disables the limit")
 	cmd.Flags().Float64("max-removal-percent", 0, "maximum removal percentage allowed for the setup; 0 disables the limit")
-	for _, name := range []string{"accounts-file", "setup-id", "output", "manual-output", "apply", "yes", "allow-removals", "max-removals", "max-removal-percent"} {
+	cmd.Flags().String("external-id-file", "", "CSV file of explicit per-account External IDs")
+	for _, name := range []string{"accounts-file", "setup-id", "output", "manual-output", "apply", "yes", "allow-removals", "max-removals", "max-removal-percent", "external-id-file"} {
 		mustBind(v, cmd.Flags(), name)
 	}
 	return cmd
@@ -758,6 +773,7 @@ func newServeWebhookCommand(v *viper.Viper) *cobra.Command {
 					AllowNoCandidates:  flagBool(cmd, v, "allow-no-candidates"),
 					AllowNoOrgEvidence: flagBool(cmd, v, "allow-no-org-evidence"),
 					MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
+					ExternalIDFile:     flagString(cmd, v, "external-id-file"),
 				},
 			})
 			if err != nil {
@@ -1182,17 +1198,15 @@ func emitResult(cmd *cobra.Command, v *viper.Viper, value any) error {
 }
 
 func emitExternalIDHuman(summary *app.ExternalIDSummary) error {
-	action := "set"
-	if !summary.TargetExternalIDConfigured {
-		action = "clear"
-	}
 	fmt.Fprintln(os.Stdout, "External ID migration report")
 	fmt.Fprintf(os.Stdout, "  host:       %s\n", summary.Host)
 	fmt.Fprintf(os.Stdout, "  network:    %s\n", summary.NetworkID)
 	fmt.Fprintf(os.Stdout, "  setup:      %s\n", summary.SetupID)
-	fmt.Fprintf(os.Stdout, "  action:     %s\n", action)
-	fmt.Fprintf(os.Stdout, "  accounts:   %d\n", summary.AccountCount)
+	fmt.Fprintf(os.Stdout, "  mode:       %s\n", summary.Mode)
+	fmt.Fprintf(os.Stdout, "  accounts:   %d total, %d selected, %d changed, %d unchanged\n", summary.AccountCount, summary.SelectedAccountCount, summary.ChangedAccountCount, summary.UnchangedAccountCount)
+	fmt.Fprintf(os.Stdout, "  actions:    %d set, %d clear\n", summary.SetAccountCount, summary.ClearedAccountCount)
 	fmt.Fprintf(os.Stdout, "  prior ID:   configured=%t consistent=%t\n", summary.PreviousExternalIDConfigured, summary.PreviousExternalIDConsistent)
+	fmt.Fprintf(os.Stdout, "  target ID:  configured=%t consistent=%t\n", summary.TargetExternalIDConfigured, summary.TargetExternalIDConsistent)
 	fmt.Fprintf(os.Stdout, "  apply:      %t\n", summary.Apply)
 	fmt.Fprintf(os.Stdout, "  patched:    %t\n", summary.Patched)
 	fmt.Fprintf(os.Stdout, "  output:     %s\n", summary.Output)

@@ -363,9 +363,9 @@ If `--manual-output` is used, also confirm that manual payload file by opening i
 
 This is a separate, one-time hardening change, not a prerequisite for AWS Organizations discovery. It is supported for an existing IAM user/access-key setup: Forward keeps using the stored IAM user credentials, but includes the configured External ID when it calls `sts:AssumeRole` for each target account.
 
-Choose one customer-defined value per Forward AWS setup. Use the same value in Forward and in every target role trust policy for that setup. External IDs are not passwords, but use an unguessable, customer-specific value and do not reuse it across unrelated customers.
+The simplest policy uses one customer-defined value per Forward AWS setup. Per-account values are also supported for staged testing or customer policy requirements. In every case, the value stored on an account's Forward `assumeRoleInfos` entry must exactly match that account's target-role trust policy. External IDs are not passwords, but use unguessable, customer-specific values and do not reuse them across unrelated customers.
 
-Use the dedicated `external-id` command rather than the normal NQE synchronization path. It reads the existing Forward setup directly, preserves its account list, role ARNs, regions, and proxy settings, and changes only the External ID on each `assumeRoleInfos` entry. It does not depend on NQE account discovery or a new snapshot.
+Use the dedicated `external-id` command rather than the normal NQE synchronization path for an isolated migration. It reads the existing Forward setup directly, preserves its account list, role ARNs, regions, and proxy settings, and changes only the selected External IDs. It does not depend on NQE account discovery or a new snapshot.
 
 First run a dry plan:
 
@@ -377,7 +377,88 @@ First run a dry plan:
   --format human
 ```
 
-Review the prior-state fields and confirm every entry in `aws_external_id_payload.json` contains the intended `externalId`. The command requires exactly one setup and either `--value VALUE` or `--clear`; without `--apply`, it writes the payload but does not modify Forward. It does not change or expose the setup's stored IAM access key or secret.
+Review the prior-state fields and confirm every entry in `aws_external_id_payload.json` contains the intended `externalId`. The command requires exactly one setup and either `--value VALUE`, `--clear`, or `--external-id-file FILE`; without `--apply`, it writes the payload but does not modify Forward. With no `--account-id`, `--value` and `--clear` apply to every account for backward compatibility. It does not change or expose the setup's stored IAM access key or secret.
+
+### Test one account or assign different values
+
+Repeat `--account-id` to apply one value or clear operation to a selected subset:
+
+```bash
+./bin/awssync external-id \
+  --setup-id AWS-PROD \
+  --account-id 111111111111 \
+  --value representative-test-value \
+  --output aws_external_id_test_payload.json \
+  --format human
+```
+
+For different values or mixed set/clear actions, create a reviewed CSV:
+
+```csv
+setup_id,account_id,action,external_id
+AWS-PROD,111111111111,set,representative-test-value
+AWS-PROD,222222222222,set,account-two-value
+AWS-PROD,333333333333,clear,
+```
+
+The shorter `account_id,action,external_id` header is accepted when the command or sync selects exactly one setup. An explicit `clear` action is mandatory; an empty cell never clears by implication.
+
+Dry-run and then apply the same file:
+
+```bash
+./bin/awssync external-id \
+  --setup-id AWS-PROD \
+  --external-id-file external-ids.csv \
+  --output aws_external_id_payload.json \
+  --format human
+
+./bin/awssync external-id \
+  --setup-id AWS-PROD \
+  --external-id-file external-ids.csv \
+  --output aws_external_id_payload.json \
+  --apply --yes
+```
+
+Omitted accounts are preserved. The command rejects duplicate, malformed, wrong-setup, and unknown account rows before writing or applying a PATCH. Review `selected_account_count`, `changed_account_count`, set/clear counts, and the per-account change list; values are visible only in the generated full-state payload.
+
+For a representative-account test, record that account's prior value during change review. Rollback is a second scoped dry-run and apply using the same account ID:
+
+```bash
+# Restore the original null/no-External-ID state.
+./bin/awssync external-id \
+  --setup-id AWS-PROD \
+  --account-id 111111111111 \
+  --clear \
+  --output aws_external_id_test_revert.json \
+  --format human
+
+# Or restore a prior non-null value.
+./bin/awssync external-id \
+  --setup-id AWS-PROD \
+  --account-id 111111111111 \
+  --value PREVIOUS_VALUE \
+  --output aws_external_id_test_revert.json \
+  --format human
+```
+
+Review the payload, then repeat only the applicable command with `--apply --yes`. Unselected accounts retain their current fields and order in the generated `assumeRoleInfos` list. The summary intentionally records configured/not-configured state rather than retaining the prior value as an automatic rollback artifact. Before clearing or replacing Forward's value, relax or restore the selected account's AWS trust-policy condition and verify role assumption so collection is not interrupted.
+
+Normal NQE sync, webhook sync, and `sync-accounts` now preserve each existing account's External ID instead of copying the first value across the setup. If a setup already has mixed values and discovery adds an account, the plan fails closed because no safe value can be inferred. Supply an assignment for every new account to preflight and the eventual dry-run/apply:
+
+```bash
+./bin/awssync preflight \
+  --setup-id AWS-PROD \
+  --external-id-file external-ids.csv \
+  --max-snapshot-age 24h \
+  --format human
+
+./bin/awssync \
+  --setup-id AWS-PROD \
+  --external-id-file external-ids.csv \
+  --max-snapshot-age 24h \
+  --output aws_sync_payload.json \
+  --format human
+```
 
 Prepare the matching collection-role trust policy change for each target AWS account, but do not make the condition mandatory until the Forward payload has been applied and tested. For an IAM user in the connectivity account, the trust statement has this form:
 

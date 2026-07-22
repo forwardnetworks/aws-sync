@@ -98,6 +98,27 @@ Confirm the dry run reports the expected prior and target state and verify every
 
 Run the command once per Forward AWS setup if different setups require different values. It does not replace or expose the IAM user's stored access key or secret. After the migration PATCH, later syncs preserve the stored External ID without rerunning it.
 
+To test one account, add `--account-id 111111111111`; repeat the flag for a subset. Unselected accounts remain unchanged. For different values per account, use a reviewed CSV:
+
+```csv
+setup_id,account_id,action,external_id
+AWS-PROD,111111111111,set,test-value
+AWS-PROD,222222222222,set,account-specific-value
+AWS-PROD,333333333333,clear,
+```
+
+```bash
+./bin/awssync external-id \
+  --setup-id AWS-PROD \
+  --external-id-file external-ids.csv \
+  --output aws_external_id_payload.json \
+  --format human
+```
+
+Duplicate, malformed, or unknown accounts fail before PATCH. Normal sync preserves mixed per-account values. If a mixed-ID setup gains a new account, pass the same `--external-id-file` to `preflight` and the normal dry-run/apply so the new account has an explicit value.
+
+Scoped rollback uses the same `--account-id`: dry-run and apply `--clear` if the original value was null, or `--value PREVIOUS_VALUE` if it was non-null. Record the old non-null value before the test; the summary reports its configured state but does not save it as an automatic rollback value. Relax the selected account's AWS trust-policy condition before changing Forward back. All unselected accounts remain unchanged.
+
 Rollback order matters: first relax or remove the mandatory `sts:ExternalId` condition from the target-role trust policies and confirm a representative role can still be assumed. Then replace `--value VALUE` with `--clear`, review the dry run, apply it, and test collection again. Clearing Forward first while AWS still requires the External ID will interrupt collection.
 
 ## Discover Before Onboarding

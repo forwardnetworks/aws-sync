@@ -65,6 +65,7 @@ flowchart TB
 
     subgraph plan_apply["awssync — plan and apply"]
         plan["plan / dry-run\nPOST /nqe + GET /cloudAccounts"]
+        external_ids["Per-account External ID merge\npreserve existing values\nexplicit CSV for ambiguous additions"]
         disk["payload.json\nwritten to disk before any change"]
         safety["Removal gates\nexplicit approval + count/% ceilings"]
         apply["--apply\nPATCH /cloudAccounts/{setupId}"]
@@ -84,7 +85,7 @@ flowchart TB
     cron --> plan
 
     preflight -- "read-only" --> fwd
-    plan --> disk
+    plan --> external_ids --> disk
     disk --> safety --> apply
     disk --> apply_plan
     apply_plan --> safety
@@ -99,10 +100,12 @@ flowchart TB
     classDef artifact fill:#FAEEDA,stroke:#854F0B,color:#412402;
 
     class cli,cron,preflight neutral;
-    class plan,safety,apply,apply_plan neutral;
+    class plan,external_ids,safety,apply,apply_plan neutral;
     class nqe,get_accts,patch_accts,get_snap fwdnode;
     class disk artifact;
 ```
+
+The account list is full-state, but External IDs are merged by AWS account ID. Existing mixed values are preserved. When a mixed-ID setup gains an account, planning stops unless `--external-id-file` explicitly supplies the new account's value; omitted existing accounts remain unchanged.
 
 ---
 

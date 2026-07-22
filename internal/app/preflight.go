@@ -122,7 +122,7 @@ func Preflight(ctx context.Context, cfg Config) (*PreflightSummary, error) {
 		result.pass("nqe_setup_id_differentiator", fmt.Sprintf("NQE rows include setup IDs: %s", strings.Join(setupIDValues, ", ")))
 	}
 
-	plan, err := buildPlan(items, cloudAccounts, cfg.QueryID, cfg.SetupIDs)
+	plan, err := buildPlanForConfig(cfg, items, cloudAccounts)
 	if err != nil {
 		result.fail("patch_plan", err.Error())
 		return result, nil
