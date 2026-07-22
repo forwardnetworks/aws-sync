@@ -117,6 +117,8 @@ AWS-PROD,333333333333,clear,
 
 Duplicate, malformed, or unknown accounts fail before PATCH. Normal sync preserves mixed per-account values. If a mixed-ID setup gains a new account, pass the same `--external-id-file` to `preflight` and the normal dry-run/apply so the new account has an explicit value.
 
+Scoped rollback uses the same `--account-id`: dry-run and apply `--clear` if the original value was null, or `--value PREVIOUS_VALUE` if it was non-null. Record the old non-null value before the test; the summary reports its configured state but does not save it as an automatic rollback value. Relax the selected account's AWS trust-policy condition before changing Forward back. All unselected accounts remain unchanged.
+
 Rollback order matters: first relax or remove the mandatory `sts:ExternalId` condition from the target-role trust policies and confirm a representative role can still be assumed. Then replace `--value VALUE` with `--clear`, review the dry run, apply it, and test collection again. Clearing Forward first while AWS still requires the External ID will interrupt collection.
 
 ## Discover Before Onboarding

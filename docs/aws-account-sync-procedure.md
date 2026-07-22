@@ -421,6 +421,28 @@ Dry-run and then apply the same file:
 
 Omitted accounts are preserved. The command rejects duplicate, malformed, wrong-setup, and unknown account rows before writing or applying a PATCH. Review `selected_account_count`, `changed_account_count`, set/clear counts, and the per-account change list; values are visible only in the generated full-state payload.
 
+For a representative-account test, record that account's prior value during change review. Rollback is a second scoped dry-run and apply using the same account ID:
+
+```bash
+# Restore the original null/no-External-ID state.
+./bin/awssync external-id \
+  --setup-id AWS-PROD \
+  --account-id 111111111111 \
+  --clear \
+  --output aws_external_id_test_revert.json \
+  --format human
+
+# Or restore a prior non-null value.
+./bin/awssync external-id \
+  --setup-id AWS-PROD \
+  --account-id 111111111111 \
+  --value PREVIOUS_VALUE \
+  --output aws_external_id_test_revert.json \
+  --format human
+```
+
+Review the payload, then repeat only the applicable command with `--apply --yes`. Unselected accounts retain their current fields and order in the generated `assumeRoleInfos` list. The summary intentionally records configured/not-configured state rather than retaining the prior value as an automatic rollback artifact. Before clearing or replacing Forward's value, relax or restore the selected account's AWS trust-policy condition and verify role assumption so collection is not interrupted.
+
 Normal NQE sync, webhook sync, and `sync-accounts` now preserve each existing account's External ID instead of copying the first value across the setup. If a setup already has mixed values and discovery adds an account, the plan fails closed because no safe value can be inferred. Supply an assignment for every new account to preflight and the eventual dry-run/apply:
 
 ```bash

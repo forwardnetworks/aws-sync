@@ -171,6 +171,8 @@ AWS-PROD,333333333333,clear,
 
 Omitted accounts remain unchanged. Duplicate, malformed, wrong-setup, and unknown account rows stop before any PATCH. The generated payload still contains the complete current account list because Forward updates this field as full state.
 
+Scoped rollback uses the same `--account-id` selection. Dry-run `--clear` when the account previously had no External ID, or `--value PREVIOUS_VALUE` when restoring a prior non-null value; then repeat the reviewed command with `--apply --yes`. Record any prior non-null value before testing because the command reports whether a previous value was configured but does not retain that value as an automatic rollback artifact. Relax the matching AWS trust-policy condition before clearing or replacing the Forward value.
+
 Ordinary NQE, webhook, and `sync-accounts` runs preserve each existing account's value. If a mixed-ID setup discovers a new account, preflight and dry-run fail closed until that account is assigned in the same CSV passed with `--external-id-file`.
 
 ## Onboarding and GovCloud
