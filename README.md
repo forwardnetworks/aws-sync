@@ -8,7 +8,7 @@
 flowchart TD
     A[What are you doing?] -->|Update an existing setup| B{Complete Organizations inventory<br/>is visible in Forward NQE?}
     A -->|Create a new setup| C{Can the customer use<br/>AWS Organizations?}
-    A -->|Change External ID only| X[Run external-id dry plan<br/>then apply once]
+    A -->|Change External ID only| X[Choose all accounts, selected IDs,<br/>or a reviewed CSV; dry-run first]
 
     B -->|Yes| D[Use preflight and the default NQE sync]
     B -->|No or standalone GovCloud accounts| E[Use a reviewed authoritative manifest]
@@ -33,6 +33,7 @@ The key choice is the inventory source. Use Forward NQE only when a current snap
 - Additions can be automated. Removals are blocked unless `--allow-removals` is explicit.
 - `--max-removals` and `--max-removal-percent` impose independent blast-radius ceilings.
 - Empty candidate inventory, stale snapshots, missing Organizations evidence, and unsafe GovCloud removal plans fail closed.
+- Existing per-account External IDs are preserved. Adding accounts to a mixed-ID setup fails unless the new accounts have explicit CSV assignments.
 - Saved plans are revalidated against current Forward state before apply.
 - Generated payload and audit files are written atomically with owner-only `0600` permissions.
 - Transient API failures are retried only for idempotent reads and full-state updates; create operations are never automatically retried.
@@ -118,7 +119,7 @@ Never remove an account only because collection fails. If it remains visible in 
 
 ## Customer-Defined External ID
 
-Changing an External ID is a separate, one-time workflow and works with an existing IAM-user/access-key setup. First review the Forward payload without changing anything:
+Changing an External ID is a separate workflow and works with an existing IAM-user/access-key setup. With no `--account-id`, the command retains its setup-wide behavior. First review the Forward payload without changing anything:
 
 ```bash
 ./bin/awssync external-id \
@@ -139,6 +140,38 @@ Update the target-role trust policies to require the identical `sts:ExternalId`,
 ```
 
 Later syncs preserve the value. To roll back, first relax the AWS trust policies, verify role assumption, then run the same command with `--clear` instead of `--value`.
+
+For a representative-account test or different values per account, scope the command with one or more account IDs:
+
+```bash
+./bin/awssync external-id \
+  --setup-id AWS-PROD \
+  --account-id 111111111111 \
+  --value test-external-id \
+  --output aws_external_id_test.json \
+  --format human
+```
+
+For a reviewed batch, use CSV. `set` requires a non-empty value; `clear` requires an empty value. A blank cell by itself never means clear.
+
+```csv
+setup_id,account_id,action,external_id
+AWS-PROD,111111111111,set,account-one-value
+AWS-PROD,222222222222,set,account-two-value
+AWS-PROD,333333333333,clear,
+```
+
+```bash
+./bin/awssync external-id \
+  --setup-id AWS-PROD \
+  --external-id-file external-ids.csv \
+  --output aws_external_id_payload.json \
+  --format human
+```
+
+Omitted accounts remain unchanged. Duplicate, malformed, wrong-setup, and unknown account rows stop before any PATCH. The generated payload still contains the complete current account list because Forward updates this field as full state.
+
+Ordinary NQE, webhook, and `sync-accounts` runs preserve each existing account's value. If a mixed-ID setup discovers a new account, preflight and dry-run fail closed until that account is assigned in the same CSV passed with `--external-id-file`.
 
 ## Onboarding and GovCloud
 

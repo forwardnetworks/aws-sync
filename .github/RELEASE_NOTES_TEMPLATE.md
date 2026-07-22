@@ -2,13 +2,13 @@
 
 ### Highlights
 
-- Generated payload, manual, and audit files are now atomically replaced with owner-only `0600` permissions, including outputs that may contain static AWS credentials.
-- Forward API reads, NQE queries, and full-state PATCH operations retry bounded transient `429`, `502`, `503`, and `504` responses. Non-idempotent create POSTs remain single-attempt.
-- `awssync --version` now reports the release, source commit, and build date.
-- CI now runs formatting, vet, tests, the race detector, and `govulncheck` with read-only repository permissions and commit-pinned actions.
-- Release jobs use least-privilege permissions and continue to publish checksums and build-provenance attestations.
-- The README now starts with the workflow decision diagram and routes detailed operator procedures to focused runbooks.
-- Contribution guidance requires human attribution and excludes automation/tool identities from contributor metadata.
+- `awssync external-id` can now target one or more `--account-id` values while preserving every unselected account.
+- A reviewed `--external-id-file` CSV supports different values and explicit set/clear actions per setup and account.
+- Normal NQE, webhook, and authoritative-manifest syncs preserve mixed per-account External IDs instead of flattening them to the first configured value.
+- New accounts in a mixed-ID setup fail closed unless the plan receives an explicit per-account CSV assignment.
+- CSV validation rejects malformed IDs, duplicates, implicit clears, wrong setups, and accounts outside the planned inventory before PATCH.
+- Dry-run summaries report selected, changed, unchanged, set, and cleared account counts plus per-account change metadata.
+- Release assets remain available for Linux and macOS on amd64 and arm64 with SHA-256 checksums and GitHub build-provenance attestations.
 
 ### Download and verify
 

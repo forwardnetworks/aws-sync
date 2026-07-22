@@ -66,6 +66,7 @@ type Config struct {
 	AllowNoCandidates  bool
 	AllowNoOrgEvidence bool
 	MaxSnapshotAge     time.Duration
+	ExternalIDFile     string
 	Source             string
 	AuthoritativeInput bool
 }
@@ -123,6 +124,7 @@ type SetupSummary struct {
 	RoleName                     string            `json:"role_name"`
 	OrgID                        int               `json:"org_id,omitempty"`
 	ExternalIDConfigured         bool              `json:"external_id_configured"`
+	ExternalIDConsistent         bool              `json:"external_id_consistent"`
 	ProxyServerID                string            `json:"proxy_server_id,omitempty"`
 	RegionToProxyServerID        map[string]string `json:"region_to_proxy_server_id,omitempty"`
 	Regions                      []string          `json:"regions,omitempty"`
@@ -239,7 +241,7 @@ func runPlannedSync(
 	items []map[string]any,
 	cloudAccounts []api.CloudAccount,
 ) (*Summary, error) {
-	plan, err := buildPlan(items, cloudAccounts, cfg.QueryID, cfg.SetupIDs)
+	plan, err := buildPlanForConfig(cfg, items, cloudAccounts)
 	if err != nil {
 		return nil, err
 	}
@@ -473,6 +475,7 @@ func RunAWSOrganizations(ctx context.Context, cfg AWSOrganizationConfig, source 
 			SetupID:                      setupID,
 			RoleName:                     roleName,
 			ExternalIDConfigured:         externalID != "",
+			ExternalIDConsistent:         true,
 			Regions:                      regionList,
 			ConfiguredAccountCount:       0,
 			NQEAccountRowCount:           0,
@@ -820,6 +823,7 @@ func buildSummary(
 			RoleName:                     setup.RoleName,
 			OrgID:                        setup.OrgID,
 			ExternalIDConfigured:         setup.ExternalIDConfigured,
+			ExternalIDConsistent:         setup.ExternalIDConsistent,
 			ProxyServerID:                setup.ProxyServerID,
 			RegionToProxyServerID:        nonEmptyStringMap(setup.Payload.RegionToProxyServerID),
 			Regions:                      regions,
@@ -887,6 +891,7 @@ type plannedSetup struct {
 	RoleName                  string
 	OrgID                     int
 	ExternalIDConfigured      bool
+	ExternalIDConsistent      bool
 	ProxyServerID             string
 	Payload                   api.PatchPayload
 	AddedAccounts             []accountRow
@@ -970,12 +975,28 @@ func (p *patchPlan) HasGovCloudRemovalsWithoutOrganizationEvidence() bool {
 }
 
 type buildPlanOptions struct {
-	RoleNameBySetup   map[string]string
-	ExternalIDBySetup map[string]string
+	RoleNameBySetup     map[string]string
+	ExternalIDBySetup   map[string]string
+	ExternalIDByAccount externalIDAssignments
 }
 
 func buildPlan(items []map[string]any, cloudAccounts []api.CloudAccount, queryID string, requestedSetupIDs []string) (*patchPlan, error) {
 	return buildPlanWithOptions(items, cloudAccounts, queryID, requestedSetupIDs, buildPlanOptions{})
+}
+
+func buildPlanForConfig(cfg Config, items []map[string]any, cloudAccounts []api.CloudAccount) (*patchPlan, error) {
+	defaultSetupID := ""
+	setupIDs := cleanSetupIDs(cfg.SetupIDs)
+	if len(setupIDs) == 1 {
+		defaultSetupID = setupIDs[0]
+	}
+	assignments, err := loadExternalIDAssignments(cfg.ExternalIDFile, defaultSetupID)
+	if err != nil {
+		return nil, err
+	}
+	return buildPlanWithOptions(items, cloudAccounts, cfg.QueryID, cfg.SetupIDs, buildPlanOptions{
+		ExternalIDByAccount: assignments,
+	})
 }
 
 func buildPlanWithOptions(items []map[string]any, cloudAccounts []api.CloudAccount, _ string, requestedSetupIDs []string, opts buildPlanOptions) (*patchPlan, error) {
@@ -988,6 +1009,11 @@ func buildPlanWithOptions(items []map[string]any, cloudAccounts []api.CloudAccou
 		fallbackSetupID, fallbackAccounts := fallbackAccounts(items, cloudMetaMap)
 		if fallbackSetupID != "" && len(fallbackAccounts) > 0 {
 			groupedAccounts = map[string][]accountRow{fallbackSetupID: fallbackAccounts}
+		}
+	}
+	for setupID := range opts.ExternalIDByAccount {
+		if _, ok := groupedAccounts[setupID]; !ok {
+			return nil, fmt.Errorf("external ID file contains setup %s, but that setup is not present in the discovered account inventory", setupID)
 		}
 	}
 	if len(groupedAccounts) == 0 {
@@ -1021,25 +1047,42 @@ func buildPlanWithOptions(items []map[string]any, cloudAccounts []api.CloudAccou
 			plan.Skips = append(plan.Skips, SkipSummary{SetupID: setupID, Reason: "unable to determine role ARN name from assumeRoleInfos"})
 			continue
 		}
-		externalID := extractExternalID(meta.AssumeRoleInfos)
-		if override, ok := opts.ExternalIDBySetup[setupID]; ok {
-			externalID = strings.TrimSpace(override)
-		}
-		orgID := parseOrgID(externalID)
 		partition := extractRolePartition(meta.AssumeRoleInfos)
 		nextAccounts := groupedAccounts[setupID]
 		current := currentAccounts(meta.AssumeRoleInfos)
+		added, removed, unchanged := accountDiff(current, nextAccounts)
+		uniformExternalID, hasUniformOverride := opts.ExternalIDBySetup[setupID]
+		if hasUniformOverride && len(opts.ExternalIDByAccount[setupID]) > 0 {
+			return nil, fmt.Errorf("setup %s has both setup-wide and per-account External ID overrides", setupID)
+		}
+		infos, err := buildAssumeRoleInfosPreservingExternalIDs(
+			nextAccounts,
+			meta.AssumeRoleInfos,
+			roleName,
+			partition,
+			hasUniformOverride,
+			strings.TrimSpace(uniformExternalID),
+			opts.ExternalIDByAccount[setupID],
+		)
+		if err != nil {
+			return nil, fmt.Errorf("setup %s: %w", setupID, err)
+		}
+		externalIDConfigured, externalIDConsistent := externalIDState(infos)
+		externalID := ""
+		if externalIDConsistent && len(infos) > 0 {
+			externalID = strings.TrimSpace(infos[0].ExternalID)
+		}
+		orgID := parseOrgID(externalID)
 		payload := api.PatchPayload{
 			Type:                  "AWS",
 			Name:                  setupID,
 			Regions:               regionMap(meta.Regions),
 			RegionToProxyServerID: stringMap(meta.RegionToProxyServerID),
-			AssumeRoleInfos:       buildAssumeRoleInfosForPartition(nextAccounts, roleName, externalID, partition),
+			AssumeRoleInfos:       infos,
 		}
 		if strings.TrimSpace(meta.ProxyServerID) != "" {
 			payload.ProxyServerID = meta.ProxyServerID
 		}
-		added, removed, unchanged := accountDiff(current, nextAccounts)
 		collectedCount := countCollectedAccounts(items, setupID)
 		candidateCount := countUncollectedCandidates(items, setupID)
 		orgUnitRowCount := countOrgUnitRows(items, setupID)
@@ -1048,7 +1091,8 @@ func buildPlanWithOptions(items []map[string]any, cloudAccounts []api.CloudAccou
 			SetupID:                   setupID,
 			RoleName:                  roleName,
 			OrgID:                     orgID,
-			ExternalIDConfigured:      externalID != "",
+			ExternalIDConfigured:      externalIDConfigured,
+			ExternalIDConsistent:      externalIDConsistent,
 			ProxyServerID:             meta.ProxyServerID,
 			Payload:                   payload,
 			AddedAccounts:             added,
@@ -1377,16 +1421,6 @@ func validateCloudAccountPartition(account api.CloudAccount) error {
 	return nil
 }
 
-func extractExternalID(assumeRoleInfos []api.AssumeRoleInfo) string {
-	for _, info := range assumeRoleInfos {
-		extID := strings.TrimSpace(info.ExternalID)
-		if extID != "" {
-			return extID
-		}
-	}
-	return ""
-}
-
 func parseOrgID(externalID string) int {
 	var orgID int
 	if _, err := fmt.Sscanf(strings.TrimSpace(externalID), "Org:%d", &orgID); err == nil {
@@ -1414,6 +1448,80 @@ func buildAssumeRoleInfosForPartition(accounts []accountRow, roleName, externalI
 		result = append(result, info)
 	}
 	return result
+}
+
+func buildAssumeRoleInfosPreservingExternalIDs(
+	accounts []accountRow,
+	current []api.AssumeRoleInfo,
+	roleName string,
+	partition string,
+	hasUniformOverride bool,
+	uniformOverride string,
+	assignments map[string]string,
+) ([]api.AssumeRoleInfo, error) {
+	currentIDs := make(map[string]string, len(current))
+	for _, info := range current {
+		accountID := assumeRoleAccountID(info)
+		if accountID != "" {
+			if _, exists := currentIDs[accountID]; exists {
+				return nil, fmt.Errorf("current setup contains duplicate account %s", accountID)
+			}
+			currentIDs[accountID] = strings.TrimSpace(info.ExternalID)
+		}
+	}
+	_, currentConsistent := externalIDState(current)
+	currentDefault := ""
+	if currentConsistent && len(current) > 0 {
+		currentDefault = strings.TrimSpace(current[0].ExternalID)
+	}
+
+	nextIDs := make(map[string]bool, len(accounts))
+	for _, account := range accounts {
+		nextIDs[account.AccountID] = true
+	}
+	unknownAssignments := make([]string, 0)
+	for accountID := range assignments {
+		if !nextIDs[accountID] {
+			unknownAssignments = append(unknownAssignments, accountID)
+		}
+	}
+	if len(unknownAssignments) > 0 {
+		sort.Strings(unknownAssignments)
+		return nil, fmt.Errorf("external ID file contains account(s) not present in the discovered inventory: %s", strings.Join(unknownAssignments, ", "))
+	}
+
+	result := make([]api.AssumeRoleInfo, 0, len(accounts))
+	missingAssignments := make([]string, 0)
+	for _, account := range accounts {
+		externalID := ""
+		if hasUniformOverride {
+			externalID = uniformOverride
+		} else if assigned, ok := assignments[account.AccountID]; ok {
+			externalID = assigned
+		} else if existing, ok := currentIDs[account.AccountID]; ok {
+			externalID = existing
+		} else if currentConsistent {
+			externalID = currentDefault
+		} else {
+			missingAssignments = append(missingAssignments, account.AccountID)
+		}
+		info := api.AssumeRoleInfo{
+			AccountID:   account.AccountID,
+			AccountName: account.AccountName,
+			RoleArn:     roleARN(partition, account.AccountID, roleName),
+			ExternalID:  externalID,
+			Enabled:     true,
+		}
+		result = append(result, info)
+	}
+	if len(missingAssignments) > 0 {
+		sort.Strings(missingAssignments)
+		return nil, fmt.Errorf(
+			"existing accounts use mixed External IDs; provide --external-id-file assignments for each new account: %s",
+			strings.Join(missingAssignments, ", "),
+		)
+	}
+	return result, nil
 }
 
 func roleARN(partition, accountID, roleName string) string {
