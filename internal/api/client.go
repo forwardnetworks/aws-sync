@@ -11,18 +11,27 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const PageLimit = 1000
 
+const (
+	defaultMaxAttempts = 3
+	defaultRetryDelay  = 200 * time.Millisecond
+	maxRetryDelay      = 5 * time.Second
+)
+
 type Client struct {
-	baseURL    *url.URL
-	apiPrefix  string
-	username   string
-	password   string
-	httpClient *http.Client
+	baseURL     *url.URL
+	apiPrefix   string
+	username    string
+	password    string
+	httpClient  *http.Client
+	maxAttempts int
+	retryDelay  time.Duration
 }
 
 type NQEResponse struct {
@@ -210,6 +219,8 @@ func NewClient(host, apiPrefix, username, password string, insecure bool, timeou
 			Timeout:   timeout,
 			Transport: transport,
 		},
+		maxAttempts: defaultMaxAttempts,
+		retryDelay:  defaultRetryDelay,
 	}, nil
 }
 
@@ -255,7 +266,7 @@ func (c *Client) QueryAWSAccounts(
 		if strings.TrimSpace(snapshotID) != "" {
 			endpointPath += fmt.Sprintf("&snapshotId=%s", url.QueryEscape(snapshotID))
 		}
-		if err := c.doJSON(ctx, http.MethodPost, endpointPath, payload, &response); err != nil {
+		if err := c.doJSONRetryable(ctx, http.MethodPost, endpointPath, payload, &response); err != nil {
 			return nil, err
 		}
 		allItems = append(allItems, filterItemsBySetupID(response.Items, setupIDs)...)
@@ -389,52 +400,122 @@ func (c *Client) TestNewWebhook(ctx context.Context, webhook Webhook) (*WebhookT
 }
 
 func (c *Client) doJSON(ctx context.Context, method, endpointPath string, requestBody any, out any) error {
+	retryable := method == http.MethodGet || method == http.MethodPatch
+	return c.doJSONWithRetry(ctx, method, endpointPath, requestBody, out, retryable)
+}
+
+func (c *Client) doJSONRetryable(ctx context.Context, method, endpointPath string, requestBody any, out any) error {
+	return c.doJSONWithRetry(ctx, method, endpointPath, requestBody, out, true)
+}
+
+func (c *Client) doJSONWithRetry(ctx context.Context, method, endpointPath string, requestBody any, out any, retryable bool) error {
 	endpoint, err := c.resolve(endpointPath)
 	if err != nil {
 		return err
 	}
-	var body io.Reader
+	var encoded []byte
 	if requestBody != nil {
-		encoded, err := json.Marshal(requestBody)
+		encoded, err = json.Marshal(requestBody)
 		if err != nil {
 			return fmt.Errorf("encode request body: %w", err)
 		}
-		body = bytes.NewReader(encoded)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, endpoint.String(), body)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+	attempts := 1
+	if retryable && c.maxAttempts > 1 {
+		attempts = c.maxAttempts
 	}
-	if requestBody != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.Header.Set("Accept", "application/json")
-	req.SetBasicAuth(c.username, c.password)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("perform request: %w", err)
-	}
-	defer resp.Body.Close()
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("read response body: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &HTTPError{
-			Method:     method,
-			Path:       endpoint.Path,
-			StatusCode: resp.StatusCode,
-			Body:       strings.TrimSpace(string(respBody)),
+	for attempt := 1; attempt <= attempts; attempt++ {
+		var body io.Reader
+		if requestBody != nil {
+			body = bytes.NewReader(encoded)
 		}
-	}
-	if out == nil || len(respBody) == 0 {
+		req, err := http.NewRequestWithContext(ctx, method, endpoint.String(), body)
+		if err != nil {
+			return fmt.Errorf("build request: %w", err)
+		}
+		if requestBody != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.Header.Set("Accept", "application/json")
+		req.SetBasicAuth(c.username, c.password)
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			if !retryable || attempt == attempts || ctx.Err() != nil {
+				return fmt.Errorf("perform request: %w", err)
+			}
+			if err := waitForRetry(ctx, retryDelay(c.retryDelay, attempt, "")); err != nil {
+				return err
+			}
+			continue
+		}
+		respBody, readErr := io.ReadAll(resp.Body)
+		closeErr := resp.Body.Close()
+		if readErr != nil {
+			return fmt.Errorf("read response body: %w", readErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close response body: %w", closeErr)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			httpErr := &HTTPError{
+				Method:     method,
+				Path:       endpoint.Path,
+				StatusCode: resp.StatusCode,
+				Body:       strings.TrimSpace(string(respBody)),
+			}
+			if !retryable || attempt == attempts || !isRetryableStatus(resp.StatusCode) {
+				return httpErr
+			}
+			if err := waitForRetry(ctx, retryDelay(c.retryDelay, attempt, resp.Header.Get("Retry-After"))); err != nil {
+				return err
+			}
+			continue
+		}
+		if out == nil || len(respBody) == 0 {
+			return nil
+		}
+		if err := json.Unmarshal(respBody, out); err != nil {
+			return fmt.Errorf("decode response body: %w", err)
+		}
 		return nil
 	}
-	if err := json.Unmarshal(respBody, out); err != nil {
-		return fmt.Errorf("decode response body: %w", err)
+	return fmt.Errorf("perform request: retry attempts exhausted")
+}
+
+func isRetryableStatus(statusCode int) bool {
+	switch statusCode {
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
 	}
-	return nil
+}
+
+func retryDelay(base time.Duration, attempt int, retryAfter string) time.Duration {
+	if seconds, err := strconv.Atoi(strings.TrimSpace(retryAfter)); err == nil && seconds >= 0 {
+		return min(time.Duration(seconds)*time.Second, maxRetryDelay)
+	}
+	if when, err := http.ParseTime(strings.TrimSpace(retryAfter)); err == nil {
+		if delay := time.Until(when); delay > 0 {
+			return min(delay, maxRetryDelay)
+		}
+	}
+	if base <= 0 {
+		base = defaultRetryDelay
+	}
+	return min(base*time.Duration(1<<(attempt-1)), maxRetryDelay)
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("wait to retry request: %w", ctx.Err())
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (c *Client) resolve(endpointPath string) (*url.URL, error) {

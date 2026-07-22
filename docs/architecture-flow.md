@@ -401,6 +401,9 @@ flowchart LR
 
 ## Key security properties
 
+- Generated payload and audit artifacts are atomically replaced with mode `0600`; static-key outputs still require secret-grade retention and disposal.
+- API retry behavior is operation-aware: reads and full-state PATCHes retry bounded transient failures, while create POSTs remain single-attempt to avoid duplicate side effects.
+
 - Existing setup sync and webhook sync do not connect to AWS; they use Forward NQE data.
 - `discover-org` connects to AWS Organizations only for initial onboarding. It does not write the discovery credentials to Forward.
 - `onboard-accounts` and `sync-accounts` do not connect to AWS; they use a locally supplied, explicitly reviewed account manifest.

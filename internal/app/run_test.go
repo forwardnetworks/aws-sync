@@ -1101,3 +1101,40 @@ func TestRunFallsBackToSingleSetupWhenQueryLacksSetupID(t *testing.T) {
 		t.Fatalf("unexpected plan: %#v", plan)
 	}
 }
+
+func TestWriteJSONPayloadIsAtomicAndOwnerOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "payload.json")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatalf("seed payload: %v", err)
+	}
+
+	outputPath, _, err := writeJSONPayload(path, map[string]string{"password": "sensitive"})
+	if err != nil {
+		t.Fatalf("writeJSONPayload() error = %v", err)
+	}
+	if outputPath != path {
+		t.Fatalf("unexpected output path %q", outputPath)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat payload: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("expected mode 0600, got %04o", got)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read payload: %v", err)
+	}
+	if !strings.Contains(string(data), `"password": "sensitive"`) {
+		t.Fatalf("unexpected payload contents: %s", data)
+	}
+	temps, err := filepath.Glob(filepath.Join(dir, ".payload.json.tmp-*"))
+	if err != nil {
+		t.Fatalf("glob temporary files: %v", err)
+	}
+	if len(temps) != 0 {
+		t.Fatalf("temporary files were not cleaned up: %#v", temps)
+	}
+}

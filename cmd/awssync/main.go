@@ -25,6 +25,12 @@ import (
 	"golang.org/x/term"
 )
 
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildDate = "unknown"
+)
+
 func main() {
 	if err := newRootCommand().Execute(); err != nil {
 		emitError(os.Stderr, err)
@@ -47,6 +53,7 @@ func newRootCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:           "awssync",
 		Short:         "Sync AWS cloud account setup payloads in Forward Networks",
+		Version:       fmt.Sprintf("%s (commit %s, built %s)", version, commit, buildDate),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
