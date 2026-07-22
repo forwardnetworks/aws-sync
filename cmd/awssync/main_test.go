@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,14 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
+
+func TestRootCommandIncludesBuildMetadataInVersion(t *testing.T) {
+	cmd := newRootCommand()
+	want := fmt.Sprintf("%s (commit %s, built %s)", version, commit, buildDate)
+	if cmd.Version != want {
+		t.Fatalf("unexpected version %q; want %q", cmd.Version, want)
+	}
+}
 
 func TestRootCommandHonorsLocalSnapshotAndOutputFlags(t *testing.T) {
 	var seenNQEQuery string

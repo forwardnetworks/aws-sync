@@ -1544,7 +1544,7 @@ func writeAuditPayloads(path string, payloads auditPayloads) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("encode audit payloads: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := writeFileAtomic0600(path, data); err != nil {
 		return "", fmt.Errorf("write audit payloads: %w", err)
 	}
 	return fmt.Sprintf("%x", sha256.Sum256(data)), nil
@@ -1566,7 +1566,7 @@ func writeJSONPayload(path string, payload any) (string, string, error) {
 	if err != nil {
 		return "", "", fmt.Errorf("encode output payload: %w", err)
 	}
-	if err := os.WriteFile(outputPath, data, 0o644); err != nil {
+	if err := writeFileAtomic0600(outputPath, data); err != nil {
 		return "", "", fmt.Errorf("write output payload: %w", err)
 	}
 	return outputPath, fmt.Sprintf("%x", sha256.Sum256(data)), nil
@@ -1588,7 +1588,7 @@ func writeManualAccountData(path string, accounts []ManualAccountData) (string, 
 	if err != nil {
 		return "", "", fmt.Errorf("encode manual account data: %w", err)
 	}
-	if err := os.WriteFile(outputPath, data, 0o644); err != nil {
+	if err := writeFileAtomic0600(outputPath, data); err != nil {
 		return "", "", fmt.Errorf("write manual account data: %w", err)
 	}
 	return outputPath, fmt.Sprintf("%x", sha256.Sum256(data)), nil
@@ -1610,10 +1610,44 @@ func writeManualPayloads(path string, payloads map[string][]api.AssumeRoleInfo) 
 	if err != nil {
 		return "", "", fmt.Errorf("encode manual payloads: %w", err)
 	}
-	if err := os.WriteFile(outputPath, data, 0o644); err != nil {
+	if err := writeFileAtomic0600(outputPath, data); err != nil {
 		return "", "", fmt.Errorf("write manual payloads: %w", err)
 	}
 	return outputPath, fmt.Sprintf("%x", sha256.Sum256(data)), nil
+}
+
+func writeFileAtomic0600(path string, data []byte) (err error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer func() {
+		_ = temp.Close()
+		if err != nil {
+			_ = os.Remove(tempPath)
+		}
+	}()
+	if err = temp.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err = temp.Write(data); err != nil {
+		return err
+	}
+	if err = temp.Sync(); err != nil {
+		return err
+	}
+	if err = temp.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(tempPath, path); err != nil {
+		return err
+	}
+	return nil
 }
 
 func auditPath(outputPath string) string {

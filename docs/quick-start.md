@@ -73,6 +73,8 @@ If you need a manual fallback format for UI drag-and-drop, also review `aws_sync
 
 Stop if removed accounts are unexpected.
 
+Generated payload, manual, and applied-audit files are atomically replaced with owner-only `0600` permissions. They can still contain sensitive credential material in static-key onboarding workflows, so store and dispose of them according to the customer's credential policy.
+
 ## Add an External ID to an Existing IAM User Setup
 
 This is a one-time change separate from the AWS Organizations setup checklist. To add a customer-defined External ID while keeping the existing IAM user/access-key credentials, use the dedicated command. It reads the existing setup directly, so it does not need NQE account discovery or a new snapshot:
@@ -218,6 +220,8 @@ Use AWS Organizations visibility together with the member account's `sts:AssumeR
 | No | Fails | Confirm whether the account was closed, removed, or moved. Remove only after independent confirmation; otherwise repair discovery or IAM. |
 
 ## Webhook Option
+
+Forward API reads, NQE queries, and full-state PATCH operations use bounded retries for transient `429`, `502`, `503`, and `504` responses. Account creation and webhook creation are not retried automatically because a repeated POST could create a duplicate. If a create request returns an ambiguous transport error, inspect current Forward state before running it again.
 
 For event-driven sync, run the receiver:
 

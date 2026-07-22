@@ -1,8 +1,4 @@
 name: release
-permissions:
-  contents: write
-  id-token: write
-  attestations: write
 
 on:
   workflow_dispatch:
@@ -10,24 +6,35 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: true
       - name: Check formatting
-        run: test -z "$(gofmt -l ./cmd ./internal)"
+        run: make fmt-check
       - name: Vet
-        run: go vet ./...
+        run: make vet
       - name: Test
-        run: go test ./...
+        run: make test
+      - name: Race detector
+        run: make race
+      - name: Vulnerability scan
+        run: make vuln
 
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: test
     strategy:
       matrix:
@@ -41,8 +48,10 @@ jobs:
           - goos: darwin
             goarch: arm64
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: true
@@ -51,22 +60,35 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
         run: |
-          mkdir -p dist
-          go build -trimpath -o "dist/awssync-${GOOS}-${GOARCH}" ./cmd/awssync
-      - uses: actions/upload-artifact@v7
+          BUILD_DATE="$(git show -s --format=%cI "$GITHUB_SHA")"
+          make build \
+            BINARY="dist/awssync-${GOOS}-${GOARCH}" \
+            VERSION="${VERSION}" \
+            COMMIT="${COMMIT}" \
+            BUILD_DATE="${BUILD_DATE}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: awssync-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/awssync-${{ matrix.goos }}-${{ matrix.goarch }}
 
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Download all build artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist
           merge-multiple: true
@@ -103,7 +125,7 @@ jobs:
             sha256sum -c sha256sums.txt
           )
       - name: Generate build provenance
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
         with:
           subject-path: |
             dist/awssync-linux-amd64
@@ -118,7 +140,7 @@ jobs:
         run: |
           sed "s|{{VERSION}}|${{ github.ref_name }}|g" .github/RELEASE_NOTES_TEMPLATE.md > dist/release-notes.md
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}

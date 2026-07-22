@@ -120,6 +120,7 @@ Expected result: the query returns AWS account IDs, names, and setup identifiers
 
 ```bash
 make build
+./bin/awssync --version
 ```
 
 The binary is written to:
@@ -536,6 +537,10 @@ Useful commands:
 If a new account appears in the Forward setup but fails collection, the most likely cause is missing or incorrect IAM role setup in that AWS account.
 
 ## Ongoing Automation
+
+Generated payload, manual, and applied-audit files are written atomically with owner-only `0600` permissions. Treat them as secrets when a workflow uses static AWS access keys, and configure retention accordingly.
+
+The client retries transient `429`, `502`, `503`, and `504` failures only for idempotent reads, NQE reads, and full-state PATCH operations. It does not retry cloud-account or webhook creation POSTs. After an ambiguous create failure, inspect Forward for the requested object before retrying manually.
 
 Run `awssync` on a schedule or after AWS account lifecycle events.
 

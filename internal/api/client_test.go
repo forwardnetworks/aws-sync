@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -246,5 +247,118 @@ func TestDuplicateWebhookErrorDetection(t *testing.T) {
 	})
 	if !IsDuplicateWebhookError(err) {
 		t.Fatalf("expected duplicate webhook error, got %v", err)
+	}
+}
+
+func TestIdempotentRequestsRetryTransientFailures(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(context.Context, *Client) error
+	}{
+		{
+			name: "get",
+			call: func(ctx context.Context, client *Client) error {
+				_, err := client.Networks(ctx)
+				return err
+			},
+		},
+		{
+			name: "patch",
+			call: func(ctx context.Context, client *Client) error {
+				return client.PatchCloudAccount(ctx, "network-1", "setup-1", map[string]any{"name": "setup-1"})
+			},
+		},
+		{
+			name: "nqe read post",
+			call: func(ctx context.Context, client *Client) error {
+				_, err := client.QueryAWSAccounts(ctx, "network-1", "snapshot-1", "", "query-1", nil, nil)
+				return err
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			attempts := 0
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				attempts++
+				if attempts < 3 {
+					w.Header().Set("Retry-After", "0")
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/networks":
+					_, _ = w.Write([]byte(`[]`))
+				case "/api/nqe":
+					_, _ = w.Write([]byte(`{"items":[]}`))
+				default:
+					w.WriteHeader(http.StatusNoContent)
+				}
+			}))
+			defer server.Close()
+
+			client, err := NewClient(server.URL, "/api", "alice", "secret", true, time.Second)
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			client.retryDelay = time.Millisecond
+			if err := tt.call(context.Background(), client); err != nil {
+				t.Fatalf("request error = %v", err)
+			}
+			if attempts != 3 {
+				t.Fatalf("expected 3 attempts, got %d", attempts)
+			}
+		})
+	}
+}
+
+func TestCreateCloudAccountDoesNotRetry(t *testing.T) {
+	attempts := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "/api", "alice", "secret", true, time.Second)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	client.retryDelay = time.Millisecond
+	err = client.CreateCloudAccount(context.Background(), "network-1", map[string]any{"name": "setup-1"})
+	if !IsHTTPStatus(err, http.StatusServiceUnavailable) {
+		t.Fatalf("expected 503 error, got %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("expected one attempt, got %d", attempts)
+	}
+}
+
+func TestRetryWaitHonorsContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+		cancel()
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "/api", "alice", "secret", true, time.Second)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	_, err = client.Networks(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+}
+
+func TestRetryDelayIsBounded(t *testing.T) {
+	if got := retryDelay(time.Second, 10, ""); got != maxRetryDelay {
+		t.Fatalf("exponential delay = %s; want %s", got, maxRetryDelay)
+	}
+	if got := retryDelay(time.Second, 1, "600"); got != maxRetryDelay {
+		t.Fatalf("Retry-After delay = %s; want %s", got, maxRetryDelay)
 	}
 }
