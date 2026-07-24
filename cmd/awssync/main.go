@@ -220,6 +220,11 @@ func newSafeSyncCommand(v *viper.Viper) *cobra.Command {
 				return fmt.Errorf("safe-sync invariant failed: preview contains account removals; no PATCH was sent")
 			}
 			emitSafeSyncPreview(preview)
+			added, reenabled, _ := summaryChangeCounts(preview)
+			if added == 0 && reenabled == 0 {
+				emitSafeSyncNoChanges()
+				return nil
+			}
 			if !flagBool(cmd, v, "yes") {
 				if !term.IsTerminal(int(os.Stdin.Fd())) {
 					return fmt.Errorf("safe-sync requires an interactive confirmation; use the standard awssync command for non-interactive automation")
@@ -1533,6 +1538,11 @@ func emitSafeSyncComplete(summary *app.Summary) {
 	fmt.Fprintf(os.Stdout, "  patched setups: %d\n", summary.PatchedSetupCount)
 	fmt.Fprintf(os.Stdout, "  rollback:       %s\n", summary.RollbackOutput)
 	fmt.Fprintf(os.Stdout, "  rollback sha256: %s\n", summary.RollbackSHA256)
+}
+
+func emitSafeSyncNoChanges() {
+	fmt.Fprintln(os.Stdout, "\nSafe sync complete")
+	fmt.Fprintln(os.Stdout, "  no account changes are needed; no PATCH was sent")
 }
 
 func accountSummaryIDs(accounts []app.AccountSummary) string {

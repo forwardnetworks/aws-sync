@@ -52,6 +52,9 @@ apply
 
 Any other response cancels the operation.
 
+When `add=0` and `reenable=0`, the command exits successfully without prompting
+and without sending a PATCH.
+
 ## Confirm Completion
 
 A successful run prints:
@@ -61,6 +64,9 @@ A successful run prints:
 - the rollback SHA-256.
 
 Keep the rollback file until the next successful collection confirms the expected account state.
+
+If no changes were needed, the command instead confirms that no PATCH was sent;
+there is no rollback file because Forward was not changed.
 
 ## If Safe Sync Stops
 

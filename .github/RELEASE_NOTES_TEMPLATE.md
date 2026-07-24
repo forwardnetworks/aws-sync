@@ -4,6 +4,7 @@
 
 - New `awssync safe-sync` command provides a one-command routine workflow: 24-hour snapshot freshness, preflight, compact preview, additive-only enforcement, one confirmation, rollback, and apply.
 - `safe-sync` does not expose prune or removal controls and stops before PATCH if preflight is not ready or the reviewed payload changes.
+- A zero-change `safe-sync` exits successfully without PATCHing Forward or refreshing setup test timestamps.
 - The README is now novice-first, with the routine workflow, count definitions, expected output, common stop conditions, and a short decision diagram before expert features.
 - A one-page routine operator handoff is available at `docs/routine-safe-sync.md`.
 - NQE reconciliation is additive by default: configured accounts missing from the current NQE result remain in the setup, while discovered disabled accounts are re-enabled.

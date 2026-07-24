@@ -55,9 +55,10 @@ For two AWS setups:
 2. Runs preflight checks.
 3. Shows each setup with `configured`, `discovered`, `add`, `reenable`, and `remove`.
 4. Refuses to continue unless `remove=0`.
-5. Prompts for the word `apply`.
-6. Confirms that the reviewed payload has not changed.
-7. Writes a rollback file before PATCHing Forward.
+5. Exits without a PATCH when no account changes are needed.
+6. Otherwise, prompts for the word `apply`.
+7. Confirms that the reviewed payload has not changed.
+8. Writes a rollback file before PATCHing Forward.
 
 Example preview:
 
