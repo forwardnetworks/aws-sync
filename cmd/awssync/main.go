@@ -147,6 +147,7 @@ func newRootCommand() *cobra.Command {
 	bindNetworkFlag(v, cmd.Flags())
 	bindRunFlags(v, cmd.Flags())
 	cmd.AddCommand(
+		newSafeSyncCommand(v),
 		newPreflightCommand(v),
 		newExternalIDCommand(v),
 		newApplyPlanCommand(v),
@@ -158,6 +159,96 @@ func newRootCommand() *cobra.Command {
 		newServeWebhookCommand(v),
 		newConfigureWebhookCommand(v),
 	)
+	return cmd
+}
+
+func newSafeSyncCommand(v *viper.Viper) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "safe-sync",
+		Short: "Run a guarded additive-only sync for routine operations",
+		Long: "Run preflight, preview additions and re-enables, and apply only after confirmation.\n" +
+			"safe-sync cannot remove accounts and always uses a processed snapshot no older than 24 hours.",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			format, err := resolveOutputFormat(cmd, v)
+			if err != nil {
+				return err
+			}
+			if format != "human" {
+				return fmt.Errorf("safe-sync uses a single human-readable confirmation workflow; use the standard awssync command for JSON automation")
+			}
+			password, err := resolvePassword(v, os.Stdin, os.Stderr)
+			if err != nil {
+				return err
+			}
+			networkID, err := resolveNetworkIDForCLI(cmd.Context(), v, password, flagString(cmd, v, "network-id"), os.Stdin, os.Stderr)
+			if err != nil {
+				return err
+			}
+			setupIDs, err := resolveSetupIDsForCLI(cmd.Context(), v, password, networkID, flagStringSlice(cmd, v, "setup-id"), os.Stdin, os.Stderr)
+			if err != nil {
+				return err
+			}
+			const maxSnapshotAge = 24 * time.Hour
+			base := app.Config{
+				Host:           v.GetString("host"),
+				Username:       v.GetString("username"),
+				Password:       password,
+				NetworkID:      networkID,
+				SetupIDs:       setupIDs,
+				APIPrefix:      v.GetString("api-prefix"),
+				Insecure:       v.GetBool("insecure"),
+				Timeout:        v.GetDuration("timeout"),
+				MaxSnapshotAge: maxSnapshotAge,
+			}
+			preflight, err := app.Preflight(cmd.Context(), base)
+			if err != nil {
+				return err
+			}
+			if !preflight.Ready {
+				return safeSyncPreflightError(preflight)
+			}
+
+			base.SnapshotID = preflight.SnapshotID
+			base.Output = flagString(cmd, v, "output")
+			preview, err := app.Run(cmd.Context(), base)
+			if err != nil {
+				return err
+			}
+			if summaryRemovalCount(preview) != 0 {
+				return fmt.Errorf("safe-sync invariant failed: preview contains account removals; no PATCH was sent")
+			}
+			emitSafeSyncPreview(preview)
+			if !flagBool(cmd, v, "yes") {
+				if !term.IsTerminal(int(os.Stdin.Fd())) {
+					return fmt.Errorf("safe-sync requires an interactive confirmation; use the standard awssync command for non-interactive automation")
+				}
+				if err := confirmSafeSync(preview, os.Stdin, os.Stderr); err != nil {
+					return err
+				}
+			}
+
+			base.Apply = true
+			base.Output = preview.Output
+			base.ExpectedPayloadSHA256 = preview.PayloadSHA256
+			result, err := app.Run(cmd.Context(), base)
+			if err != nil {
+				return err
+			}
+			emitSafeSyncComplete(result)
+			return nil
+		},
+	}
+	bindNetworkFlag(v, cmd.Flags())
+	cmd.Flags().StringSlice("setup-id", nil, "Forward AWS setup ID to sync; repeat for more than one")
+	cmd.Flags().String("output", "", "output JSON path for the generated payload")
+	cmd.Flags().Bool("yes", false, "skip the interactive confirmation")
+	mustBind(v, cmd.Flags(), "setup-id")
+	mustBind(v, cmd.Flags(), "output")
+	mustBind(v, cmd.Flags(), "yes")
+	_ = cmd.Flags().MarkHidden("output")
+	_ = cmd.Flags().MarkHidden("yes")
 	return cmd
 }
 
@@ -1386,6 +1477,64 @@ func emitSummaryHuman(summary *app.Summary) error {
 	return nil
 }
 
+func safeSyncPreflightError(summary *app.PreflightSummary) error {
+	failures := make([]string, 0)
+	for _, check := range summary.Checks {
+		if check.Status != "fail" {
+			continue
+		}
+		failures = append(failures, check.Name+": "+check.Message)
+	}
+	if len(failures) == 0 {
+		failures = append(failures, "preflight did not report a specific failed check")
+	}
+	return fmt.Errorf("safe-sync stopped because preflight is not ready: %s", strings.Join(failures, "; "))
+}
+
+func summaryChangeCounts(summary *app.Summary) (int, int, int) {
+	added, reenabled, removed := 0, 0, 0
+	for _, setup := range summary.PlannedSetups {
+		added += len(setup.AddedAccounts)
+		reenabled += len(setup.ReenabledAccounts)
+		removed += len(setup.RemovedAccounts)
+	}
+	return added, reenabled, removed
+}
+
+func summaryRemovalCount(summary *app.Summary) int {
+	_, _, removed := summaryChangeCounts(summary)
+	return removed
+}
+
+func emitSafeSyncPreview(summary *app.Summary) {
+	fmt.Fprintln(os.Stdout, "Safe sync preview")
+	fmt.Fprintf(os.Stdout, "  network:  %s\n", summary.NetworkID)
+	fmt.Fprintf(os.Stdout, "  snapshot: %s\n", summary.SnapshotID)
+	fmt.Fprintln(os.Stdout, "  mode:     additive only (account removal is disabled)")
+	fmt.Fprintln(os.Stdout, "\nSetups:")
+	for _, setup := range summary.PlannedSetups {
+		fmt.Fprintf(
+			os.Stdout,
+			"  - %s: configured=%d discovered=%d add=%d reenable=%d remove=%d\n",
+			setup.SetupID,
+			setup.ConfiguredAccountCount,
+			setup.NQEAccountRowCount,
+			len(setup.AddedAccounts),
+			len(setup.ReenabledAccounts),
+			len(setup.RemovedAccounts),
+		)
+	}
+	added, reenabled, removed := summaryChangeCounts(summary)
+	fmt.Fprintf(os.Stdout, "\nChanges: add=%d reenable=%d remove=%d\n", added, reenabled, removed)
+}
+
+func emitSafeSyncComplete(summary *app.Summary) {
+	fmt.Fprintln(os.Stdout, "\nSafe sync complete")
+	fmt.Fprintf(os.Stdout, "  patched setups: %d\n", summary.PatchedSetupCount)
+	fmt.Fprintf(os.Stdout, "  rollback:       %s\n", summary.RollbackOutput)
+	fmt.Fprintf(os.Stdout, "  rollback sha256: %s\n", summary.RollbackSHA256)
+}
+
 func accountSummaryIDs(accounts []app.AccountSummary) string {
 	ids := make([]string, 0, len(accounts))
 	for _, account := range accounts {
@@ -1492,6 +1641,19 @@ func confirmApplyFromSummary(summary *app.Summary, stdin *os.File, stderr io.Wri
 	}
 	if response != "apply" {
 		return fmt.Errorf("apply cancelled")
+	}
+	return nil
+}
+
+func confirmSafeSync(summary *app.Summary, stdin *os.File, stderr io.Writer) error {
+	added, reenabled, removed := summaryChangeCounts(summary)
+	fmt.Fprintf(stderr, "Apply additive-only changes (add=%d, reenable=%d, remove=%d)? Type 'apply' to continue: ", added, reenabled, removed)
+	var response string
+	if _, err := fmt.Fscanln(stdin, &response); err != nil {
+		return fmt.Errorf("read safe-sync confirmation: %w", err)
+	}
+	if response != "apply" {
+		return fmt.Errorf("safe-sync cancelled")
 	}
 	return nil
 }

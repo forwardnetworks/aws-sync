@@ -1,228 +1,206 @@
 # aws-sync
 
-`awssync` safely reconciles AWS account inventory with Forward Networks AWS cloud setups. It supports AWS Organizations discovery, reviewed account manifests, GovCloud, customer-defined External IDs, dry plans, guarded apply, and snapshot-ready automation.
+`awssync` keeps the account list in an existing Forward Networks AWS setup synchronized with the AWS inventory already collected by Forward.
 
-## Choose a Workflow
+Most operators should use `safe-sync`. It runs the safety checks, shows a short preview, and asks before changing Forward. It can add or re-enable accounts, but it cannot remove them.
 
-```mermaid
-flowchart TD
-    A[What are you doing?] -->|Update an existing setup| B{Complete Organizations inventory<br/>is visible in Forward NQE?}
-    A -->|Create a new setup| C{Can the customer use<br/>AWS Organizations?}
-    A -->|Change External ID only| X[Choose all accounts, selected IDs,<br/>or a reviewed CSV; dry-run first]
+## Routine Safe Sync
 
-    B -->|Yes| D[Use preflight and the default NQE sync]
-    B -->|No or standalone GovCloud accounts| E[Use a reviewed authoritative manifest]
-    C -->|Yes| F[Prefer Forward Terraform provider<br/>Use discover-org for CLI/manual fallback]
-    C -->|No| G[Use onboard-accounts with<br/>a reviewed authoritative manifest]
+### 1. Download and verify
 
-    D --> H[Create and review dry plan]
-    E --> H
-    F --> H
-    G --> H
-    H --> I{Any removals?}
-    I -->|No| J[Apply]
-    I -->|Yes| K[Use explicit prune-missing<br/>Verify lifecycle and set every removal guard]
-    K --> J
-```
-
-The key choice is the inventory source. Use Forward NQE only when a current snapshot contains complete AWS Organizations evidence. Use a reviewed manifest when Organizations is unavailable, intentionally excluded, or not reliably represented—including standalone GovCloud environments.
-
-## Safety Model
-
-- Dry run is the default; writes require `--apply` and confirmation or `--yes`.
-- NQE sync is additive by default: accounts absent from NQE remain configured. This prevents disabled, failed, or snapshot-missing accounts from being deleted.
-- NQE removal additionally requires `--prune-missing`; prefer `sync-accounts` with a complete authoritative manifest for lifecycle removals.
-- Removals are blocked unless `--allow-removals` is explicit.
-- Any removal requires both nonzero `--max-removals` and `--max-removal-percent` ceilings in addition to `--allow-removals`.
-- Empty candidate inventory, stale snapshots, missing Organizations evidence, and unsafe GovCloud removal plans fail closed.
-- `Collected? false` for an already configured account is not AWS Organizations evidence. It commonly means the account is configured but disabled or failed collection.
-- CLI NQE runs pin the latest processed snapshot before planning so review and apply use one immutable inventory.
-- Existing per-account External IDs are preserved. Adding accounts to a mixed-ID setup fails unless the new accounts have explicit CSV assignments.
-- Saved plans are revalidated against current Forward state before apply.
-- Every apply writes a complete pre-change `.rollback.json` payload before the first PATCH.
-- Generated payload and audit files are written atomically with owner-only `0600` permissions.
-- Transient API failures are retried only for idempotent reads and full-state updates; create operations are never automatically retried.
-
-## Install a Verified Release
-
-Download the archive and checksum manifest for the required platform from [Releases](https://github.com/forwardnetworks/aws-sync/releases):
+Download the archive and `sha256sums.txt` for your platform from [Releases](https://github.com/forwardnetworks/aws-sync/releases).
 
 ```bash
 tar -xzf awssync-linux-amd64.tar.gz
-chmod +x awssync-linux-amd64
 sha256sum -c sha256sums.txt --ignore-missing
 gh attestation verify awssync-linux-amd64 \
   --repo forwardnetworks/aws-sync
 ./awssync-linux-amd64 --version
 ```
 
-Release assets are available for Linux and macOS on amd64 and arm64. Each release includes SHA-256 checksums and GitHub build-provenance attestations.
+Release assets are available for Linux and macOS on amd64 and arm64.
 
-To build locally:
-
-```bash
-make build
-./bin/awssync --version
-```
-
-## Existing Setup Quick Start
-
-Set credentials without putting the password on the command line:
+### 2. Set the Forward login
 
 ```bash
 export FWD_HOST=https://fwd.app
 export FWD_USER=you@example.com
-export FWD_PASS='secret'
 export FWD_NETWORK_ID=NETWORK_ID
 ```
 
-In automation, always supply the network and setup IDs explicitly. Interactive runs can prompt when more than one is visible.
+Do not put the Forward password in a shared script. `safe-sync` prompts for it without displaying it.
 
-Check the current snapshot and Organizations evidence:
+`FWD_NETWORK_ID` is optional in an interactive terminal. If the user can see several networks, `safe-sync` displays a numbered picker.
+
+### 3. Run one command
+
+For one AWS setup:
 
 ```bash
-./bin/awssync preflight \
+./awssync-linux-amd64 safe-sync \
+  --setup-id AWS-PROD
+```
+
+For two AWS setups:
+
+```bash
+./awssync-linux-amd64 safe-sync \
   --setup-id AWS-PROD \
-  --max-snapshot-age 24h
+  --setup-id AWS-SANDBOX
 ```
 
-Create a dry plan:
+`safe-sync` then:
 
-```bash
-./bin/awssync \
-  --setup-id AWS-PROD \
-  --max-snapshot-age 24h \
-  --output aws_sync_payload.json
+1. Selects the latest processed Forward snapshot and requires it to be no more than 24 hours old.
+2. Runs preflight checks.
+3. Shows each setup with `configured`, `discovered`, `add`, `reenable`, and `remove`.
+4. Refuses to continue unless `remove=0`.
+5. Prompts for the word `apply`.
+6. Confirms that the reviewed payload has not changed.
+7. Writes a rollback file before PATCHing Forward.
+
+Example preview:
+
+```text
+Safe sync preview
+  network:  12345
+  snapshot: 67890
+  mode:     additive only (account removal is disabled)
+
+Setups:
+  - AWS-PROD: configured=325 discovered=10 add=0 reenable=315 remove=0
+
+Changes: add=0 reenable=315 remove=0
 ```
 
-Human-readable output is the default. Add `--json` (or `--format json`) when a script needs the structured summary.
+Type `apply` only when the selected network, snapshot, setup IDs, and counts are expected.
 
-Review `added_accounts`, `removed_accounts`, the pinned snapshot ID, role name, External ID state, regions, and payload hash. If no removals are planned, apply the freshly recomputed plan:
+### What the counts mean
 
-```bash
-./bin/awssync \
-  --setup-id AWS-PROD \
-  --max-snapshot-age 24h \
-  --output aws_sync_payload.json \
-  --apply --yes
+| Count | Meaning |
+| --- | --- |
+| `configured` | Accounts currently present in the Forward setup |
+| `discovered` | Accounts visible in the selected Forward snapshot/NQE result |
+| `add` | Newly discovered accounts that will be added |
+| `reenable` | Existing unchecked accounts that will be checked again |
+| `remove` | Always zero in `safe-sync` |
+
+An account can be configured but show `Collected? false` because it is unchecked or collection failed. `safe-sync` preserves it. A failed IAM role, trust policy, External ID, or collection permission is a repair task—not evidence that the account should be deleted.
+
+## Which Workflow Should I Use?
+
+```mermaid
+flowchart TD
+    A[What do you need to do?] -->|Routine update of an existing setup| B[safe-sync]
+    A -->|Remove a closed or retired account| C[Expert reviewed removal workflow]
+    A -->|Create a new AWS setup| D{AWS Organizations available?}
+    A -->|Change an External ID| E[external-id workflow]
+    D -->|Yes| F[Forward Terraform provider]
+    D -->|No or incomplete GovCloud inventory| G[Reviewed account manifest]
+    B --> H[Preflight, preview, confirm, rollback, apply]
+    C --> I[Verify lifecycle outside Forward, then use explicit removal guards]
 ```
 
-For an independently verified removal, add both approval and quantitative limits:
+Use `safe-sync` for ordinary account additions and unchecked accounts. The remaining commands are expert workflows:
 
-```bash
-./bin/awssync \
-  --setup-id AWS-PROD \
-  --max-snapshot-age 24h \
-  --output aws_sync_payload.json \
-  --prune-missing \
-  --allow-removals \
-  --max-removals 5 \
-  --max-removal-percent 2 \
-  --apply --yes
-```
+| Need | Workflow |
+| --- | --- |
+| Routine existing-setup sync | `safe-sync` |
+| Scheduled or JSON automation | Standard `awssync` command |
+| Independently verified account removal | Standard command with the reviewed removal workflow |
+| New commercial AWS Organization | Forward Terraform provider; `discover-org` is the manual fallback |
+| No Organizations access | `onboard-accounts` or `sync-accounts` with a complete manifest |
+| GovCloud | [GovCloud workflow](docs/govcloud-workflow.md) |
+| One or more External ID changes | `external-id` |
 
-Never remove an account only because collection fails. If it remains visible in Organizations, repair its role, trust policy, External ID, or collection permissions.
+## When Safe Sync Stops
 
-After apply, the summary prints `rollback_output` and `rollback_sha256`. To restore the exact pre-change setup state:
+`safe-sync` makes no Forward change when:
 
-```bash
-./bin/awssync apply-plan \
-  --plan aws_sync_payload.rollback.json \
-  --yes
-```
+- no processed snapshot is available;
+- the latest processed snapshot is older than 24 hours;
+- NQE returns no valid AWS account rows;
+- a selected setup does not exist or is not AWS;
+- the setup has an ambiguous mixed External ID for a newly discovered account;
+- the preview unexpectedly contains a removal;
+- the payload changes after review;
+- the Forward setup changes immediately before PATCH.
 
-## Customer-Defined External ID
+Fix the reported condition and run the same command again. Do not add removal overrides to make a routine run pass.
 
-Changing an External ID is a separate workflow and works with an existing IAM-user/access-key setup. With no `--account-id`, the command retains its setup-wide behavior. First review the Forward payload without changing anything:
+## Account Removal Is a Separate Expert Workflow
 
-```bash
-./bin/awssync external-id \
-  --setup-id AWS-PROD \
-  --value customer-defined-value \
-  --output aws_external_id_payload.json \
-  --format human
-```
+`safe-sync` has no removal switches. Removing an account requires an operator to confirm outside Forward that the AWS account was closed, retired, or removed from the intended Organization.
 
-Update the target-role trust policies to require the identical `sts:ExternalId`, test a representative account, then apply the Forward change:
+The standard NQE workflow requires all of the following before a removal can be applied:
 
-```bash
-./bin/awssync external-id \
-  --setup-id AWS-PROD \
-  --value customer-defined-value \
-  --output aws_external_id_payload.json \
-  --apply --yes
-```
+- `--prune-missing`
+- `--allow-removals`
+- a nonzero `--max-removals`
+- a nonzero `--max-removal-percent`
+- additional Organizations-evidence overrides when applicable
 
-Later syncs preserve the value. To roll back, first relax the AWS trust policies, verify role assumption, then run the same command with `--clear` instead of `--value`.
+Prefer `sync-accounts` with a complete authoritative manifest for lifecycle removals. Never remove an account only because its collection fails.
 
-For a representative-account test or different values per account, scope the command with one or more account IDs:
-
-```bash
-./bin/awssync external-id \
-  --setup-id AWS-PROD \
-  --account-id 111111111111 \
-  --value test-external-id \
-  --output aws_external_id_test.json \
-  --format human
-```
-
-For a reviewed batch, use CSV. `set` requires a non-empty value; `clear` requires an empty value. A blank cell by itself never means clear.
-
-```csv
-setup_id,account_id,action,external_id
-AWS-PROD,111111111111,set,account-one-value
-AWS-PROD,222222222222,set,account-two-value
-AWS-PROD,333333333333,clear,
-```
-
-```bash
-./bin/awssync external-id \
-  --setup-id AWS-PROD \
-  --external-id-file external-ids.csv \
-  --output aws_external_id_payload.json \
-  --format human
-```
-
-Omitted accounts remain unchanged. Duplicate, malformed, wrong-setup, and unknown account rows stop before any PATCH. The generated payload still contains the complete current account list because Forward updates this field as full state.
-
-Scoped rollback uses the same `--account-id` selection. Dry-run `--clear` when the account previously had no External ID, or `--value PREVIOUS_VALUE` when restoring a prior non-null value; then repeat the reviewed command with `--apply --yes`. Record any prior non-null value before testing because the command reports whether a previous value was configured but does not retain that value as an automatic rollback artifact. Relax the matching AWS trust-policy condition before clearing or replacing the Forward value.
-
-Ordinary NQE, webhook, and `sync-accounts` runs preserve each existing account's value. If a mixed-ID setup discovers a new account, preflight and dry-run fail closed until that account is assigned in the same CSV passed with `--external-id-file`.
-
-## Onboarding and GovCloud
-
-| Environment | Inventory source | Recommended command or workflow |
-| --- | --- | --- |
-| New commercial AWS Organization | AWS Organizations | Forward Terraform provider; `discover-org` is the CLI/manual fallback |
-| Existing setup with complete Organizations data in Forward | Current Forward snapshot/NQE | `preflight`, dry plan, then guarded apply |
-| No Organizations access | Reviewed account manifest | `onboard-accounts` or `sync-accounts` |
-| GovCloud with complete Organizations data collected by Forward | Current Forward snapshot/NQE | Regular workflow, after preflight confirms evidence |
-| Standalone or incomplete GovCloud inventory | Reviewed `aws-us-gov` manifest | `onboard-accounts` or `sync-accounts` |
-
-Manifest-based sync treats the reviewed file as authoritative, but still blocks removals unless the operator explicitly allows and bounds them. GovCloud role ARNs retain the `arn:aws-us-gov` partition and mixed-partition plans are rejected.
+See [AWS account sync procedure](docs/aws-account-sync-procedure.md#apply-the-sync) for the reviewed removal commands and rollback procedure.
 
 ## Automation
 
-For scheduled jobs, run preflight and the dry plan without removal flags. This allows normal additions while unexpected removals stop for review. Archive the human/JSON summary, payload SHA-256, snapshot ID, selected setup IDs, and applied payload.
+For scheduled additive-only operation, use the standard command without any prune or removal flags:
 
-For event-driven operation, `serve-webhook` accepts Forward `SNAPSHOT_READY` events and serializes sync jobs through a bounded queue. Install it behind TLS, configure Basic authentication, and use `configure-webhook` to create or update the Forward webhook.
+```bash
+./awssync-linux-amd64 \
+  --network-id NETWORK_ID \
+  --setup-id AWS-PROD \
+  --max-snapshot-age 24h \
+  --output aws_sync_payload.json \
+  --apply --yes --json
+```
 
-Do not pass Forward or AWS secrets as command-line arguments in shared process environments. Prefer protected environment injection or a service manager secret facility. Generated files are `0600`, but they may still contain sensitive static-key material and must be retained or deleted according to the customer's credential policy.
+The standard command is additive by default, pins one processed snapshot, writes the payload before PATCH, verifies current setup state, and writes `<output>.rollback.json`.
+
+For event-driven operation, `serve-webhook` accepts Forward `SNAPSHOT_READY` events and serializes jobs through a bounded queue.
+
+Do not pass Forward or AWS secrets on command lines in shared process environments. Use protected environment injection or a service-manager secret facility.
+
+## External IDs, Onboarding, and GovCloud
+
+These are separate from routine synchronization:
+
+- [External ID procedure](docs/aws-account-sync-procedure.md#customer-defined-external-id-with-an-iam-user)
+- [New AWS Organizations onboarding](docs/aws-account-sync-procedure.md#onboard-from-aws-organizations-directly)
+- [Account-manifest workflow](docs/architecture-flow.md)
+- [AWS GovCloud workflow](docs/govcloud-workflow.md)
+
+Existing per-account External IDs are preserved during ordinary synchronization. New accounts in a mixed-ID setup fail closed until a reviewed CSV provides the intended value.
+
+## Safety Guarantees
+
+- Routine NQE synchronization is additive; accounts missing from NQE remain configured.
+- `safe-sync` cannot remove accounts.
+- Human-readable output is the default; `--json` is for standard-command automation.
+- The latest processed snapshot is pinned before planning.
+- Invalid NQE account-ID placeholders are ignored and reported.
+- Every apply writes a complete pre-change rollback payload.
+- The reviewed target payload and current Forward setup are revalidated before PATCH.
+- Generated payloads use atomic owner-only `0600` files.
+- Idempotent reads and full-state updates use bounded transient retries.
 
 ## Documentation
 
 | Guide | Use it for |
 | --- | --- |
-| [Quick start](docs/quick-start.md) | Copy/paste commands, setup selection, and troubleshooting |
-| [AWS account sync procedure](docs/aws-account-sync-procedure.md) | Complete prerequisites, IAM, automation, and validation runbook |
+| [Routine safe sync](docs/routine-safe-sync.md) | One-page operator handoff |
+| [Quick start](docs/quick-start.md) | Standard CLI examples and troubleshooting |
+| [AWS account sync procedure](docs/aws-account-sync-procedure.md) | IAM prerequisites, automation, removals, and rollback |
 | [GovCloud workflow](docs/govcloud-workflow.md) | Organizations and standalone-account GovCloud decisions |
-| [Architecture and flowcharts](docs/architecture-flow.md) | Full data flow, permissions, credential modes, and security boundaries |
-| [Terraform examples](examples/terraform/README.md) | AWS discovery role and collection-role StackSets |
+| [Architecture and flowcharts](docs/architecture-flow.md) | Data flow, permissions, and security boundaries |
+| [Terraform examples](examples/terraform/README.md) | Discovery role and collection-role StackSets |
 
-## Development
+## Build and Test
 
 ```bash
 make ci
 ```
 
-`make ci` checks formatting, runs `go vet`, unit tests, the race detector, `govulncheck`, and a reproducible local build. Pull-request and release workflows run with read-only repository permissions except for the release publishing job, which receives only the permissions needed to upload assets and provenance.
+`make ci` checks formatting, runs `go vet`, unit tests, the race detector, `govulncheck`, and a reproducible local build.

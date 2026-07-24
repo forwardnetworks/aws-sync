@@ -140,6 +140,241 @@ func TestApplyPlanCommandHonorsLocalYesFlag(t *testing.T) {
 	}
 }
 
+func TestSafeSyncRunsPreflightPreviewAndAdditiveApply(t *testing.T) {
+	enabled := false
+	patched := false
+	processedAt := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}`, processedAt)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111","Cloud Account Name":"acct-a","Collected?":false}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(
+				w,
+				`[{"type":"AWS","name":"setup-a","regions":{"us-east-1":{"testInstant":123}},"assumeRoleInfos":[{"roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":%t}]}]`,
+				enabled,
+			)
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/networks/network-1/cloudAccounts/setup-a":
+			var payload api.PatchPayload
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode patch payload: %v", err)
+			}
+			if len(payload.AssumeRoleInfos) != 1 || !payload.AssumeRoleInfos[0].Enabled {
+				t.Fatalf("safe-sync payload did not re-enable account: %#v", payload)
+			}
+			enabled = true
+			patched = true
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	output := filepath.Join(t.TempDir(), "safe-sync.json")
+	stdout := captureStdout(t, func() {
+		cmd := newRootCommand()
+		cmd.SetArgs([]string{
+			"safe-sync",
+			"--host", server.URL,
+			"--username", "alice",
+			"--password", "secret",
+			"--network-id", "network-1",
+			"--setup-id", "setup-a",
+			"--output", output,
+			"--yes",
+			"--insecure",
+		})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+	})
+	if !patched || !enabled {
+		t.Fatal("safe-sync did not apply the additive re-enable")
+	}
+	for _, expected := range []string{
+		"Safe sync preview",
+		"additive only",
+		"add=0 reenable=1 remove=0",
+		"Safe sync complete",
+		"rollback",
+	} {
+		if !strings.Contains(stdout, expected) {
+			t.Fatalf("safe-sync output missing %q:\n%s", expected, stdout)
+		}
+	}
+	if _, err := os.Stat(output); err != nil {
+		t.Fatalf("safe-sync payload missing: %v", err)
+	}
+}
+
+func TestSafeSyncHandlesMultipleSetups(t *testing.T) {
+	patched := map[string]bool{}
+	processedAt := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
+			_, _ = fmt.Fprintf(w, `{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}`, processedAt)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
+			_, _ = w.Write([]byte(`{"items":[
+				{"Cloud Setup ID":"setup-a","Cloud Account ID":"111","Collected?":false},
+				{"Cloud Setup ID":"setup-b","Cloud Account ID":"222","Collected?":false}
+			]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+			_, _ = w.Write([]byte(`[
+				{"type":"AWS","name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":false}]},
+				{"type":"AWS","name":"setup-b","assumeRoleInfos":[{"roleArn":"arn:aws:iam::222:role/ForwardRole","enabled":false}]}
+			]`))
+		case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/api/networks/network-1/cloudAccounts/"):
+			setupID := strings.TrimPrefix(r.URL.Path, "/api/networks/network-1/cloudAccounts/")
+			patched[setupID] = true
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	output := filepath.Join(t.TempDir(), "safe-sync.json")
+	stdout := captureStdout(t, func() {
+		cmd := newRootCommand()
+		cmd.SetArgs([]string{
+			"safe-sync",
+			"--host", server.URL,
+			"--username", "alice",
+			"--password", "secret",
+			"--network-id", "network-1",
+			"--setup-id", "setup-a",
+			"--setup-id", "setup-b",
+			"--output", output,
+			"--yes",
+			"--insecure",
+		})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+	})
+	if !patched["setup-a"] || !patched["setup-b"] || len(patched) != 2 {
+		t.Fatalf("safe-sync did not isolate and patch both selected setups: %#v", patched)
+	}
+	for _, setupID := range []string{"setup-a", "setup-b"} {
+		if !strings.Contains(stdout, setupID) {
+			t.Fatalf("safe-sync preview missing %s:\n%s", setupID, stdout)
+		}
+	}
+}
+
+func TestSafeSyncRequiresConfirmationOutsideAutomation(t *testing.T) {
+	patched := false
+	processedAt := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
+			_, _ = fmt.Fprintf(w, `{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}`, processedAt)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
+			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111","Collected?":true}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+			_, _ = w.Write([]byte(`[{"type":"AWS","name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true}]}]`))
+		case r.Method == http.MethodPatch:
+			patched = true
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	var executeErr error
+	captureStdout(t, func() {
+		cmd := newRootCommand()
+		cmd.SetArgs([]string{
+			"safe-sync",
+			"--host", server.URL,
+			"--username", "alice",
+			"--password", "secret",
+			"--network-id", "network-1",
+			"--setup-id", "setup-a",
+			"--insecure",
+		})
+		executeErr = cmd.Execute()
+	})
+	if executeErr == nil || !strings.Contains(executeErr.Error(), "requires an interactive confirmation") {
+		t.Fatalf("unexpected error: %v", executeErr)
+	}
+	if patched {
+		t.Fatal("safe-sync without confirmation reached PATCH")
+	}
+}
+
+func TestSafeSyncStopsWhenPreflightIsNotReady(t *testing.T) {
+	patched := false
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+			_, _ = w.Write([]byte(`[{"type":"AWS","name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true}]}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
+			_, _ = w.Write([]byte(`{"id":"stale","state":"PROCESSED","processedAt":"2020-01-01T00:00:00Z"}`))
+		case r.Method == http.MethodPatch:
+			patched = true
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cmd := newRootCommand()
+	cmd.SetArgs([]string{
+		"safe-sync",
+		"--host", server.URL,
+		"--username", "alice",
+		"--password", "secret",
+		"--network-id", "network-1",
+		"--setup-id", "setup-a",
+		"--yes",
+		"--insecure",
+	})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "preflight is not ready") || !strings.Contains(err.Error(), "stale") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if patched {
+		t.Fatal("failed safe-sync preflight reached PATCH")
+	}
+}
+
+func TestSafeSyncHelpHidesExpertMutationFlags(t *testing.T) {
+	safeSync, _, err := newRootCommand().Find([]string{"safe-sync"})
+	if err != nil {
+		t.Fatalf("find safe-sync: %v", err)
+	}
+	if !strings.Contains(safeSync.Short, "additive-only") {
+		t.Fatalf("safe-sync description does not explain its mode: %q", safeSync.Short)
+	}
+	for _, name := range []string{"network-id", "setup-id"} {
+		flag := safeSync.Flags().Lookup(name)
+		if flag == nil || flag.Hidden {
+			t.Fatalf("safe-sync does not expose --%s", name)
+		}
+	}
+	for _, name := range []string{"prune-missing", "allow-removals", "max-removals"} {
+		if flag := safeSync.Flags().Lookup(name); flag != nil {
+			t.Fatalf("safe-sync unexpectedly defines expert flag --%s", name)
+		}
+	}
+	for _, name := range []string{"yes", "output"} {
+		flag := safeSync.Flags().Lookup(name)
+		if flag == nil || !flag.Hidden {
+			t.Fatalf("safe-sync internal flag --%s should be hidden", name)
+		}
+	}
+}
+
 func TestEmitErrorFormatsNetworkSelectionOnce(t *testing.T) {
 	var buf bytes.Buffer
 	emitError(&buf, &app.NetworkSelectionError{

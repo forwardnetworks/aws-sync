@@ -823,6 +823,45 @@ func TestRunWritesPayloadAndPatchesWhenApplyEnabled(t *testing.T) {
 	}
 }
 
+func TestRunBlocksApplyWhenReviewedPayloadChanges(t *testing.T) {
+	patched := false
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"items":[{"Setup ID":"setup-a","Cloud Account ID":"111","Cloud Account Name":"acct-a"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"name":"setup-a","regions":{"us-east-1":{"testInstant":123}},"assumeRoleInfos":[{"roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true}]}]`))
+		case r.Method == http.MethodPatch:
+			patched = true
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	_, err := Run(context.Background(), Config{
+		Host:                  server.URL,
+		Username:              "alice",
+		Password:              "secret",
+		NetworkID:             "network-1",
+		QueryID:               "custom-query",
+		Output:                filepath.Join(t.TempDir(), "payload.json"),
+		APIPrefix:             "/api",
+		Insecure:              true,
+		Apply:                 true,
+		ExpectedPayloadSHA256: strings.Repeat("0", 64),
+	})
+	if err == nil || !strings.Contains(err.Error(), "reviewed plan changed before apply") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if patched {
+		t.Fatal("payload hash mismatch reached PATCH")
+	}
+}
+
 func TestRunWritesManualPayloadWhenRequested(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()

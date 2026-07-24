@@ -46,32 +46,33 @@ const (
 )
 
 type Config struct {
-	Host               string
-	Username           string
-	Password           string
-	NetworkID          string
-	SnapshotID         string
-	Query              string
-	QueryID            string
-	QuerySetupParam    string
-	SetupIDs           []string
-	Output             string
-	ManualOutput       string
-	APIPrefix          string
-	Insecure           bool
-	Timeout            time.Duration
-	Apply              bool
-	AllowRemovals      bool
-	MaxRemovals        int
-	MaxRemovalPercent  float64
-	AllowNoCandidates  bool
-	AllowNoOrgEvidence bool
-	PruneMissing       bool
-	MaxSnapshotAge     time.Duration
-	ExternalIDFile     string
-	Source             string
-	AuthoritativeInput bool
-	PinSnapshot        bool
+	Host                  string
+	Username              string
+	Password              string
+	NetworkID             string
+	SnapshotID            string
+	Query                 string
+	QueryID               string
+	QuerySetupParam       string
+	SetupIDs              []string
+	Output                string
+	ManualOutput          string
+	APIPrefix             string
+	Insecure              bool
+	Timeout               time.Duration
+	Apply                 bool
+	AllowRemovals         bool
+	MaxRemovals           int
+	MaxRemovalPercent     float64
+	AllowNoCandidates     bool
+	AllowNoOrgEvidence    bool
+	PruneMissing          bool
+	MaxSnapshotAge        time.Duration
+	ExternalIDFile        string
+	Source                string
+	AuthoritativeInput    bool
+	PinSnapshot           bool
+	ExpectedPayloadSHA256 string
 }
 
 type Summary struct {
@@ -271,6 +272,14 @@ func runPlannedSync(
 	payloadSHA256, err := writeAuditPayloads(outputPath, plan.Payloads)
 	if err != nil {
 		return nil, err
+	}
+	if expected := strings.TrimSpace(cfg.ExpectedPayloadSHA256); expected != "" &&
+		!strings.EqualFold(expected, payloadSHA256) {
+		return nil, fmt.Errorf(
+			"reviewed plan changed before apply: expected payload SHA-256 %s, got %s; no PATCH was sent",
+			expected,
+			payloadSHA256,
+		)
 	}
 	manualPayloads := buildManualPayloads(plan.Payloads)
 	manualOutputPath := ""

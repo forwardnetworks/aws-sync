@@ -9,6 +9,41 @@ GitHub renders the Mermaid diagrams below automatically.
 
 ---
 
+## Routine Operator Flow
+
+`safe-sync` is the default human workflow for an existing setup. Its command surface does not include account-removal flags.
+
+```mermaid
+flowchart LR
+    run["awssync safe-sync\nselected setup IDs"]
+    snapshot["Pin latest processed snapshot\nmaximum age 24 hours"]
+    preflight{"Preflight ready?"}
+    preview["Show add / re-enable / remove\nremoval must equal zero"]
+    confirm{"Operator types apply?"}
+    verify["Recompute and verify\nreviewed payload SHA-256"]
+    rollback["Write complete rollback payload"]
+    patch["PATCH selected Forward setups"]
+    stop["STOP\nno Forward change"]
+
+    run --> snapshot --> preflight
+    preflight -- "no" --> stop
+    preflight -- "yes" --> preview --> confirm
+    confirm -- "no" --> stop
+    confirm -- "yes" --> verify
+    verify -- "changed or removal present" --> stop
+    verify -- "unchanged" --> rollback --> patch
+
+    classDef neutral fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A;
+    classDef safe fill:#E1F5EE,stroke:#0F6E56,color:#04342C;
+    classDef blocked fill:#FCEBEB,stroke:#A32D2D,color:#501313;
+
+    class run,snapshot,preflight,preview,confirm,verify neutral;
+    class rollback,patch safe;
+    class stop blocked;
+```
+
+---
+
 ## GovCloud Inventory Decision
 
 GovCloud resource collection and Organizations inventory are separate capabilities. Use the regular Forward snapshot/NQE path when Forward has positive GovCloud Organizations evidence. Use a complete, reviewed manifest when Organizations is unavailable or cannot be delegated.

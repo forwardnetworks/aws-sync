@@ -1,6 +1,16 @@
-# AWS Account Sync Quick Start
+# AWS Account Sync CLI Quick Start
 
-Use `awssync` to update an existing Forward AWS setup when AWS Organization accounts are added or removed and Forward's collected NQE data is the source of truth.
+For routine updates of an existing Forward AWS setup, start with [`safe-sync`](routine-safe-sync.md). It performs preflight, previews the changes, refuses removals, prompts once, and writes rollback data:
+
+```bash
+./awssync-linux-amd64 safe-sync \
+  --setup-id AWS-PROD \
+  --setup-id AWS-SANDBOX
+```
+
+The rest of this guide covers the standard and expert commands for automation, onboarding, External IDs, GovCloud, and independently reviewed account removals.
+
+Use the standard `awssync` command to update an existing Forward AWS setup when AWS Organization accounts are added or removed and Forward's collected NQE data is the source of truth.
 
 For new AWS Organizations onboarding, prefer the Forward Terraform provider as the native IaC workflow. It supports Forward assume-role, static-key, and collector instance-profile credential models. Use `awssync discover-org` only when Forward has not onboarded that AWS Organization yet and you need manual JSON files, a break-glass create payload, or a static-key workflow that should stay outside Terraform state.
 

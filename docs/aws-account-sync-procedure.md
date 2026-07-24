@@ -17,6 +17,16 @@ For many AWS accounts in the same AWS Organization, there are two separate requi
 
 This workflow supports both Forward IAM role and IAM user/access-key multi-account setups. In both modes, the existing Forward setup must have `assumeRoleInfos` entries with role ARNs so `awssync` can derive the role name and generate role ARNs for newly discovered accounts.
 
+For routine human operation, use `safe-sync`. It runs the required preflight, uses a processed snapshot no older than 24 hours, previews the changes, refuses removals, prompts once, and writes rollback data:
+
+```bash
+./awssync-linux-amd64 safe-sync \
+  --setup-id AWS-PROD \
+  --setup-id AWS-SANDBOX
+```
+
+See the one-page [Routine AWS Safe Sync](routine-safe-sync.md) handoff. Use the standard and expert commands later in this procedure only for automation, onboarding, External IDs, GovCloud, or independently reviewed account removals.
+
 Important separation:
 
 - Use the default NQE sync path for an existing Forward AWS setup. That path uses Forward's collected data and can PATCH the setup after review.
@@ -544,7 +554,14 @@ If `management_account_discovery` fails, the snapshot did not show any genuinely
 
 ## Apply the Sync
 
-After the dry plan is reviewed, run with `--apply`.
+For a routine interactive sync, use the additive-only command:
+
+```bash
+./awssync-linux-amd64 safe-sync \
+  --setup-id AWS-PROD
+```
+
+The remaining commands in this section are the standard and expert workflow. For non-interactive automation, run with `--apply` after reviewing the dry plan.
 
 ```bash
 ./bin/awssync \
