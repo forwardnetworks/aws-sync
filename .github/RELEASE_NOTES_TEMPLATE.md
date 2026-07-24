@@ -2,12 +2,14 @@
 
 ### Highlights
 
-- `awssync external-id` can now target one or more `--account-id` values while preserving every unselected account.
-- A reviewed `--external-id-file` CSV supports different values and explicit set/clear actions per setup and account.
-- Normal NQE, webhook, and authoritative-manifest syncs preserve mixed per-account External IDs instead of flattening them to the first configured value.
-- New accounts in a mixed-ID setup fail closed unless the plan receives an explicit per-account CSV assignment.
-- CSV validation rejects malformed IDs, duplicates, implicit clears, wrong setups, and accounts outside the planned inventory before PATCH.
-- Dry-run summaries report selected, changed, unchanged, set, and cleared account counts plus per-account change metadata.
+- NQE reconciliation is additive by default: configured accounts missing from the current NQE result remain in the setup, while discovered disabled accounts are re-enabled.
+- NQE-based deletion now requires `--prune-missing`, `--allow-removals`, and both nonzero `--max-removals` and `--max-removal-percent` bounds.
+- Every apply writes a complete pre-change `.rollback.json` payload and verifies that the selected setup state has not changed before the first PATCH.
+- CLI runs pin the latest processed snapshot so planning and apply use one immutable NQE inventory.
+- Invalid NQE account-ID placeholders are ignored and reported instead of becoming AWS accounts.
+- Human-readable output is now the default; use `--json` or `--format json` for automation.
+- Regression coverage includes the reported 325-account setup with only 10 enabled, additive and explicit-prune paths, concurrent setup changes, rollback, and snapshot pinning.
+- Per-account External ID selection and CSV workflows from v2.3.0 remain supported.
 - Release assets remain available for Linux and macOS on amd64 and arm64 with SHA-256 checksums and GitHub build-provenance attestations.
 
 ### Download and verify
@@ -35,8 +37,7 @@ gh attestation verify awssync-linux-amd64 \
   --network-id <NETWORK_ID> \
   --setup-id <SETUP_ID> \
   --max-snapshot-age 24h \
-  --output aws_sync_payload.json \
-  --format human
+  --output aws_sync_payload.json
 ```
 
-See the README workflow diagram, `docs/aws-account-sync-procedure.md`, and `docs/govcloud-workflow.md` before enabling apply automation or account removals.
+Routine automation should omit all removal flags. See the README workflow diagram, `docs/aws-account-sync-procedure.md`, and `docs/govcloud-workflow.md` before enabling account removals.

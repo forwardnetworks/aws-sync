@@ -178,12 +178,13 @@ If removals are expected:
   --output aws_sync_payload.json \
   --apply \
   --yes \
+  --prune-missing \
   --allow-removals \
   --max-removals 10 \
   --max-removal-percent 5
 ```
 
-`--max-removals` is the aggregate ceiling across selected setups. `--max-removal-percent` is evaluated separately for each setup against its current configured-account count. Preflight accepts the same limits and reports `removal_blast_radius` before anything is patched.
+NQE sync is additive by default. `--prune-missing` is required before an account absent from NQE can become a removal; prefer a complete authoritative manifest for lifecycle removals. Both limits are mandatory for any removal. `--max-removals` is the aggregate ceiling across selected setups. `--max-removal-percent` is evaluated separately for each setup against its current configured-account count. Preflight accepts the same limits and reports `removal_blast_radius` before anything is patched.
 
 If removals are expected and no uncollected candidate accounts are visible, also add `--allow-no-candidates` only after confirming AWS Organizations discovery is working.
 
@@ -223,11 +224,15 @@ Recompute and apply after reviewing the expected changes:
   --yes
 ```
 
-For one setup, pass a single `--setup-id AWS_SETUP_ID`. Repeat `--setup-id` for other setup combinations. Add `--allow-removals` only after reviewing and confirming every proposed removal.
+For one setup, pass a single `--setup-id AWS_SETUP_ID`. Repeat `--setup-id` for other setup combinations. Add `--prune-missing` and `--allow-removals` only after reviewing and confirming every proposed NQE-based removal.
 
 When exactly one setup is selected, the default inline NQE query is parameterized by that setup ID to reduce returned rows. Multiple setup IDs are still separated by `Cloud Setup ID` in the NQE result.
 
-For automation, run without `--allow-removals` so normal additions can proceed when no removals are planned. A removal plan stops the run and should be applied only after an operator confirms the account lifecycle in AWS.
+For automation, omit `--prune-missing` and `--allow-removals`. Normal additions and re-enablement can proceed, while accounts absent from NQE remain configured.
+
+Human-readable output is the default. Add `--json` for scripts. Every apply writes `<output>.rollback.json` before the first PATCH; use that file with `apply-plan --plan` to restore the exact prior setup state.
+
+An existing NQE row with `Collected? false` is not proof that AWS Organizations discovered a new account. It commonly represents an account that is configured but disabled or failing collection. Only uncollected IDs not already present in the setup count as discovery candidates.
 
 ## Troubleshoot Account State
 

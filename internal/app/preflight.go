@@ -20,6 +20,7 @@ type PreflightSummary struct {
 	SelectedSetupIDs []string         `json:"selected_setup_ids,omitempty"`
 	Ready            bool             `json:"ready"`
 	FetchedItemCount int              `json:"fetched_item_count"`
+	IgnoredNQEItems  int              `json:"ignored_nqe_item_count,omitempty"`
 	PlannedSetups    []SetupSummary   `json:"planned_setups,omitempty"`
 	SkippedSetups    []SkipSummary    `json:"skipped_setups,omitempty"`
 	Checks           []PreflightCheck `json:"checks"`
@@ -58,18 +59,14 @@ func Preflight(ctx context.Context, cfg Config) (*PreflightSummary, error) {
 	if cfg.SnapshotID != "" {
 		result.pass("snapshot_selection", fmt.Sprintf("using explicit snapshot %s", cfg.SnapshotID))
 	} else {
-		latest, err := client.LatestProcessedSnapshot(ctx, cfg.NetworkID)
-		if err != nil {
+		if err := pinLatestProcessedSnapshot(ctx, client, &cfg); err != nil {
 			result.fail("latest_processed_snapshot", err.Error())
-		} else {
-			result.pass("latest_processed_snapshot", fmt.Sprintf("latest processed snapshot is %s", latest.ID))
-			if cfg.MaxSnapshotAge > 0 {
-				if err := validateSnapshotFreshness(ctx, client, cfg); err != nil {
-					result.fail("snapshot_freshness", err.Error())
-				} else {
-					result.pass("snapshot_freshness", "latest processed snapshot is fresh enough")
-				}
-			}
+			return result, nil
+		}
+		result.SnapshotID = cfg.SnapshotID
+		result.pass("latest_processed_snapshot", fmt.Sprintf("pinned latest processed snapshot %s", cfg.SnapshotID))
+		if cfg.MaxSnapshotAge > 0 {
+			result.pass("snapshot_freshness", "pinned snapshot is fresh enough")
 		}
 	}
 
@@ -132,20 +129,32 @@ func Preflight(ctx context.Context, cfg Config) (*PreflightSummary, error) {
 	result.SelectedSetupIDs = summary.SelectedSetupIDs
 	result.PlannedSetups = summary.PlannedSetups
 	result.SkippedSetups = summary.SkippedSetups
+	result.IgnoredNQEItems = summary.IgnoredNQEItemCount
+	if summary.IgnoredNQEItemCount > 0 {
+		result.warn("nqe_account_id_validation", fmt.Sprintf("ignored %d NQE row(s) with invalid AWS account IDs", summary.IgnoredNQEItemCount))
+	} else {
+		result.pass("nqe_account_id_validation", "all NQE AWS account IDs are numeric")
+	}
 	if plan.HasRemovals() {
 		result.fail("account_removals", "planned account removals require review and --allow-removals for apply")
 	} else {
 		result.pass("account_removals", "no account removals planned")
 	}
-	if cfg.MaxRemovals > 0 || cfg.MaxRemovalPercent > 0 {
-		if err := validateRemovalStats(plan.removalStats(), cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
+	if plan.HasRemovals() {
+		if err := requireRemovalBounds(plan.removalStats(), cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
+			result.fail("removal_blast_radius", err.Error())
+		} else if err := validateRemovalStats(plan.removalStats(), cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
 			result.fail("removal_blast_radius", err.Error())
 		} else {
 			result.pass("removal_blast_radius", "planned removals are within the configured count and percentage limits")
 		}
 	}
 	if plan.HasCandidateRisk() {
-		result.fail("management_account_discovery", "one or more selected setups have no uncollected candidate accounts visible")
+		if plan.HasRemovals() {
+			result.fail("management_account_discovery", "one or more selected setups have no new uncollected candidate accounts visible")
+		} else {
+			result.warn("management_account_discovery", "no new uncollected candidate accounts are visible; additive mode preserves configured accounts")
+		}
 	} else {
 		result.pass("management_account_discovery", "uncollected candidate accounts are visible in Forward NQE")
 	}
@@ -190,6 +199,10 @@ func (s *PreflightSummary) pass(name, message string) {
 func (s *PreflightSummary) fail(name, message string) {
 	s.Ready = false
 	s.Checks = append(s.Checks, PreflightCheck{Name: name, Status: "fail", Message: message})
+}
+
+func (s *PreflightSummary) warn(name, message string) {
+	s.Checks = append(s.Checks, PreflightCheck{Name: name, Status: "warn", Message: message})
 }
 
 func nqeSetupIDValues(items []map[string]any) []string {

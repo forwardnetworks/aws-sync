@@ -21,7 +21,7 @@ flowchart TD
     G --> H
     H --> I{Any removals?}
     I -->|No| J[Apply]
-    I -->|Yes| K[Verify account lifecycle independently<br/>Set allow-removals and blast-radius limits]
+    I -->|Yes| K[Use explicit prune-missing<br/>Verify lifecycle and set every removal guard]
     K --> J
 ```
 
@@ -30,11 +30,16 @@ The key choice is the inventory source. Use Forward NQE only when a current snap
 ## Safety Model
 
 - Dry run is the default; writes require `--apply` and confirmation or `--yes`.
-- Additions can be automated. Removals are blocked unless `--allow-removals` is explicit.
-- `--max-removals` and `--max-removal-percent` impose independent blast-radius ceilings.
+- NQE sync is additive by default: accounts absent from NQE remain configured. This prevents disabled, failed, or snapshot-missing accounts from being deleted.
+- NQE removal additionally requires `--prune-missing`; prefer `sync-accounts` with a complete authoritative manifest for lifecycle removals.
+- Removals are blocked unless `--allow-removals` is explicit.
+- Any removal requires both nonzero `--max-removals` and `--max-removal-percent` ceilings in addition to `--allow-removals`.
 - Empty candidate inventory, stale snapshots, missing Organizations evidence, and unsafe GovCloud removal plans fail closed.
+- `Collected? false` for an already configured account is not AWS Organizations evidence. It commonly means the account is configured but disabled or failed collection.
+- CLI NQE runs pin the latest processed snapshot before planning so review and apply use one immutable inventory.
 - Existing per-account External IDs are preserved. Adding accounts to a mixed-ID setup fails unless the new accounts have explicit CSV assignments.
 - Saved plans are revalidated against current Forward state before apply.
+- Every apply writes a complete pre-change `.rollback.json` payload before the first PATCH.
 - Generated payload and audit files are written atomically with owner-only `0600` permissions.
 - Transient API failures are retried only for idempotent reads and full-state updates; create operations are never automatically retried.
 
@@ -78,8 +83,7 @@ Check the current snapshot and Organizations evidence:
 ```bash
 ./bin/awssync preflight \
   --setup-id AWS-PROD \
-  --max-snapshot-age 24h \
-  --format human
+  --max-snapshot-age 24h
 ```
 
 Create a dry plan:
@@ -88,11 +92,12 @@ Create a dry plan:
 ./bin/awssync \
   --setup-id AWS-PROD \
   --max-snapshot-age 24h \
-  --output aws_sync_payload.json \
-  --format human
+  --output aws_sync_payload.json
 ```
 
-Review `added_accounts`, `removed_accounts`, the role name, External ID state, regions, and payload hash. If no removals are planned, apply the freshly recomputed plan:
+Human-readable output is the default. Add `--json` (or `--format json`) when a script needs the structured summary.
+
+Review `added_accounts`, `removed_accounts`, the pinned snapshot ID, role name, External ID state, regions, and payload hash. If no removals are planned, apply the freshly recomputed plan:
 
 ```bash
 ./bin/awssync \
@@ -109,6 +114,7 @@ For an independently verified removal, add both approval and quantitative limits
   --setup-id AWS-PROD \
   --max-snapshot-age 24h \
   --output aws_sync_payload.json \
+  --prune-missing \
   --allow-removals \
   --max-removals 5 \
   --max-removal-percent 2 \
@@ -116,6 +122,14 @@ For an independently verified removal, add both approval and quantitative limits
 ```
 
 Never remove an account only because collection fails. If it remains visible in Organizations, repair its role, trust policy, External ID, or collection permissions.
+
+After apply, the summary prints `rollback_output` and `rollback_sha256`. To restore the exact pre-change setup state:
+
+```bash
+./bin/awssync apply-plan \
+  --plan aws_sync_payload.rollback.json \
+  --yes
+```
 
 ## Customer-Defined External ID
 

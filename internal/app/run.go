@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -65,10 +66,12 @@ type Config struct {
 	MaxRemovalPercent  float64
 	AllowNoCandidates  bool
 	AllowNoOrgEvidence bool
+	PruneMissing       bool
 	MaxSnapshotAge     time.Duration
 	ExternalIDFile     string
 	Source             string
 	AuthoritativeInput bool
+	PinSnapshot        bool
 }
 
 type Summary struct {
@@ -96,8 +99,12 @@ type Summary struct {
 	ManualOutput        string                          `json:"manual_output,omitempty"`
 	ManualPayloadSHA256 string                          `json:"manual_payload_sha256,omitempty"`
 	ManualPayloads      map[string][]api.AssumeRoleInfo `json:"manual_payloads,omitempty"`
+	RollbackOutput      string                          `json:"rollback_output,omitempty"`
+	RollbackSHA256      string                          `json:"rollback_sha256,omitempty"`
 	Apply               bool                            `json:"apply"`
 	FetchedItemCount    int                             `json:"fetched_item_count"`
+	IgnoredNQEItemCount int                             `json:"ignored_nqe_item_count,omitempty"`
+	IgnoredNQEAccounts  []AccountSummary                `json:"ignored_nqe_accounts,omitempty"`
 	PlannedSetupCount   int                             `json:"planned_setup_count"`
 	PatchedSetupCount   int                             `json:"patched_setup_count"`
 	SkippedSetupCount   int                             `json:"skipped_setup_count"`
@@ -138,6 +145,7 @@ type SetupSummary struct {
 	PlannedPayloadAccountCount   int               `json:"planned_payload_account_count"`
 	AddedAccounts                []AccountSummary  `json:"added_accounts,omitempty"`
 	RemovedAccounts              []AccountSummary  `json:"removed_accounts,omitempty"`
+	ReenabledAccounts            []AccountSummary  `json:"reenabled_accounts,omitempty"`
 	UnchangedAccountCount        int               `json:"unchanged_account_count"`
 	Patched                      bool              `json:"patched"`
 }
@@ -216,7 +224,11 @@ func Run(ctx context.Context, cfg Config) (*Summary, error) {
 		return nil, err
 	}
 	cfg.NetworkID = networkID
-	if err := validateSnapshotFreshness(ctx, client, cfg); err != nil {
+	if cfg.PinSnapshot && strings.TrimSpace(cfg.SnapshotID) == "" {
+		if err := pinLatestProcessedSnapshot(ctx, client, &cfg); err != nil {
+			return nil, err
+		}
+	} else if err := validateSnapshotFreshness(ctx, client, cfg); err != nil {
 		return nil, err
 	}
 	if err := validateQuerySetupParam(cfg); err != nil {
@@ -288,6 +300,10 @@ func runPlannedSync(
 		return summary, fmt.Errorf("planned account removals require --allow-removals")
 	}
 	if cfg.Apply {
+		if err := requireRemovalBounds(plan.removalStats(), cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
+			summary.RemovalBlocked = true
+			return summary, err
+		}
 		if err := validateRemovalStats(plan.removalStats(), cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
 			summary.RemovalBlocked = true
 			return summary, err
@@ -307,7 +323,23 @@ func runPlannedSync(
 		return summary, fmt.Errorf("planned removals with no AWS Organizations evidence in NQE for setup(s): %s require --allow-no-org-evidence", missingSetups)
 	}
 
+	rollbackOutputPath := ""
+	rollbackSHA256 := ""
 	if cfg.Apply {
+		rollbackPayloads, err := buildRollbackPayloads(cloudAccounts, selectedSetupIDs(plan.Setups))
+		if err != nil {
+			return summary, err
+		}
+		rollbackOutputPath = rollbackPath(outputPath)
+		rollbackSHA256, err = writeAuditPayloads(rollbackOutputPath, rollbackPayloads)
+		if err != nil {
+			return summary, fmt.Errorf("write pre-apply rollback payload: %w", err)
+		}
+		summary.RollbackOutput = rollbackOutputPath
+		summary.RollbackSHA256 = rollbackSHA256
+		if err := verifyCloudAccountsUnchanged(ctx, client, cfg.NetworkID, selectedSetupIDs(plan.Setups), rollbackPayloads); err != nil {
+			return summary, err
+		}
 		if _, err := writeAuditPayloads(auditPath(outputPath), plan.Payloads); err != nil {
 			return nil, err
 		}
@@ -316,7 +348,7 @@ func runPlannedSync(
 	if err != nil {
 		return nil, err
 	}
-	return buildSummary(
+	result := buildSummary(
 		cfg,
 		outputPath,
 		payloadSHA256,
@@ -326,7 +358,10 @@ func runPlannedSync(
 		len(items),
 		plan,
 		patchedCount,
-	), nil
+	)
+	result.RollbackOutput = rollbackOutputPath
+	result.RollbackSHA256 = rollbackSHA256
+	return result, nil
 }
 
 func RunAWSOrganizations(ctx context.Context, cfg AWSOrganizationConfig, source AWSOrganizationSource) (*Summary, error) {
@@ -731,6 +766,30 @@ func validateSnapshotFreshness(ctx context.Context, client *api.Client, cfg Conf
 	return nil
 }
 
+func pinLatestProcessedSnapshot(ctx context.Context, client *api.Client, cfg *Config) error {
+	latest, err := client.LatestProcessedSnapshot(ctx, cfg.NetworkID)
+	if err != nil {
+		return fmt.Errorf("pin latest processed snapshot: %w", err)
+	}
+	if cfg.MaxSnapshotAge > 0 {
+		snapshotTime, err := snapshotTimestamp(*latest)
+		if err != nil {
+			return fmt.Errorf("check latest processed snapshot freshness: %w", err)
+		}
+		age := time.Since(snapshotTime)
+		if age > cfg.MaxSnapshotAge {
+			return fmt.Errorf(
+				"latest processed snapshot %s is stale: age %s exceeds max %s; pass --snapshot-id or increase --max-snapshot-age",
+				latest.ID,
+				age.Round(time.Second),
+				cfg.MaxSnapshotAge,
+			)
+		}
+	}
+	cfg.SnapshotID = latest.ID
+	return nil
+}
+
 func snapshotTimestamp(snapshot api.SnapshotInfo) (time.Time, error) {
 	for _, value := range []string{snapshot.ProcessedAt, snapshot.CreatedAt} {
 		value = strings.TrimSpace(value)
@@ -817,6 +876,8 @@ func buildSummary(
 		if cfg.AuthoritativeInput {
 			discoverySignal = "account_manifest"
 			discoveryMessage = "Account inventory came from the explicitly reviewed manifest; AWS Organizations was not queried"
+		} else if !cfg.PruneMissing {
+			discoveryMessage += "; additive mode preserves currently configured accounts that are absent from NQE"
 		}
 		setupSummaries = append(setupSummaries, SetupSummary{
 			SetupID:                      setup.SetupID,
@@ -837,6 +898,7 @@ func buildSummary(
 			PlannedPayloadAccountCount:   len(setup.Payload.AssumeRoleInfos),
 			AddedAccounts:                accountSummaries(setup.AddedAccounts),
 			RemovedAccounts:              accountSummaries(setup.RemovedAccounts),
+			ReenabledAccounts:            accountSummaries(setup.ReenabledAccounts),
 			UnchangedAccountCount:        len(setup.UnchangedAccounts),
 			Patched:                      cfg.Apply,
 		})
@@ -859,6 +921,8 @@ func buildSummary(
 		ManualPayloads:      manualPayloads,
 		Apply:               cfg.Apply,
 		FetchedItemCount:    fetchedItemCount,
+		IgnoredNQEItemCount: len(plan.IgnoredAccounts),
+		IgnoredNQEAccounts:  plan.IgnoredAccounts,
 		PlannedSetupCount:   len(plan.Setups),
 		PatchedSetupCount:   patchedCount,
 		SkippedSetupCount:   len(plan.Skips),
@@ -884,6 +948,7 @@ type patchPlan struct {
 	Setups          []plannedSetup
 	Skips           []SkipSummary
 	CandidateChecks []CandidateCheck
+	IgnoredAccounts []AccountSummary
 }
 
 type plannedSetup struct {
@@ -896,6 +961,7 @@ type plannedSetup struct {
 	Payload                   api.PatchPayload
 	AddedAccounts             []accountRow
 	RemovedAccounts           []accountRow
+	ReenabledAccounts         []accountRow
 	UnchangedAccounts         []accountRow
 	CurrentAccounts           []accountRow
 	DiscoveredAccounts        []accountRow
@@ -978,6 +1044,7 @@ type buildPlanOptions struct {
 	RoleNameBySetup     map[string]string
 	ExternalIDBySetup   map[string]string
 	ExternalIDByAccount externalIDAssignments
+	PreserveMissing     bool
 }
 
 func buildPlan(items []map[string]any, cloudAccounts []api.CloudAccount, queryID string, requestedSetupIDs []string) (*patchPlan, error) {
@@ -996,6 +1063,7 @@ func buildPlanForConfig(cfg Config, items []map[string]any, cloudAccounts []api.
 	}
 	return buildPlanWithOptions(items, cloudAccounts, cfg.QueryID, cfg.SetupIDs, buildPlanOptions{
 		ExternalIDByAccount: assignments,
+		PreserveMissing:     !cfg.AuthoritativeInput && !cfg.PruneMissing,
 	})
 }
 
@@ -1004,9 +1072,10 @@ func buildPlanWithOptions(items []map[string]any, cloudAccounts []api.CloudAccou
 	if len(cloudMetaMap) == 0 {
 		return nil, fmt.Errorf("no cloud account metadata available in Forward")
 	}
-	groupedAccounts := groupAccountsBySetup(items)
+	validItems, ignoredAccounts := validNQEAccountItems(items)
+	groupedAccounts := groupAccountsBySetup(validItems)
 	if len(groupedAccounts) == 0 {
-		fallbackSetupID, fallbackAccounts := fallbackAccounts(items, cloudMetaMap)
+		fallbackSetupID, fallbackAccounts := fallbackAccounts(validItems, cloudMetaMap)
 		if fallbackSetupID != "" && len(fallbackAccounts) > 0 {
 			groupedAccounts = map[string][]accountRow{fallbackSetupID: fallbackAccounts}
 		}
@@ -1029,7 +1098,7 @@ func buildPlanWithOptions(items []map[string]any, cloudAccounts []api.CloudAccou
 	}
 	sort.Strings(plannedSetupIDs)
 
-	plan := &patchPlan{Payloads: make(auditPayloads)}
+	plan := &patchPlan{Payloads: make(auditPayloads), IgnoredAccounts: ignoredAccounts}
 	for _, setupID := range plannedSetupIDs {
 		meta, ok := cloudMetaMap[setupID]
 		if !ok {
@@ -1048,9 +1117,14 @@ func buildPlanWithOptions(items []map[string]any, cloudAccounts []api.CloudAccou
 			continue
 		}
 		partition := extractRolePartition(meta.AssumeRoleInfos)
-		nextAccounts := groupedAccounts[setupID]
+		discoveredAccounts := groupedAccounts[setupID]
 		current := currentAccounts(meta.AssumeRoleInfos)
+		nextAccounts := discoveredAccounts
+		if opts.PreserveMissing {
+			nextAccounts = mergeDiscoveredWithCurrent(discoveredAccounts, current)
+		}
 		added, removed, unchanged := accountDiff(current, nextAccounts)
+		reenabled := reenabledAccounts(meta.AssumeRoleInfos, nextAccounts)
 		uniformExternalID, hasUniformOverride := opts.ExternalIDBySetup[setupID]
 		if hasUniformOverride && len(opts.ExternalIDByAccount[setupID]) > 0 {
 			return nil, fmt.Errorf("setup %s has both setup-wide and per-account External ID overrides", setupID)
@@ -1083,9 +1157,9 @@ func buildPlanWithOptions(items []map[string]any, cloudAccounts []api.CloudAccou
 		if strings.TrimSpace(meta.ProxyServerID) != "" {
 			payload.ProxyServerID = meta.ProxyServerID
 		}
-		collectedCount := countCollectedAccounts(items, setupID)
-		candidateCount := countUncollectedCandidates(items, setupID)
-		orgUnitRowCount := countOrgUnitRows(items, setupID)
+		collectedCount := countCollectedAccounts(validItems, setupID)
+		candidateCount := countUncollectedCandidates(validItems, setupID, current)
+		orgUnitRowCount := countOrgUnitRows(validItems, setupID)
 		plan.Payloads[setupID] = payload
 		plan.Setups = append(plan.Setups, plannedSetup{
 			SetupID:                   setupID,
@@ -1097,9 +1171,10 @@ func buildPlanWithOptions(items []map[string]any, cloudAccounts []api.CloudAccou
 			Payload:                   payload,
 			AddedAccounts:             added,
 			RemovedAccounts:           removed,
+			ReenabledAccounts:         reenabled,
 			UnchangedAccounts:         unchanged,
 			CurrentAccounts:           current,
-			DiscoveredAccounts:        nextAccounts,
+			DiscoveredAccounts:        discoveredAccounts,
 			DiscoveredCollectedCount:  collectedCount,
 			DiscoveredCandidateCount:  candidateCount,
 			DiscoveredOrgUnitRowCount: orgUnitRowCount,
@@ -1107,7 +1182,7 @@ func buildPlanWithOptions(items []map[string]any, cloudAccounts []api.CloudAccou
 		plan.CandidateChecks = append(plan.CandidateChecks, CandidateCheck{
 			SetupID:                setupID,
 			ConfiguredAccountCount: len(current),
-			NQEAccountRowCount:     len(nextAccounts),
+			NQEAccountRowCount:     len(discoveredAccounts),
 			NQECollectedRowCount:   collectedCount,
 			NQECandidateRowCount:   candidateCount,
 			NQEOrgUnitRowCount:     orgUnitRowCount,
@@ -1141,6 +1216,41 @@ type accountRow struct {
 	AccountName string
 }
 
+func mergeDiscoveredWithCurrent(discovered, current []accountRow) []accountRow {
+	result := append([]accountRow(nil), discovered...)
+	seen := make(map[string]bool, len(result))
+	for _, account := range result {
+		seen[account.AccountID] = true
+	}
+	for _, account := range current {
+		if seen[account.AccountID] {
+			continue
+		}
+		result = append(result, account)
+		seen[account.AccountID] = true
+	}
+	return result
+}
+
+func reenabledAccounts(current []api.AssumeRoleInfo, next []accountRow) []accountRow {
+	nextIDs := accountMap(next)
+	result := make([]accountRow, 0)
+	for _, info := range current {
+		accountID := assumeRoleAccountID(info)
+		if info.Enabled || accountID == "" {
+			continue
+		}
+		account, ok := nextIDs[accountID]
+		if ok {
+			result = append(result, account)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].AccountID < result[j].AccountID
+	})
+	return result
+}
+
 func groupAccountsBySetup(items []map[string]any) map[string][]accountRow {
 	grouped := make(map[string][]accountRow)
 	for _, item := range items {
@@ -1168,6 +1278,40 @@ func groupAccountsBySetup(items []map[string]any) map[string][]accountRow {
 		grouped[setupID] = dedupeAccounts(grouped[setupID])
 	}
 	return grouped
+}
+
+func validNQEAccountItems(items []map[string]any) ([]map[string]any, []AccountSummary) {
+	valid := make([]map[string]any, 0, len(items))
+	ignored := make([]AccountSummary, 0)
+	for _, item := range items {
+		accountID := stringValue(item["Cloud Account ID"])
+		if accountID == "" {
+			valid = append(valid, item)
+			continue
+		}
+		if isPlausibleAWSAccountID(accountID) {
+			valid = append(valid, item)
+			continue
+		}
+		ignored = append(ignored, AccountSummary{
+			AccountID:   accountID,
+			AccountName: stringValue(item["Cloud Account Name"]),
+		})
+	}
+	return valid, ignored
+}
+
+func isPlausibleAWSAccountID(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) == 0 || len(value) > 12 {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func fallbackAccounts(items []map[string]any, cloudMetaMap map[string]api.CloudAccount) (string, []accountRow) {
@@ -1202,14 +1346,19 @@ func hasAccountRows(items []map[string]any) bool {
 	return false
 }
 
-func countUncollectedCandidates(items []map[string]any, setupID string) int {
+func countUncollectedCandidates(items []map[string]any, setupID string, current []accountRow) int {
+	currentIDs := make(map[string]bool, len(current))
+	for _, account := range current {
+		currentIDs[account.AccountID] = true
+	}
 	count := 0
 	for _, item := range items {
 		if itemSetupID(item) != setupID {
 			continue
 		}
 		collected, ok := boolValue(item["Collected?"])
-		if ok && !collected {
+		accountID := stringValue(item["Cloud Account ID"])
+		if ok && !collected && accountID != "" && !currentIDs[accountID] {
 			count++
 		}
 	}
@@ -1658,6 +1807,59 @@ func writeAuditPayloads(path string, payloads auditPayloads) (string, error) {
 	return fmt.Sprintf("%x", sha256.Sum256(data)), nil
 }
 
+func buildRollbackPayloads(cloudAccounts []api.CloudAccount, setupIDs []string) (auditPayloads, error) {
+	selected := make(map[string]bool, len(setupIDs))
+	for _, setupID := range setupIDs {
+		selected[setupID] = true
+	}
+	payloads := make(auditPayloads, len(setupIDs))
+	for _, account := range cloudAccounts {
+		setupID := strings.TrimSpace(account.Name)
+		if !selected[setupID] {
+			continue
+		}
+		regions := make(map[string]int64, len(account.Regions))
+		for region, meta := range account.Regions {
+			regions[region] = meta.TestInstant
+		}
+		payloads[setupID] = api.PatchPayload{
+			Type:                  account.Type,
+			Name:                  setupID,
+			Regions:               regions,
+			RegionToProxyServerID: stringMap(account.RegionToProxyServerID),
+			ProxyServerID:         account.ProxyServerID,
+			AssumeRoleInfos:       append([]api.AssumeRoleInfo(nil), account.AssumeRoleInfos...),
+		}
+	}
+	for _, setupID := range setupIDs {
+		if _, ok := payloads[setupID]; !ok {
+			return nil, fmt.Errorf("cannot build rollback payload: setup %s is no longer present", setupID)
+		}
+	}
+	return payloads, nil
+}
+
+func verifyCloudAccountsUnchanged(
+	ctx context.Context,
+	client *api.Client,
+	networkID string,
+	setupIDs []string,
+	expected auditPayloads,
+) error {
+	current, err := client.CloudAccounts(ctx, networkID)
+	if err != nil {
+		return fmt.Errorf("reload cloud setups immediately before apply: %w", err)
+	}
+	actual, err := buildRollbackPayloads(current, setupIDs)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(expected, actual) {
+		return fmt.Errorf("selected Forward cloud setup state changed after planning; no PATCH was sent, rerun the dry plan")
+	}
+	return nil
+}
+
 func writeJSONPayload(path string, payload any) (string, string, error) {
 	outputPath := strings.TrimSpace(path)
 	if outputPath == "" {
@@ -1764,4 +1966,12 @@ func auditPath(outputPath string) string {
 		return outputPath + ".applied"
 	}
 	return strings.TrimSuffix(outputPath, ext) + ".applied" + ext
+}
+
+func rollbackPath(outputPath string) string {
+	ext := filepath.Ext(outputPath)
+	if ext == "" {
+		return outputPath + ".rollback"
+	}
+	return strings.TrimSuffix(outputPath, ext) + ".rollback" + ext
 }

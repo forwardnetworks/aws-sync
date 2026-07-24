@@ -46,6 +46,7 @@ func TestPreflightReportsSetupSpecificOrgEvidenceFailures(t *testing.T) {
 		SetupIDs:           nil,
 		MaxSnapshotAge:     0,
 		AllowNoOrgEvidence: false,
+		PruneMissing:       true,
 		MaxRemovals:        10,
 		MaxRemovalPercent:  40,
 	})

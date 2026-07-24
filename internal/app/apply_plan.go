@@ -32,6 +32,8 @@ type ApplyPlanSummary struct {
 	NetworkID         string   `json:"network_id"`
 	PlanPath          string   `json:"plan_path"`
 	PayloadSHA256     string   `json:"payload_sha256"`
+	RollbackOutput    string   `json:"rollback_output"`
+	RollbackSHA256    string   `json:"rollback_sha256"`
 	PatchedSetupCount int      `json:"patched_setup_count"`
 	PatchedSetups     []string `json:"patched_setups"`
 }
@@ -120,10 +122,25 @@ func ApplyPlan(ctx context.Context, cfg ApplyPlanConfig) (*ApplyPlanSummary, err
 			return nil, fmt.Errorf("plan removes %d account(s) from setup %s; apply-plan requires --allow-removals", len(removed), setupID)
 		}
 	}
+	if err := requireRemovalBounds(removalStats, cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
+		return nil, err
+	}
 	if err := validateRemovalStats(removalStats, cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
 		return nil, err
 	}
 	sort.Strings(setupIDs)
+	rollbackPayloads, err := buildRollbackPayloads(cloudAccounts, setupIDs)
+	if err != nil {
+		return nil, err
+	}
+	rollbackOutput := rollbackPath(planPath)
+	rollbackSHA256, err := writeAuditPayloads(rollbackOutput, rollbackPayloads)
+	if err != nil {
+		return nil, fmt.Errorf("write pre-apply rollback payload: %w", err)
+	}
+	if err := verifyCloudAccountsUnchanged(ctx, client, cfg.NetworkID, setupIDs, rollbackPayloads); err != nil {
+		return nil, err
+	}
 	for _, setupID := range setupIDs {
 		if err := client.PatchCloudAccount(ctx, cfg.NetworkID, setupID, payloads[setupID]); err != nil {
 			return nil, fmt.Errorf("patch setup %s: %w", setupID, err)
@@ -134,6 +151,8 @@ func ApplyPlan(ctx context.Context, cfg ApplyPlanConfig) (*ApplyPlanSummary, err
 		NetworkID:         cfg.NetworkID,
 		PlanPath:          planPath,
 		PayloadSHA256:     fmt.Sprintf("%x", sha256.Sum256(data)),
+		RollbackOutput:    rollbackOutput,
+		RollbackSHA256:    rollbackSHA256,
 		PatchedSetupCount: len(setupIDs),
 		PatchedSetups:     setupIDs,
 	}, nil

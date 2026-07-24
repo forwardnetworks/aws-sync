@@ -63,6 +63,7 @@ func TestRootCommandHonorsLocalSnapshotAndOutputFlags(t *testing.T) {
 			"--snapshot-id", "snapshot-1",
 			"--output", outputPath,
 			"--manual-output", manualOutputPath,
+			"--json",
 			"--insecure",
 		})
 		if err := cmd.Execute(); err != nil {
@@ -95,6 +96,47 @@ func TestRootCommandHonorsLocalSnapshotAndOutputFlags(t *testing.T) {
 	}
 	if _, err := os.Stat("aws_sync_payload.json"); err == nil {
 		t.Fatal("unexpected default payload file was created")
+	}
+}
+
+func TestApplyPlanCommandHonorsLocalYesFlag(t *testing.T) {
+	patched := false
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+			_, _ = w.Write([]byte(`[{"type":"AWS","name":"setup-a","assumeRoleInfos":[]}]`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/api/networks/network-1/cloudAccounts/setup-a":
+			patched = true
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	planPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(planPath, []byte(`{"setup-a":{"type":"AWS","name":"setup-a","regionToProxyServerId":{},"assumeRoleInfos":[]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	captureStdout(t, func() {
+		cmd := newRootCommand()
+		cmd.SetArgs([]string{
+			"apply-plan",
+			"--host", server.URL,
+			"--username", "alice",
+			"--password", "secret",
+			"--network-id", "network-1",
+			"--plan", planPath,
+			"--yes",
+			"--json",
+			"--insecure",
+		})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+	})
+	if !patched {
+		t.Fatal("apply-plan --yes did not reach PATCH")
 	}
 }
 
@@ -202,6 +244,32 @@ func TestResolveOutputFormat(t *testing.T) {
 	}
 	if format != "human" {
 		t.Fatalf("expected human, got %q", format)
+	}
+}
+
+func TestResolveOutputFormatDefaultsToHuman(t *testing.T) {
+	v := viper.New()
+	cmd := &cobra.Command{}
+	format, err := resolveOutputFormat(cmd, v)
+	if err != nil {
+		t.Fatalf("resolveOutputFormat() error = %v", err)
+	}
+	if format != "human" {
+		t.Fatalf("expected human default, got %q", format)
+	}
+}
+
+func TestResolveOutputFormatJSONAlias(t *testing.T) {
+	v := viper.New()
+	v.Set("format", "human")
+	v.Set("json", true)
+	cmd := &cobra.Command{}
+	format, err := resolveOutputFormat(cmd, v)
+	if err != nil {
+		t.Fatalf("resolveOutputFormat() error = %v", err)
+	}
+	if format != "json" {
+		t.Fatalf("expected --json to override human, got %q", format)
 	}
 }
 

@@ -416,7 +416,10 @@ flowchart LR
 - Static-key collector secrets are only included in the create payload when explicitly supplied. Without the secret, the file contains a placeholder and is marked not POST-ready.
 - Removals require explicit `--allow-removals` flag; `awssync` will not silently
   remove accounts from a Forward setup.
-- Optional `--max-removals` and `--max-removal-percent` ceilings limit aggregate and per-setup removal blast radius and are rechecked immediately before apply.
+- NQE sync preserves configured accounts by default. NQE-driven removal additionally requires explicit `--prune-missing`; authoritative manifest sync is preferred for lifecycle removal.
+- Both nonzero `--max-removals` and `--max-removal-percent` ceilings are mandatory for any removal and are rechecked immediately before apply.
+- Existing disabled or failed `Collected? false` rows are not treated as AWS Organizations discovery candidates.
+- CLI NQE plans pin one processed snapshot, and every apply writes a full pre-change rollback payload before the first PATCH.
 - GovCloud NQE removals additionally require positive Organizations evidence. Generic no-evidence flags cannot override this gate.
 - Manifest removals require an authoritative complete manifest plus `--allow-removals`.
 - `apply-plan` reloads current state and refuses GovCloud removals, so a saved payload cannot bypass the source workflow's safety checks.

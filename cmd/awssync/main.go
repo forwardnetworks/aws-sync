@@ -44,7 +44,7 @@ func newRootCommand() *cobra.Command {
 	v.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 	v.AutomaticEnv()
 	v.SetDefault("api-prefix", "/api")
-	v.SetDefault("format", "json")
+	v.SetDefault("format", "human")
 	v.SetDefault("timeout", 60*time.Second)
 	v.SetDefault("output", "")
 	v.SetDefault("wait-for-state", "PROCESSED")
@@ -71,13 +71,14 @@ func newRootCommand() *cobra.Command {
 			}
 			apply := flagBool(cmd, v, "apply")
 			yes := flagBool(cmd, v, "yes")
+			snapshotID := flagString(cmd, v, "snapshot-id")
 			if apply && !yes && term.IsTerminal(int(os.Stdin.Fd())) {
 				preview := app.Config{
 					Host:               v.GetString("host"),
 					Username:           v.GetString("username"),
 					Password:           password,
 					NetworkID:          networkID,
-					SnapshotID:         flagString(cmd, v, "snapshot-id"),
+					SnapshotID:         snapshotID,
 					QueryID:            flagString(cmd, v, "query-id"),
 					QuerySetupParam:    flagString(cmd, v, "query-setup-param"),
 					SetupIDs:           setupIDs,
@@ -91,8 +92,10 @@ func newRootCommand() *cobra.Command {
 					MaxRemovalPercent:  flagFloat64(cmd, v, "max-removal-percent"),
 					AllowNoCandidates:  flagBool(cmd, v, "allow-no-candidates"),
 					AllowNoOrgEvidence: flagBool(cmd, v, "allow-no-org-evidence"),
+					PruneMissing:       flagBool(cmd, v, "prune-missing"),
 					MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
 					ExternalIDFile:     flagString(cmd, v, "external-id-file"),
+					PinSnapshot:        true,
 				}
 				previewSummary, err := app.Run(cmd.Context(), preview)
 				if err != nil {
@@ -101,6 +104,7 @@ func newRootCommand() *cobra.Command {
 				if err := confirmApplyFromSummary(previewSummary, os.Stdin, os.Stderr); err != nil {
 					return err
 				}
+				snapshotID = previewSummary.SnapshotID
 			} else {
 				if err := confirmApply(apply, yes, os.Stdin, os.Stderr); err != nil {
 					return err
@@ -111,7 +115,7 @@ func newRootCommand() *cobra.Command {
 				Username:           v.GetString("username"),
 				Password:           password,
 				NetworkID:          networkID,
-				SnapshotID:         flagString(cmd, v, "snapshot-id"),
+				SnapshotID:         snapshotID,
 				QueryID:            flagString(cmd, v, "query-id"),
 				QuerySetupParam:    flagString(cmd, v, "query-setup-param"),
 				SetupIDs:           setupIDs,
@@ -126,8 +130,10 @@ func newRootCommand() *cobra.Command {
 				MaxRemovalPercent:  flagFloat64(cmd, v, "max-removal-percent"),
 				AllowNoCandidates:  flagBool(cmd, v, "allow-no-candidates"),
 				AllowNoOrgEvidence: flagBool(cmd, v, "allow-no-org-evidence"),
+				PruneMissing:       flagBool(cmd, v, "prune-missing"),
 				MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
 				ExternalIDFile:     flagString(cmd, v, "external-id-file"),
+				PinSnapshot:        true,
 			}
 			summary, err := app.Run(cmd.Context(), cfg)
 			if err != nil {
@@ -219,7 +225,8 @@ func bindCommonFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	flags.String("host", "", "Forward base URL, for example https://fwd.app")
 	flags.String("username", "", "Forward username")
 	flags.String("password", "", "Forward password")
-	flags.String("format", "json", "output format: json or human")
+	flags.String("format", "human", "output format: human or json")
+	flags.Bool("json", false, "emit machine-readable JSON output (equivalent to --format json)")
 	flags.String("api-prefix", "/api", "API prefix")
 	flags.Bool("insecure", false, "skip TLS certificate verification")
 	flags.Duration("timeout", 60*time.Second, "HTTP timeout")
@@ -227,6 +234,7 @@ func bindCommonFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	mustBind(v, flags, "username")
 	mustBind(v, flags, "password")
 	mustBind(v, flags, "format")
+	mustBind(v, flags, "json")
 	mustBind(v, flags, "api-prefix")
 	mustBind(v, flags, "insecure")
 	mustBind(v, flags, "timeout")
@@ -249,8 +257,9 @@ func bindPreflightFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	flags.String("query-setup-param", "", "optional saved-query String parameter name to receive the single selected --setup-id")
 	flags.StringSlice("setup-id", nil, "optional Forward AWS setup ID to sync; repeatable")
 	flags.Bool("allow-no-org-evidence", false, "allow removals when no AWS Organizations evidence is visible in NQE")
-	flags.Int("max-removals", 0, "maximum aggregate account removals allowed during apply; 0 disables the limit")
-	flags.Float64("max-removal-percent", 0, "maximum removal percentage allowed per setup during apply; 0 disables the limit")
+	flags.Bool("prune-missing", false, "plan removal of configured accounts missing from NQE; additive preservation is the default")
+	flags.Int("max-removals", 0, "required nonzero aggregate account-removal ceiling when removals are planned")
+	flags.Float64("max-removal-percent", 0, "required nonzero per-setup removal-percentage ceiling when removals are planned")
 	flags.Duration("max-snapshot-age", 0, "fail if latest processed snapshot is older than this duration; 0 disables the check")
 	flags.String("external-id-file", "", "CSV file of explicit per-account External IDs for mixed-ID setups")
 	mustBind(v, flags, "snapshot-id")
@@ -258,6 +267,7 @@ func bindPreflightFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	mustBind(v, flags, "query-setup-param")
 	mustBind(v, flags, "setup-id")
 	mustBind(v, flags, "allow-no-org-evidence")
+	mustBind(v, flags, "prune-missing")
 	mustBind(v, flags, "max-removals")
 	mustBind(v, flags, "max-removal-percent")
 	mustBind(v, flags, "max-snapshot-age")
@@ -273,10 +283,11 @@ func bindProcessingFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	flags.Bool("apply", false, "PATCH the generated setup payloads back into Forward")
 	flags.Bool("yes", false, "skip apply confirmation prompt")
 	flags.Bool("allow-removals", false, "allow planned account removals during apply")
-	flags.Int("max-removals", 0, "maximum aggregate account removals allowed during apply; 0 disables the limit")
-	flags.Float64("max-removal-percent", 0, "maximum removal percentage allowed per setup during apply; 0 disables the limit")
+	flags.Int("max-removals", 0, "required nonzero aggregate account-removal ceiling when removals are planned")
+	flags.Float64("max-removal-percent", 0, "required nonzero per-setup removal-percentage ceiling when removals are planned")
 	flags.Bool("allow-no-candidates", false, "allow removals when no uncollected candidate accounts are visible")
 	flags.Bool("allow-no-org-evidence", false, "allow removals when no AWS Organizations evidence is visible in NQE")
+	flags.Bool("prune-missing", false, "plan removal of configured accounts missing from NQE; additive preservation is the default")
 	flags.Duration("max-snapshot-age", 0, "fail if latest processed snapshot is older than this duration; 0 disables the check")
 	flags.String("external-id-file", "", "CSV file of explicit per-account External IDs for mixed-ID setups")
 	mustBind(v, flags, "query-id")
@@ -291,6 +302,7 @@ func bindProcessingFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	mustBind(v, flags, "max-removal-percent")
 	mustBind(v, flags, "allow-no-candidates")
 	mustBind(v, flags, "allow-no-org-evidence")
+	mustBind(v, flags, "prune-missing")
 	mustBind(v, flags, "max-snapshot-age")
 	mustBind(v, flags, "external-id-file")
 }
@@ -327,6 +339,7 @@ func newPreflightCommand(v *viper.Viper) *cobra.Command {
 				Insecure:           v.GetBool("insecure"),
 				Timeout:            v.GetDuration("timeout"),
 				AllowNoOrgEvidence: flagBool(cmd, v, "allow-no-org-evidence"),
+				PruneMissing:       flagBool(cmd, v, "prune-missing"),
 				MaxRemovals:        flagInt(cmd, v, "max-removals"),
 				MaxRemovalPercent:  flagFloat64(cmd, v, "max-removal-percent"),
 				MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
@@ -367,7 +380,7 @@ func newStatusCommand(v *viper.Viper) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return emitJSON(result)
+			return emitResult(cmd, v, result)
 		},
 	}
 	bindNetworkFlag(v, cmd.Flags())
@@ -387,7 +400,7 @@ func newApplyPlanCommand(v *viper.Viper) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if !v.GetBool("yes") {
+			if !flagBool(cmd, v, "yes") {
 				return fmt.Errorf("apply-plan requires --yes")
 			}
 			networkID, err := resolveNetworkIDForCLI(cmd.Context(), v, password, flagString(cmd, v, "network-id"), os.Stdin, os.Stderr)
@@ -410,15 +423,15 @@ func newApplyPlanCommand(v *viper.Viper) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return emitJSON(summary)
+			return emitResult(cmd, v, summary)
 		},
 	}
 	bindNetworkFlag(v, cmd.Flags())
 	cmd.Flags().String("plan", "aws_sync_payload.json", "reviewed payload file to apply")
 	cmd.Flags().Bool("yes", false, "confirm applying the reviewed payload file")
 	cmd.Flags().Bool("allow-removals", false, "allow reviewed commercial-partition account removals; GovCloud removals must use their source workflow")
-	cmd.Flags().Int("max-removals", 0, "maximum aggregate account removals allowed; 0 disables the limit")
-	cmd.Flags().Float64("max-removal-percent", 0, "maximum removal percentage allowed per setup; 0 disables the limit")
+	cmd.Flags().Int("max-removals", 0, "required nonzero aggregate account-removal ceiling when removals are planned")
+	cmd.Flags().Float64("max-removal-percent", 0, "required nonzero per-setup removal-percentage ceiling when removals are planned")
 	mustBind(v, cmd.Flags(), "plan")
 	mustBind(v, cmd.Flags(), "yes")
 	mustBind(v, cmd.Flags(), "allow-removals")
@@ -455,7 +468,7 @@ func newWaitCommand(v *viper.Viper) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return emitJSON(result)
+			return emitResult(cmd, v, result)
 		},
 	}
 	bindNetworkFlag(v, cmd.Flags())
@@ -726,8 +739,8 @@ func newSyncAccountsCommand(v *viper.Viper) *cobra.Command {
 	cmd.Flags().Bool("apply", false, "PATCH the generated setup payload into Forward")
 	cmd.Flags().Bool("yes", false, "skip apply confirmation prompt")
 	cmd.Flags().Bool("allow-removals", false, "allow reviewed manifest entries to remove accounts from the setup")
-	cmd.Flags().Int("max-removals", 0, "maximum aggregate account removals allowed; 0 disables the limit")
-	cmd.Flags().Float64("max-removal-percent", 0, "maximum removal percentage allowed for the setup; 0 disables the limit")
+	cmd.Flags().Int("max-removals", 0, "required nonzero aggregate account-removal ceiling when removals are planned")
+	cmd.Flags().Float64("max-removal-percent", 0, "required nonzero removal-percentage ceiling when removals are planned")
 	cmd.Flags().String("external-id-file", "", "CSV file of explicit per-account External IDs")
 	for _, name := range []string{"accounts-file", "setup-id", "output", "manual-output", "apply", "yes", "allow-removals", "max-removals", "max-removal-percent", "external-id-file"} {
 		mustBind(v, cmd.Flags(), name)
@@ -772,6 +785,7 @@ func newServeWebhookCommand(v *viper.Viper) *cobra.Command {
 					MaxRemovalPercent:  flagFloat64(cmd, v, "max-removal-percent"),
 					AllowNoCandidates:  flagBool(cmd, v, "allow-no-candidates"),
 					AllowNoOrgEvidence: flagBool(cmd, v, "allow-no-org-evidence"),
+					PruneMissing:       flagBool(cmd, v, "prune-missing"),
 					MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
 					ExternalIDFile:     flagString(cmd, v, "external-id-file"),
 				},
@@ -1165,9 +1179,12 @@ func resolveCollectorSecret(v *viper.Viper, credentialMode string, post bool, st
 }
 
 func resolveOutputFormat(cmd *cobra.Command, v *viper.Viper) (string, error) {
+	if flagBool(cmd, v, "json") {
+		return "json", nil
+	}
 	value := strings.TrimSpace(strings.ToLower(flagString(cmd, v, "format")))
 	if value == "" {
-		value = "json"
+		value = "human"
 	}
 	switch value {
 	case "json", "human":
@@ -1192,9 +1209,50 @@ func emitResult(cmd *cobra.Command, v *viper.Viper, value any) error {
 		return emitSummaryHuman(summary)
 	case *app.ExternalIDSummary:
 		return emitExternalIDHuman(summary)
+	case *app.ApplyPlanSummary:
+		return emitApplyPlanHuman(summary)
+	case *monitor.StatusResult:
+		return emitStatusHuman(summary)
+	case *monitor.WaitResult:
+		return emitWaitHuman(summary)
 	default:
 		return emitJSON(value)
 	}
+}
+
+func emitStatusHuman(result *monitor.StatusResult) error {
+	fmt.Fprintln(os.Stdout, "Snapshot status")
+	fmt.Fprintf(os.Stdout, "  network: %s\n", result.NetworkID)
+	if result.LatestProcessedSnapshot != nil {
+		fmt.Fprintf(os.Stdout, "  latest processed: %s\n", result.LatestProcessedSnapshot.ID)
+	}
+	for _, snapshot := range result.Snapshots {
+		fmt.Fprintf(os.Stdout, "  - %s: %s", snapshot.ID, snapshot.State)
+		if snapshot.ProcessedAt != "" {
+			fmt.Fprintf(os.Stdout, " (processed %s)", snapshot.ProcessedAt)
+		}
+		fmt.Fprintln(os.Stdout)
+	}
+	return nil
+}
+
+func emitWaitHuman(result *monitor.WaitResult) error {
+	fmt.Fprintln(os.Stdout, "Snapshot wait complete")
+	fmt.Fprintf(os.Stdout, "  network:  %s\n", result.NetworkID)
+	fmt.Fprintf(os.Stdout, "  snapshot: %s\n", result.Snapshot.ID)
+	fmt.Fprintf(os.Stdout, "  state:    %s\n", result.Snapshot.State)
+	return nil
+}
+
+func emitApplyPlanHuman(summary *app.ApplyPlanSummary) error {
+	fmt.Fprintln(os.Stdout, "Apply-plan report")
+	fmt.Fprintf(os.Stdout, "  host:      %s\n", summary.Host)
+	fmt.Fprintf(os.Stdout, "  network:   %s\n", summary.NetworkID)
+	fmt.Fprintf(os.Stdout, "  plan:      %s\n", summary.PlanPath)
+	fmt.Fprintf(os.Stdout, "  patched:   %d (%s)\n", summary.PatchedSetupCount, strings.Join(summary.PatchedSetups, ", "))
+	fmt.Fprintf(os.Stdout, "  rollback:  %s\n", summary.RollbackOutput)
+	fmt.Fprintf(os.Stdout, "  rollback sha256: %s\n", summary.RollbackSHA256)
+	return nil
 }
 
 func emitExternalIDHuman(summary *app.ExternalIDSummary) error {
@@ -1220,6 +1278,12 @@ func emitPreflightHuman(summary *app.PreflightSummary) error {
 	fmt.Fprintf(os.Stdout, "  network:  %s\n", summary.NetworkID)
 	fmt.Fprintf(os.Stdout, "  ready:    %t\n", summary.Ready)
 	fmt.Fprintf(os.Stdout, "  accounts: %d rows\n", summary.FetchedItemCount)
+	if summary.SnapshotID != "" {
+		fmt.Fprintf(os.Stdout, "  snapshot: %s\n", summary.SnapshotID)
+	}
+	if summary.IgnoredNQEItems > 0 {
+		fmt.Fprintf(os.Stdout, "  ignored:  %d invalid NQE account row(s)\n", summary.IgnoredNQEItems)
+	}
 	if len(summary.SelectedSetupIDs) > 0 {
 		fmt.Fprintf(os.Stdout, "  setups:   %s\n", strings.Join(summary.SelectedSetupIDs, ", "))
 	}
@@ -1231,12 +1295,13 @@ func emitPreflightHuman(summary *app.PreflightSummary) error {
 	for _, setup := range summary.PlannedSetups {
 		fmt.Fprintf(
 			os.Stdout,
-			"  - %s: configured=%d, discovered=%d, candidates=%d, added=%d, removed=%d\n",
+			"  - %s: configured=%d, discovered=%d, candidates=%d, added=%d, reenabled=%d, removed=%d\n",
 			setup.SetupID,
 			setup.ConfiguredAccountCount,
 			setup.NQEAccountRowCount,
 			setup.NQECandidateRowCount,
 			len(setup.AddedAccounts),
+			len(setup.ReenabledAccounts),
 			len(setup.RemovedAccounts),
 		)
 		if len(setup.AddedAccounts) > 0 {
@@ -1274,25 +1339,37 @@ func emitSummaryHuman(summary *app.Summary) error {
 		fmt.Fprintf(os.Stdout, "  setups:    %s\n", strings.Join(summary.SelectedSetupIDs, ", "))
 	}
 	fmt.Fprintf(os.Stdout, "  output:    %s\n", summary.Output)
+	if summary.RollbackOutput != "" {
+		fmt.Fprintf(os.Stdout, "  rollback:  %s\n", summary.RollbackOutput)
+		fmt.Fprintf(os.Stdout, "  rollback sha256: %s\n", summary.RollbackSHA256)
+	}
 	if summary.ManualOutput != "" {
 		fmt.Fprintf(os.Stdout, "  manual:    %s\n", summary.ManualOutput)
 	}
 	fmt.Fprintf(os.Stdout, "  fetched:   %d\n", summary.FetchedItemCount)
+	if summary.SnapshotID != "" {
+		fmt.Fprintf(os.Stdout, "  snapshot:  %s\n", summary.SnapshotID)
+	}
+	if summary.IgnoredNQEItemCount > 0 {
+		fmt.Fprintf(os.Stdout, "  ignored:   %d invalid NQE account row(s)\n", summary.IgnoredNQEItemCount)
+	}
 	fmt.Fprintf(os.Stdout, "  planned:   %d\n", summary.PlannedSetupCount)
 	fmt.Fprintf(os.Stdout, "  patched:   %d\n", summary.PatchedSetupCount)
 	if summary.RemovalBlocked {
 		fmt.Fprintln(os.Stdout, "\nApply blocked. Add --allow-removals, --allow-no-candidates, and --allow-no-org-evidence as needed.")
 	}
 	fmt.Fprintln(os.Stdout, "\nSetups:")
-	addedTotal, removedTotal := 0, 0
+	addedTotal, reenabledTotal, removedTotal := 0, 0, 0
 	for _, setup := range summary.PlannedSetups {
 		addedTotal += len(setup.AddedAccounts)
+		reenabledTotal += len(setup.ReenabledAccounts)
 		removedTotal += len(setup.RemovedAccounts)
 		fmt.Fprintf(
 			os.Stdout,
-			"  - %s: add=%d remove=%d unchanged=%d\n",
+			"  - %s: add=%d reenable=%d remove=%d unchanged=%d\n",
 			setup.SetupID,
 			len(setup.AddedAccounts),
+			len(setup.ReenabledAccounts),
 			len(setup.RemovedAccounts),
 			setup.UnchangedAccountCount,
 		)
@@ -1305,7 +1382,7 @@ func emitSummaryHuman(summary *app.Summary) error {
 		fmt.Fprintf(os.Stdout, "    %s\n", setup.OrganizationDiscoveryMessage)
 	}
 	fmt.Fprintln(os.Stdout, "\nSummary:")
-	fmt.Fprintf(os.Stdout, "  total added=%d, total removed=%d\n", addedTotal, removedTotal)
+	fmt.Fprintf(os.Stdout, "  total added=%d, total reenabled=%d, total removed=%d\n", addedTotal, reenabledTotal, removedTotal)
 	return nil
 }
 

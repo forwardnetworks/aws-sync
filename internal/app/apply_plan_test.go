@@ -61,6 +61,12 @@ func TestApplyPlanPatchesReviewedPayload(t *testing.T) {
 	if summary.PayloadSHA256 == "" {
 		t.Fatalf("expected payload sha: %+v", summary)
 	}
+	if summary.RollbackOutput == "" || summary.RollbackSHA256 == "" {
+		t.Fatalf("expected pre-apply rollback artifact: %+v", summary)
+	}
+	if _, err := os.Stat(summary.RollbackOutput); err != nil {
+		t.Fatalf("expected rollback file: %v", err)
+	}
 }
 
 func TestApplyPlanCannotBypassGovCloudRemovalSafety(t *testing.T) {
@@ -134,6 +140,7 @@ func TestApplyPlanBlocksRemovalPercentageAboveLimit(t *testing.T) {
 		PlanPath:          planPath,
 		APIPrefix:         "/api",
 		AllowRemovals:     true,
+		MaxRemovals:       1,
 		MaxRemovalPercent: 49,
 	})
 	if err == nil || !strings.Contains(err.Error(), "50.00%") {
@@ -141,5 +148,104 @@ func TestApplyPlanBlocksRemovalPercentageAboveLimit(t *testing.T) {
 	}
 	if patched {
 		t.Fatal("removal above percentage limit reached PATCH")
+	}
+}
+
+func TestApplyPlanRequiresBothRemovalBounds(t *testing.T) {
+	tests := []struct {
+		name       string
+		maxCount   int
+		maxPercent float64
+	}{
+		{name: "neither"},
+		{name: "count only", maxCount: 1},
+		{name: "percentage only", maxPercent: 100},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			patched := false
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+					_, _ = w.Write([]byte(`[{"type":"AWS","name":"prod","assumeRoleInfos":[
+						{"accountId":"111","roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true},
+						{"accountId":"222","roleArn":"arn:aws:iam::222:role/ForwardRole","enabled":true}
+					]}]`))
+				case r.Method == http.MethodPatch:
+					patched = true
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			planPath := filepath.Join(t.TempDir(), "payload.json")
+			if err := os.WriteFile(planPath, []byte(`{"prod":{"type":"AWS","name":"prod","assumeRoleInfos":[
+				{"accountId":"111","roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true}
+			]}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := ApplyPlan(context.Background(), ApplyPlanConfig{
+				Host:              server.URL,
+				Username:          "user",
+				Password:          "pass",
+				NetworkID:         "network-1",
+				PlanPath:          planPath,
+				APIPrefix:         "/api",
+				AllowRemovals:     true,
+				MaxRemovals:       test.maxCount,
+				MaxRemovalPercent: test.maxPercent,
+			})
+			if err == nil || !strings.Contains(err.Error(), "require both") {
+				t.Fatalf("expected explicit bounds block, got %v", err)
+			}
+			if patched {
+				t.Fatal("removal without both bounds reached PATCH")
+			}
+		})
+	}
+}
+
+func TestApplyPlanBlocksConcurrentSetupChange(t *testing.T) {
+	getCount := 0
+	patched := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+			getCount++
+			enabled := "true"
+			if getCount > 1 {
+				enabled = "false"
+			}
+			_, _ = w.Write([]byte(`[{"type":"AWS","name":"prod","assumeRoleInfos":[
+				{"accountId":"111","roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":` + enabled + `}
+			]}]`))
+		case r.Method == http.MethodPatch:
+			patched = true
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	planPath := filepath.Join(t.TempDir(), "payload.json")
+	if err := os.WriteFile(planPath, []byte(`{"prod":{"type":"AWS","name":"prod","assumeRoleInfos":[
+		{"accountId":"111","roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true}
+	]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ApplyPlan(context.Background(), ApplyPlanConfig{
+		Host:      server.URL,
+		Username:  "user",
+		Password:  "pass",
+		NetworkID: "network-1",
+		PlanPath:  planPath,
+		APIPrefix: "/api",
+	})
+	if err == nil || !strings.Contains(err.Error(), "changed after planning") {
+		t.Fatalf("expected concurrent-change block, got %v", err)
+	}
+	if patched {
+		t.Fatal("concurrent setup change reached PATCH")
 	}
 }

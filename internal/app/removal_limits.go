@@ -64,6 +64,22 @@ func validateRemovalStats(stats []removalStat, maxRemovals int, maxRemovalPercen
 	return nil
 }
 
+func requireRemovalBounds(stats []removalStat, maxRemovals int, maxRemovalPercent float64) error {
+	totalRemoved := 0
+	for _, stat := range stats {
+		totalRemoved += stat.RemovedCount
+	}
+	if totalRemoved == 0 {
+		return nil
+	}
+	if maxRemovals <= 0 || maxRemovalPercent <= 0 {
+		return fmt.Errorf(
+			"planned removals require both --max-removals and --max-removal-percent with explicit nonzero bounds",
+		)
+	}
+	return nil
+}
+
 func (p *patchPlan) removalStats() []removalStat {
 	stats := make([]removalStat, 0, len(p.Setups))
 	for _, setup := range p.Setups {

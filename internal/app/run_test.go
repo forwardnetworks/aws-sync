@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -416,6 +417,7 @@ func TestRunBlocksGovCloudRemovalWithoutOrgEvidenceEvenWithBreakGlassFlags(t *te
 		APIPrefix:          "/api",
 		Insecure:           true,
 		Apply:              true,
+		PruneMissing:       true,
 		AllowRemovals:      true,
 		MaxRemovals:        1,
 		MaxRemovalPercent:  50,
@@ -619,6 +621,134 @@ func TestBuildPlanReportsAccountDiff(t *testing.T) {
 	}
 }
 
+func TestBuildPlanKeepsUncheckedCurrentAccountsAndDoesNotCallThemCandidates(t *testing.T) {
+	const accountCount = 325
+	items := make([]map[string]any, 0, accountCount)
+	infos := make([]api.AssumeRoleInfo, 0, accountCount)
+	for index := 0; index < accountCount; index++ {
+		accountID := fmt.Sprintf("%012d", index+1)
+		collected := index < 10
+		items = append(items, map[string]any{
+			"Cloud Setup ID":          "setup-a",
+			"Cloud Account ID":        accountID,
+			"Cloud Account Name":      "account-" + accountID,
+			"Collected?":              collected,
+			"Organizational Unit IDs": []string{},
+		})
+		infos = append(infos, api.AssumeRoleInfo{
+			AccountID:   accountID,
+			AccountName: "account-" + accountID,
+			RoleArn:     "arn:aws:iam::" + accountID + ":role/ForwardRole",
+			Enabled:     collected,
+		})
+	}
+
+	plan, err := buildPlan(items, []api.CloudAccount{{Name: "setup-a", AssumeRoleInfos: infos}}, "", nil)
+	if err != nil {
+		t.Fatalf("buildPlan() error = %v", err)
+	}
+	setup := plan.Setups[0]
+	if setup.DiscoveredCandidateCount != 0 {
+		t.Fatalf("existing unchecked accounts are not Organizations candidates; got %d", setup.DiscoveredCandidateCount)
+	}
+	if len(setup.RemovedAccounts) != 0 || len(setup.Payload.AssumeRoleInfos) != accountCount {
+		t.Fatalf("subset-enabled setup must keep all accounts: removed=%d payload=%d", len(setup.RemovedAccounts), len(setup.Payload.AssumeRoleInfos))
+	}
+	for _, info := range setup.Payload.AssumeRoleInfos {
+		if !info.Enabled {
+			t.Fatalf("sync payload should enable discovered account %s", info.AccountID)
+		}
+	}
+}
+
+func TestBuildPlanForConfigIsAdditiveWhenNQEReturnsOnlyEnabledSubset(t *testing.T) {
+	const accountCount = 325
+	items := make([]map[string]any, 0, 10)
+	infos := make([]api.AssumeRoleInfo, 0, accountCount)
+	for index := 0; index < accountCount; index++ {
+		accountID := fmt.Sprintf("%012d", index+1)
+		enabled := index < 10
+		if enabled {
+			items = append(items, map[string]any{
+				"Cloud Setup ID":     "setup-a",
+				"Cloud Account ID":   accountID,
+				"Cloud Account Name": "account-" + accountID,
+				"Collected?":         index == 0,
+			})
+		}
+		infos = append(infos, api.AssumeRoleInfo{
+			AccountID:   accountID,
+			AccountName: "account-" + accountID,
+			RoleArn:     "arn:aws:iam::" + accountID + ":role/ForwardRole",
+			Enabled:     enabled,
+		})
+	}
+	cloudAccounts := []api.CloudAccount{{Name: "setup-a", AssumeRoleInfos: infos}}
+
+	plan, err := buildPlanForConfig(Config{}, items, cloudAccounts)
+	if err != nil {
+		t.Fatalf("buildPlanForConfig() error = %v", err)
+	}
+	setup := plan.Setups[0]
+	if len(setup.DiscoveredAccounts) != 10 || len(setup.Payload.AssumeRoleInfos) != accountCount {
+		t.Fatalf("additive mode must distinguish NQE rows from preserved payload: discovered=%d payload=%d", len(setup.DiscoveredAccounts), len(setup.Payload.AssumeRoleInfos))
+	}
+	if len(setup.RemovedAccounts) != 0 || len(setup.ReenabledAccounts) != accountCount-10 {
+		t.Fatalf("unexpected additive plan: removed=%d reenabled=%d", len(setup.RemovedAccounts), len(setup.ReenabledAccounts))
+	}
+
+	pruned, err := buildPlanForConfig(Config{PruneMissing: true}, items, cloudAccounts)
+	if err != nil {
+		t.Fatalf("buildPlanForConfig(prune) error = %v", err)
+	}
+	if len(pruned.Setups[0].RemovedAccounts) != accountCount-10 {
+		t.Fatalf("explicit prune should expose missing accounts as removals, got %d", len(pruned.Setups[0].RemovedAccounts))
+	}
+}
+
+func TestBuildPlanCountsOnlyNewUncollectedAccountsAsCandidates(t *testing.T) {
+	items := []map[string]any{
+		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111", "Collected?": true},
+		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "222", "Collected?": false},
+		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "333", "Collected?": false},
+	}
+	current := []api.AssumeRoleInfo{
+		{AccountID: "111", RoleArn: "arn:aws:iam::111:role/ForwardRole", Enabled: true},
+		{AccountID: "222", RoleArn: "arn:aws:iam::222:role/ForwardRole", Enabled: false},
+	}
+	plan, err := buildPlan(items, []api.CloudAccount{{Name: "setup-a", AssumeRoleInfos: current}}, "", nil)
+	if err != nil {
+		t.Fatalf("buildPlan() error = %v", err)
+	}
+	setup := plan.Setups[0]
+	if setup.DiscoveredCandidateCount != 1 {
+		t.Fatalf("expected only new account 333 to be a candidate, got %d", setup.DiscoveredCandidateCount)
+	}
+	if len(setup.AddedAccounts) != 1 || setup.AddedAccounts[0].AccountID != "333" {
+		t.Fatalf("unexpected added accounts: %#v", setup.AddedAccounts)
+	}
+}
+
+func TestBuildPlanIgnoresMalformedNQEAccountID(t *testing.T) {
+	items := []map[string]any{
+		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111", "Collected?": true},
+		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "setup-a", "Collected?": false},
+	}
+	plan, err := buildPlan(items, []api.CloudAccount{{
+		Name:            "setup-a",
+		AssumeRoleInfos: []api.AssumeRoleInfo{{AccountID: "111", RoleArn: "arn:aws:iam::111:role/ForwardRole", Enabled: true}},
+	}}, "", nil)
+	if err != nil {
+		t.Fatalf("buildPlan() error = %v", err)
+	}
+	if len(plan.IgnoredAccounts) != 1 || plan.IgnoredAccounts[0].AccountID != "setup-a" {
+		t.Fatalf("expected malformed placeholder to be reported, got %#v", plan.IgnoredAccounts)
+	}
+	if len(plan.Payloads["setup-a"].AssumeRoleInfos) != 1 {
+		t.Fatalf("malformed placeholder reached PATCH payload: %#v", plan.Payloads["setup-a"])
+	}
+}
+
 func TestRunWritesPayloadAndPatchesWhenApplyEnabled(t *testing.T) {
 	var patched []string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -646,21 +776,36 @@ func TestRunWritesPayloadAndPatchesWhenApplyEnabled(t *testing.T) {
 
 	output := filepath.Join(t.TempDir(), "payload.json")
 	summary, err := Run(context.Background(), Config{
-		Host:      server.URL,
-		Username:  "alice",
-		Password:  "secret",
-		NetworkID: "network-1",
-		QueryID:   "custom-query",
-		Output:    output,
-		APIPrefix: "/api",
-		Insecure:  true,
-		Apply:     true,
+		Host:         server.URL,
+		Username:     "alice",
+		Password:     "secret",
+		NetworkID:    "network-1",
+		QueryID:      "custom-query",
+		Output:       output,
+		APIPrefix:    "/api",
+		Insecure:     true,
+		Apply:        true,
+		PruneMissing: true,
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	if summary.PatchedSetupCount != 1 || len(patched) != 1 {
 		t.Fatalf("unexpected patch counts: summary=%+v patched=%v", summary, patched)
+	}
+	if summary.RollbackOutput == "" || summary.RollbackSHA256 == "" {
+		t.Fatalf("expected automatic rollback artifact: %+v", summary)
+	}
+	rollbackData, err := os.ReadFile(summary.RollbackOutput)
+	if err != nil {
+		t.Fatalf("read rollback payload: %v", err)
+	}
+	var rollback map[string]api.PatchPayload
+	if err := json.Unmarshal(rollbackData, &rollback); err != nil {
+		t.Fatalf("decode rollback payload: %v", err)
+	}
+	if rollback["setup-a"].Regions["us-east-1"] != 123 || rollback["setup-a"].ProxyServerID != "proxy-1" {
+		t.Fatalf("rollback did not preserve current setup state: %#v", rollback["setup-a"])
 	}
 	data, err := os.ReadFile(output)
 	if err != nil {
@@ -770,15 +915,16 @@ func TestRunBlocksApplyWithRemovalsUnlessAllowed(t *testing.T) {
 	defer server.Close()
 
 	_, err := Run(context.Background(), Config{
-		Host:      server.URL,
-		Username:  "alice",
-		Password:  "secret",
-		NetworkID: "network-1",
-		QueryID:   "custom-query",
-		Output:    filepath.Join(t.TempDir(), "payload.json"),
-		APIPrefix: "/api",
-		Insecure:  true,
-		Apply:     true,
+		Host:         server.URL,
+		Username:     "alice",
+		Password:     "secret",
+		NetworkID:    "network-1",
+		QueryID:      "custom-query",
+		Output:       filepath.Join(t.TempDir(), "payload.json"),
+		APIPrefix:    "/api",
+		Insecure:     true,
+		Apply:        true,
+		PruneMissing: true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "--allow-removals") {
 		t.Fatalf("unexpected error: %v", err)
@@ -823,7 +969,10 @@ func TestRunAllowsApplyWithRemovalsWhenExplicitlyAllowed(t *testing.T) {
 		APIPrefix:          "/api",
 		Insecure:           true,
 		Apply:              true,
+		PruneMissing:       true,
 		AllowRemovals:      true,
+		MaxRemovals:        1,
+		MaxRemovalPercent:  100,
 		AllowNoCandidates:  true,
 		AllowNoOrgEvidence: true,
 	})
@@ -873,7 +1022,10 @@ func TestRunBlocksApplyWithNoOrgEvidenceWhenNoCandidatesVisibleAndExplicitNoEvid
 		APIPrefix:         "/api",
 		Insecure:          true,
 		Apply:             true,
+		PruneMissing:      true,
 		AllowRemovals:     true,
+		MaxRemovals:       1,
+		MaxRemovalPercent: 100,
 		AllowNoCandidates: true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "--allow-no-org-evidence") {
@@ -919,7 +1071,10 @@ func TestRunAllowsApplyWithNoOrgEvidenceWhenExplicitNoEvidenceFlagSet(t *testing
 		APIPrefix:          "/api",
 		Insecure:           true,
 		Apply:              true,
+		PruneMissing:       true,
 		AllowRemovals:      true,
+		MaxRemovals:        1,
+		MaxRemovalPercent:  100,
 		AllowNoCandidates:  true,
 		AllowNoOrgEvidence: true,
 	})
@@ -975,7 +1130,10 @@ func TestRunBlocksApplyWithNoOrgEvidenceInMultiSetup(t *testing.T) {
 		APIPrefix:          "/api",
 		Insecure:           true,
 		Apply:              true,
+		PruneMissing:       true,
 		AllowRemovals:      true,
+		MaxRemovals:        1,
+		MaxRemovalPercent:  100,
 		AllowNoCandidates:  true,
 		AllowNoOrgEvidence: false,
 	})
@@ -1031,7 +1189,10 @@ func TestRunAllowsApplyWithNoOrgEvidenceWhenExplicitNoEvidenceFlagSetForMultiSet
 		APIPrefix:          "/api",
 		Insecure:           true,
 		Apply:              true,
+		PruneMissing:       true,
 		AllowRemovals:      true,
+		MaxRemovals:        1,
+		MaxRemovalPercent:  100,
 		AllowNoCandidates:  true,
 		AllowNoOrgEvidence: true,
 	})
@@ -1079,16 +1240,19 @@ func TestRunBlocksRemovalsWhenNoCandidatesVisible(t *testing.T) {
 	defer server.Close()
 
 	_, err := Run(context.Background(), Config{
-		Host:          server.URL,
-		Username:      "alice",
-		Password:      "secret",
-		NetworkID:     "network-1",
-		QueryID:       "custom-query",
-		Output:        filepath.Join(t.TempDir(), "payload.json"),
-		APIPrefix:     "/api",
-		Insecure:      true,
-		Apply:         true,
-		AllowRemovals: true,
+		Host:              server.URL,
+		Username:          "alice",
+		Password:          "secret",
+		NetworkID:         "network-1",
+		QueryID:           "custom-query",
+		Output:            filepath.Join(t.TempDir(), "payload.json"),
+		APIPrefix:         "/api",
+		Insecure:          true,
+		Apply:             true,
+		PruneMissing:      true,
+		AllowRemovals:     true,
+		MaxRemovals:       1,
+		MaxRemovalPercent: 100,
 	})
 	if err == nil || !strings.Contains(err.Error(), "--allow-no-candidates") {
 		t.Fatalf("unexpected error: %v", err)
@@ -1136,6 +1300,44 @@ func TestRunUsesExplicitSnapshotIDForNQE(t *testing.T) {
 	}
 	if seenQuery != "networkId=network-1&snapshotId=snapshot-1" && seenQuery != "snapshotId=snapshot-1&networkId=network-1" {
 		t.Fatalf("unexpected NQE query string %q", seenQuery)
+	}
+}
+
+func TestRunPinsLatestProcessedSnapshotForCLI(t *testing.T) {
+	var seenQuery string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"snapshot-pinned","state":"PROCESSED","processedAt":"2026-07-24T12:00:00Z"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
+			seenQuery = r.URL.RawQuery
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111","Collected?":true}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"name":"setup-a","assumeRoleInfos":[{"accountId":"111","roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true}]}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	summary, err := Run(context.Background(), Config{
+		Host:        server.URL,
+		Username:    "alice",
+		Password:    "secret",
+		NetworkID:   "network-1",
+		Output:      filepath.Join(t.TempDir(), "payload.json"),
+		APIPrefix:   "/api",
+		Insecure:    true,
+		PinSnapshot: true,
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if summary.SnapshotID != "snapshot-pinned" || !strings.Contains(seenQuery, "snapshotId=snapshot-pinned") {
+		t.Fatalf("latest processed snapshot was not pinned: summary=%+v query=%q", summary, seenQuery)
 	}
 }
 
