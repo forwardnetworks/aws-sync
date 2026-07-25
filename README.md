@@ -180,7 +180,7 @@ Existing per-account External IDs are preserved during ordinary synchronization.
 - Human-readable output is the default; `--json` is for standard-command automation.
 - The latest processed snapshot is pinned before planning.
 - Malformed NQE account IDs fail by default; `--allow-malformed-rows` skips and reports them only for incomplete additive runs.
-- Every apply writes a complete pre-change rollback payload.
+- Every apply writes a pre-change rollback payload containing the complete `assumeRoleInfos` account list and the PATCHable setup fields (`type`, `name`, `regions`, `regionToProxyServerId`, and `proxyServerId`). It does not capture `collect`, `connectionTimeoutSeconds`, `requestTimeoutSeconds`, `numVirtualizedDevices`, or `useForwardAccountToAssumeRole`. Forward PATCH leaves absent top-level fields unchanged, so the artifact safely restores the fields `awssync` changes without overwriting those settings; it is not a full setup backup or a setup-creation payload.
 - Every apply writes a durable per-setup result journal.
 - The reviewed target payload and current Forward setup are revalidated before PATCH.
 - Forward exposes no atomic compare-and-swap token; unattended destructive applies require a separate explicit acknowledgement.

@@ -297,7 +297,7 @@ Use `external-id`, not NQE synchronization, for an isolated migration. It reads 
 
 Review the prior and target states and confirm every payload entry has the intended value. With no `--account-id`, `--value` and `--clear` affect every account; repeat `--account-id` for a test subset. Use `--external-id-file` for reviewed per-account set/clear assignments; duplicate, malformed, wrong-setup, and unknown rows fail before PATCH. The [quick start](quick-start.md#add-an-external-id-to-an-existing-iam-user-setup) contains the CSV format.
 
-Apply the same reviewed inputs. The guarded gateway writes the complete pre-change setup to `<output>.rollback.json` and maintains `<output>.result.json`:
+Apply the same reviewed inputs. The guarded gateway writes the pre-change account list and PATCHable setup fields to `<output>.rollback.json` and maintains `<output>.result.json`:
 
 ```bash
 ./bin/awssync external-id \
@@ -406,7 +406,9 @@ To apply an exact reviewed **non-destructive** payload file later without recomp
 
 Do not use `apply-plan` as a substitute for the authoritative-manifest removal workflow. Run lifecycle removals through `sync-accounts` with the reviewed manifest and current removal ceilings. `apply-plan` remains useful for reviewed additive payloads and rollback recovery; it re-reads current state and routes through the same gateway.
 
-Before the first PATCH, both normal apply and `apply-plan` write the complete current setup state beside the plan as `<plan>.rollback.json`. The apply summary includes its path and SHA-256. Use the result journal and recovery procedure below before applying that rollback.
+Before the first PATCH, both normal apply and `apply-plan` write a pre-change PATCH payload beside the plan as `<plan>.rollback.json`. It contains the complete `assumeRoleInfos` account list plus `type`, `name`, `regions`, `regionToProxyServerId`, and `proxyServerId`. It does not capture the GET-returned fields `collect`, `connectionTimeoutSeconds`, `requestTimeoutSeconds`, `numVirtualizedDevices`, or `useForwardAccountToAssumeRole`.
+
+This omission is safe for restoring an `awssync` change because Forward PATCH is a top-level merge: fields absent from the request body are left unchanged. The rollback restores the fields that `awssync` PATCHes without replacing those five settings. It is not a full backup of the setup and must not be used to reconstruct one from scratch. The apply summary includes its path and SHA-256. Use the result journal and recovery procedure below before applying the rollback.
 
 ### Apply Recovery
 
@@ -418,7 +420,7 @@ jq '{plan_digest, network_id, setups}' aws_sync_payload.result.json
 
 The per-setup status is `planned`, `pending`, `applied`, `conflicted`, or `failed`. `applied` means the PATCH completed and was journaled. `conflicted` means the immediate pre-PATCH re-read detected a changed setup and no PATCH was sent for that setup. `pending` after a crash is ambiguous: read the actual Forward setup before deciding whether to retry or roll back. In a multi-setup run, treat each setup independently and do not assume all-or-nothing behavior.
 
-The pre-change payload is `<output>.rollback.json`; its path and SHA-256 are also printed in the apply summary. After checking the journal and current Forward state, restore it with:
+The pre-change PATCH payload is `<output>.rollback.json`; its path and SHA-256 are also printed in the apply summary. After checking the journal and current Forward state, restore it with:
 
 ```bash
 ./bin/awssync apply-plan \
@@ -437,6 +439,8 @@ If that rollback removes or disables accounts that were added by the original ap
   --max-removal-percent APPROVED_PERCENT \
   --allow-unattended-destructive
 ```
+
+Account ordering matters only to byte-level comparisons. `sync-accounts` rebuilds the reviewed account set in sorted order, so using it to restore the same accounts can produce a different raw endpoint hash even though the configuration is semantically identical. In live validation, applying the emitted rollback preserved the original account order and reproduced the pre-change endpoint hash byte-for-byte. Use the rollback path when byte-identical restoration matters.
 
 Do not blindly rerun an ambiguous apply: a PATCH may have succeeded before its result could be persisted. Keep the payload, rollback, and result files together until a new Forward snapshot confirms recovery.
 

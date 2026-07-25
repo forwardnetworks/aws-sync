@@ -7,9 +7,11 @@ Read this before replacing the binary. Three existing automation patterns now fa
 ## Before the Upgrade
 
 1. Disable scheduled jobs that pass `--prune-missing`.
-2. Record the configured account IDs in every Forward AWS setup from Forward, a recent payload, or a rollback artifact. This is the baseline for review; do not reconstruct it from NQE.
+2. Record the configured account IDs in every Forward AWS setup from Forward, a recent payload, or a rollback artifact. A rollback is sufficient here for the account list, but it is not a full setup backup. This is the baseline for review; do not reconstruct it from NQE.
 3. Back up the current webhook service definition and, if it exists, its webhook state file.
 4. Identify every automation path that can remove or disable accounts, including `sync-accounts --yes` and destructive `apply-plan` runs.
+
+A rollback artifact contains the complete `assumeRoleInfos` account list and the PATCHable setup fields. It does not capture `collect`, `connectionTimeoutSeconds`, `requestTimeoutSeconds`, `numVirtualizedDevices`, or `useForwardAccountToAssumeRole`. Applying it is safe for restoration because Forward PATCH leaves absent top-level fields unchanged, but keep a separate full setup record if those settings must be backed up or the setup may need to be reconstructed.
 
 ## 1. Replace `--prune-missing` With a Reviewed Manifest
 

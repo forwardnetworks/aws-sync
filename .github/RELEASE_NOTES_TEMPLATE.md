@@ -83,7 +83,7 @@ runs on setups that people also edit by hand.
 - A one-page routine operator handoff is available at `docs/routine-safe-sync.md`.
 - NQE reconciliation is additive by default: configured accounts missing from the current NQE result remain in the setup, while discovered disabled accounts are re-enabled.
 - NQE-based deletion is retired; `--prune-missing` returns an actionable refusal and reviewed manifest removal remains available through `sync-accounts`.
-- Every apply writes a complete pre-change `.rollback.json` payload and verifies that the selected setup state has not changed before the first PATCH.
+- Every apply writes a pre-change `.rollback.json` PATCH payload containing the account list and PATCHable setup fields, not a full setup backup, and verifies that the selected setup state has not changed before the first PATCH.
 - CLI runs pin the latest processed snapshot so planning and apply use one immutable NQE inventory.
 - Invalid NQE account-ID placeholders are ignored and reported instead of becoming AWS accounts.
 - Human-readable output is now the default; use `--json` or `--format json` for automation.

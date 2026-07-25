@@ -21,7 +21,7 @@ flowchart LR
     preview["Show add / re-enable / remove\nremoval must equal zero"]
     confirm{"Operator types apply?"}
     verify["Recompute and verify\nreviewed payload SHA-256"]
-    rollback["Write complete rollback payload"]
+    rollback["Write rollback PATCH payload"]
     patch["PATCH selected Forward setups"]
     stop["STOP\nno Forward change"]
 
@@ -109,7 +109,7 @@ flowchart TB
         external_ids["Per-account External ID merge\npreserve existing values\nexplicit CSV for ambiguous additions"]
         disk["payload.json\nwritten to disk before any change"]
         gateway["Guarded apply gateway\napproval digest + current-state re-read"]
-        rollback["rollback.json\ncomplete pre-change setup"]
+        rollback["rollback.json\naccount list + PATCHable fields"]
         journal["result.json\nper-setup durable disposition"]
         apply["--apply\nPATCH /cloudAccounts/{setupId}"]
         apply_plan["apply-plan\nreload current state + validate\nGovCloud removals refused"]
@@ -474,7 +474,7 @@ flowchart LR
 - Both nonzero `--max-removals` and `--max-removal-percent` ceilings are mandatory for any removal and are rechecked immediately before apply.
 - Existing disabled or failed `Collected? false` rows are not treated as AWS Organizations discovery candidates.
 - CLI NQE plans pin one processed snapshot. Snapshot timestamps more than five minutes ahead of the local clock are rejected.
-- Every apply uses the same guarded gateway, writes a full pre-change rollback payload before the first PATCH, and atomically updates a per-setup result journal.
+- Every apply uses the same guarded gateway, writes a pre-change rollback PATCH payload containing the complete account list and PATCHable setup fields before the first PATCH, and atomically updates a per-setup result journal. The artifact omits `collect`, `connectionTimeoutSeconds`, `requestTimeoutSeconds`, `numVirtualizedDevices`, and `useForwardAccountToAssumeRole`; Forward PATCH leaves those absent fields unchanged, so rollback restoration is safe, but the artifact is not a full setup backup.
 - Approval digests are stable across independent invocations for the same approval-relevant inputs. The immediate current-state re-read is a weak conflict detector, not atomic compare-and-swap.
 - GovCloud NQE sync is additive. GovCloud lifecycle removals require an authoritative complete manifest plus `--allow-removals`; generic NQE evidence flags cannot substitute for that source.
 - `apply-plan` reloads current state and refuses GovCloud removals, so a saved payload cannot bypass the source workflow's safety checks.
