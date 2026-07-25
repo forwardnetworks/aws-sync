@@ -14,28 +14,32 @@ import (
 )
 
 type ApplyPlanConfig struct {
-	Host              string
-	Username          string
-	Password          string
-	NetworkID         string
-	PlanPath          string
-	APIPrefix         string
-	Insecure          bool
-	Timeout           time.Duration
-	AllowRemovals     bool
-	MaxRemovals       int
-	MaxRemovalPercent float64
+	Host                       string
+	Username                   string
+	Password                   string
+	NetworkID                  string
+	PlanPath                   string
+	APIPrefix                  string
+	Insecure                   bool
+	Timeout                    time.Duration
+	AllowRemovals              bool
+	MaxRemovals                int
+	MaxRemovalPercent          float64
+	AllowUnattendedDestructive bool
+	AuthorizationActor         string
 }
 
 type ApplyPlanSummary struct {
-	Host              string   `json:"host"`
-	NetworkID         string   `json:"network_id"`
-	PlanPath          string   `json:"plan_path"`
-	PayloadSHA256     string   `json:"payload_sha256"`
-	RollbackOutput    string   `json:"rollback_output"`
-	RollbackSHA256    string   `json:"rollback_sha256"`
-	PatchedSetupCount int      `json:"patched_setup_count"`
-	PatchedSetups     []string `json:"patched_setups"`
+	Host                string   `json:"host"`
+	NetworkID           string   `json:"network_id"`
+	PlanPath            string   `json:"plan_path"`
+	PayloadSHA256       string   `json:"payload_sha256"`
+	PlanDigest          string   `json:"plan_digest"`
+	RollbackOutput      string   `json:"rollback_output,omitempty"`
+	RollbackSHA256      string   `json:"rollback_sha256,omitempty"`
+	ResultJournalOutput string   `json:"result_journal_output"`
+	PatchedSetupCount   int      `json:"patched_setup_count"`
+	PatchedSetups       []string `json:"patched_setups"`
 }
 
 func ApplyPlan(ctx context.Context, cfg ApplyPlanConfig) (*ApplyPlanSummary, error) {
@@ -77,6 +81,7 @@ func ApplyPlan(ctx context.Context, cfg ApplyPlanConfig) (*ApplyPlanSummary, err
 	if len(setupIDs) == 0 {
 		return nil, fmt.Errorf("plan contains no setup payloads")
 	}
+	sort.Strings(setupIDs)
 	cloudAccounts, err := client.CloudAccounts(ctx, cfg.NetworkID)
 	if err != nil {
 		return nil, fmt.Errorf("load current cloud setups before apply: %w", err)
@@ -85,7 +90,9 @@ func ApplyPlan(ctx context.Context, cfg ApplyPlanConfig) (*ApplyPlanSummary, err
 	for _, account := range cloudAccounts {
 		currentByName[strings.TrimSpace(account.Name)] = account
 	}
-	removalStats := make([]removalStat, 0, len(setupIDs))
+	targets := make(auditPayloads, len(setupIDs))
+	changeSets := make(map[string]ChangeSet, len(setupIDs))
+	selectedSetupIDs := make([]SetupID, 0, len(setupIDs))
 	for _, setupID := range setupIDs {
 		current, ok := currentByName[setupID]
 		if !ok {
@@ -105,55 +112,115 @@ func ApplyPlan(ctx context.Context, cfg ApplyPlanConfig) (*ApplyPlanSummary, err
 		if err := validateCloudAccountPartition(planned); err != nil {
 			return nil, fmt.Errorf("plan setup %s: %w", setupID, err)
 		}
-		currentRows := currentAccounts(current.AssumeRoleInfos)
-		_, removed, _ := accountDiff(currentRows, currentAccounts(payload.AssumeRoleInfos))
-		removalStats = append(removalStats, removalStat{
-			SetupID:         setupID,
-			ConfiguredCount: len(currentRows),
-			RemovedCount:    len(removed),
-		})
-		if len(removed) == 0 {
-			continue
+		typedSetupID, err := NewSetupID(setupID)
+		if err != nil {
+			return nil, fmt.Errorf("plan contains invalid setup id %q: %w", setupID, err)
 		}
-		if extractRolePartition(current.AssumeRoleInfos) == "aws-us-gov" {
-			return nil, fmt.Errorf("apply-plan cannot remove GovCloud accounts; rerun preflight/NQE with positive Organizations evidence or use sync-accounts with the authoritative manifest")
+		changes, err := classifyPatchPayload(current, typedSetupID, payload)
+		if err != nil {
+			return nil, fmt.Errorf("classify plan setup %s: %w", setupID, err)
 		}
-		if !cfg.AllowRemovals {
-			return nil, fmt.Errorf("plan removes %d account(s) from setup %s; apply-plan requires --allow-removals", len(removed), setupID)
-		}
+		targets[setupID] = clonePatchPayload(payload)
+		changeSets[setupID] = changes
+		selectedSetupIDs = append(selectedSetupIDs, typedSetupID)
 	}
-	if err := requireRemovalBounds(removalStats, cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
-		return nil, err
+
+	policy := ReconcilePolicy{
+		Kind:                 ExplicitOperations,
+		PlanningInstant:      time.Now().UTC(),
+		OrganizationEvidence: AllowMissingOrganizationEvidence,
 	}
-	if err := validateRemovalStats(removalStats, cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
-		return nil, err
-	}
-	sort.Strings(setupIDs)
-	rollbackPayloads, err := buildRollbackPayloads(cloudAccounts, setupIDs)
+	intent, err := newPayloadApplyIntent(
+		cfg.NetworkID,
+		planPath,
+		InventorySnapshot{
+			Source:           "reviewed apply-plan payload",
+			SelectedSetupIDs: selectedSetupIDs,
+			Completeness:     InventoryCompletenessUnknown,
+		},
+		policy,
+		cloudAccounts,
+		targets,
+		changeSets,
+	)
 	if err != nil {
 		return nil, err
 	}
-	rollbackOutput := rollbackPath(planPath)
-	rollbackSHA256, err := writeAuditPayloads(rollbackOutput, rollbackPayloads)
-	if err != nil {
-		return nil, fmt.Errorf("write pre-apply rollback payload: %w", err)
+	actor := strings.TrimSpace(cfg.AuthorizationActor)
+	if actor == "" {
+		actor = "apply-plan caller"
 	}
-	if err := verifyCloudAccountsUnchanged(ctx, client, cfg.NetworkID, setupIDs, rollbackPayloads); err != nil {
-		return nil, err
-	}
-	for _, setupID := range setupIDs {
-		if err := client.PatchCloudAccount(ctx, cfg.NetworkID, setupID, payloads[setupID]); err != nil {
-			return nil, fmt.Errorf("patch setup %s: %w", setupID, err)
+	applyResult, applyErr := GuardAndApply(ctx, client, intent, ApplyAuthorization{
+		PlanDigest:        intent.Digest(),
+		Actor:             actor,
+		Approved:          true,
+		AllowDestructive:  cfg.AllowRemovals,
+		MaxRemovals:       cfg.MaxRemovals,
+		MaxRemovalPercent: cfg.MaxRemovalPercent,
+		// Legacy payload files contain no NQE candidate counts. Preserve that
+		// documented file-format limitation while the gateway still applies
+		// removal/disable budgets and its no-evidence GovCloud block.
+		AllowNoCandidates:          true,
+		Unattended:                 true,
+		AllowUnattendedDestructive: cfg.AllowUnattendedDestructive,
+	})
+	patchedSetups := make([]string, 0, applyResult.PatchedCount)
+	for _, entry := range applyResult.Journal.Setups {
+		if entry.Status == ApplyStatusApplied {
+			patchedSetups = append(patchedSetups, entry.SetupID)
 		}
 	}
-	return &ApplyPlanSummary{
-		Host:              cfg.Host,
-		NetworkID:         cfg.NetworkID,
-		PlanPath:          planPath,
-		PayloadSHA256:     fmt.Sprintf("%x", sha256.Sum256(data)),
-		RollbackOutput:    rollbackOutput,
-		RollbackSHA256:    rollbackSHA256,
-		PatchedSetupCount: len(setupIDs),
-		PatchedSetups:     setupIDs,
-	}, nil
+	summary := &ApplyPlanSummary{
+		Host:                cfg.Host,
+		NetworkID:           cfg.NetworkID,
+		PlanPath:            planPath,
+		PayloadSHA256:       fmt.Sprintf("%x", sha256.Sum256(data)),
+		PlanDigest:          intent.Digest(),
+		RollbackOutput:      applyResult.RollbackOutput,
+		RollbackSHA256:      applyResult.RollbackSHA256,
+		ResultJournalOutput: applyResult.JournalOutput,
+		PatchedSetupCount:   applyResult.PatchedCount,
+		PatchedSetups:       patchedSetups,
+	}
+	if applyErr != nil {
+		if applyResult.JournalOutput != "" {
+			return summary, fmt.Errorf("%w; apply result journal: %s", applyErr, applyResult.JournalOutput)
+		}
+		return summary, applyErr
+	}
+	return summary, nil
+}
+
+func classifyPatchPayload(current api.CloudAccount, setupID SetupID, target api.PatchPayload) (ChangeSet, error) {
+	currentSetup, err := adaptCurrentSetup(cloudSetupMetadata{
+		setupID:             setupID,
+		cloudType:           current.Type,
+		proxyServerID:       current.ProxyServerID,
+		regionToProxyServer: current.RegionToProxyServerID,
+		regions:             current.Regions,
+		assumeRoleInfos:     current.AssumeRoleInfos,
+	})
+	if err != nil {
+		return ChangeSet{}, err
+	}
+	targetRegions := make(map[string]api.RegionMeta, len(target.Regions))
+	for region, instant := range target.Regions {
+		targetRegions[region] = api.RegionMeta{TestInstant: instant}
+	}
+	targetSetup, err := adaptCurrentSetup(cloudSetupMetadata{
+		setupID:             setupID,
+		cloudType:           target.Type,
+		proxyServerID:       target.ProxyServerID,
+		regionToProxyServer: target.RegionToProxyServerID,
+		regions:             targetRegions,
+		assumeRoleInfos:     target.AssumeRoleInfos,
+	})
+	if err != nil {
+		return ChangeSet{}, err
+	}
+	return diffSetup(currentSetup, DesiredSetup{
+		SetupID:  targetSetup.SetupID,
+		Metadata: targetSetup.Metadata,
+		Accounts: targetSetup.Accounts,
+	}), nil
 }

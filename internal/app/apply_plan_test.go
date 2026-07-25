@@ -35,7 +35,9 @@ func TestApplyPlanPatchesReviewedPayload(t *testing.T) {
 	planPath := filepath.Join(t.TempDir(), "payload.json")
 	if err := os.WriteFile(
 		planPath,
-		[]byte(`{"setup-a":{"type":"AWS","name":"setup-a","regionToProxyServerId":{},"assumeRoleInfos":[]}}`),
+		[]byte(`{"setup-a":{"type":"AWS","name":"setup-a","regionToProxyServerId":{},"assumeRoleInfos":[
+			{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true}
+		]}}`),
 		0o644,
 	); err != nil {
 		t.Fatalf("write plan: %v", err)
@@ -69,6 +71,130 @@ func TestApplyPlanPatchesReviewedPayload(t *testing.T) {
 	}
 }
 
+func TestApplyPlanSuppressesZeroDiffPatch(t *testing.T) {
+	patchCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+			_, _ = w.Write([]byte(`[{"type":"AWS","name":"setup-a","assumeRoleInfos":[
+				{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true}
+			]}]`))
+		case r.Method == http.MethodPatch:
+			patchCount++
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	planPath := filepath.Join(t.TempDir(), "same.json")
+	if err := os.WriteFile(planPath, []byte(`{"setup-a":{"type":"AWS","name":"setup-a","regionToProxyServerId":{},"assumeRoleInfos":[
+		{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true}
+	]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := ApplyPlan(context.Background(), ApplyPlanConfig{
+		Host:      server.URL,
+		Username:  "user",
+		Password:  "pass",
+		NetworkID: "network-1",
+		PlanPath:  planPath,
+		APIPrefix: "/api",
+	})
+	if err != nil {
+		t.Fatalf("ApplyPlan() error = %v", err)
+	}
+	if patchCount != 0 || summary.PatchedSetupCount != 0 {
+		t.Fatalf("zero-diff apply = (patches=%d, summary=%+v), want no PATCH", patchCount, summary)
+	}
+	if summary.ResultJournalOutput == "" {
+		t.Fatalf("zero-diff apply did not persist a result journal: %+v", summary)
+	}
+	if summary.RollbackOutput != "" {
+		t.Fatalf("zero-diff apply unexpectedly wrote rollback output: %+v", summary)
+	}
+}
+
+func TestApplyPlanDisableRequiresGatewayDestructiveAuthorization(t *testing.T) {
+	tests := []struct {
+		name              string
+		allowRemovals     bool
+		maxRemovals       int
+		maxRemovalPercent float64
+		allowUnattended   bool
+		wantError         string
+	}{
+		{name: "no destructive authorization", wantError: "--allow-removals"},
+		{name: "authorization without bounds", allowRemovals: true, wantError: "require both"},
+		{
+			name:              "unattended authorization required",
+			allowRemovals:     true,
+			maxRemovals:       2,
+			maxRemovalPercent: 100,
+			wantError:         "--allow-unattended-destructive",
+		},
+		{
+			name:              "fully authorized",
+			allowRemovals:     true,
+			maxRemovals:       2,
+			maxRemovalPercent: 100,
+			allowUnattended:   true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			patchCount := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+					_, _ = w.Write([]byte(`[{"type":"AWS","name":"prod","assumeRoleInfos":[
+						{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true},
+						{"accountId":"222222222222","roleArn":"arn:aws:iam::222222222222:role/ForwardRole","enabled":true}
+					]}]`))
+				case r.Method == http.MethodPatch:
+					patchCount++
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			planPath := filepath.Join(t.TempDir(), "disable.json")
+			if err := os.WriteFile(planPath, []byte(`{"prod":{"type":"AWS","name":"prod","assumeRoleInfos":[
+				{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":false},
+				{"accountId":"222222222222","roleArn":"arn:aws:iam::222222222222:role/ForwardRole","enabled":false}
+			]}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := ApplyPlan(context.Background(), ApplyPlanConfig{
+				Host:                       server.URL,
+				Username:                   "user",
+				Password:                   "pass",
+				NetworkID:                  "network-1",
+				PlanPath:                   planPath,
+				APIPrefix:                  "/api",
+				AllowRemovals:              test.allowRemovals,
+				MaxRemovals:                test.maxRemovals,
+				MaxRemovalPercent:          test.maxRemovalPercent,
+				AllowUnattendedDestructive: test.allowUnattended,
+			})
+			if test.wantError == "" {
+				if err != nil || patchCount != 1 {
+					t.Fatalf("fully authorized disable = (patches=%d, err=%v), want one PATCH", patchCount, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("ApplyPlan() error = %v, want %q", err, test.wantError)
+			}
+			if patchCount != 0 {
+				t.Fatalf("unauthorized disable PATCH count = %d, want 0", patchCount)
+			}
+		})
+	}
+}
+
 func TestApplyPlanCannotBypassGovCloudRemovalSafety(t *testing.T) {
 	patched := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -93,15 +219,18 @@ func TestApplyPlanCannotBypassGovCloudRemovalSafety(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := ApplyPlan(context.Background(), ApplyPlanConfig{
-		Host:          server.URL,
-		Username:      "user",
-		Password:      "pass",
-		NetworkID:     "network-1",
-		PlanPath:      planPath,
-		APIPrefix:     "/api",
-		AllowRemovals: true,
+		Host:                       server.URL,
+		Username:                   "user",
+		Password:                   "pass",
+		NetworkID:                  "network-1",
+		PlanPath:                   planPath,
+		APIPrefix:                  "/api",
+		AllowRemovals:              true,
+		MaxRemovals:                1,
+		MaxRemovalPercent:          100,
+		AllowUnattendedDestructive: true,
 	})
-	if err == nil || !strings.Contains(err.Error(), "cannot remove GovCloud accounts") {
+	if err == nil || !strings.Contains(err.Error(), "GovCloud account removals require positive AWS Organizations evidence") {
 		t.Fatalf("expected GovCloud apply-plan block, got %v", err)
 	}
 	if patched {
@@ -115,8 +244,8 @@ func TestApplyPlanBlocksRemovalPercentageAboveLimit(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			_, _ = w.Write([]byte(`[{"type":"AWS","name":"prod","assumeRoleInfos":[
-              {"accountId":"111","roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true},
-              {"accountId":"222","roleArn":"arn:aws:iam::222:role/ForwardRole","enabled":true}
+              {"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true},
+              {"accountId":"222222222222","roleArn":"arn:aws:iam::222222222222:role/ForwardRole","enabled":true}
             ]}]`))
 		case r.Method == http.MethodPatch:
 			patched = true
@@ -128,7 +257,7 @@ func TestApplyPlanBlocksRemovalPercentageAboveLimit(t *testing.T) {
 
 	planPath := filepath.Join(t.TempDir(), "payload.json")
 	if err := os.WriteFile(planPath, []byte(`{"prod":{"type":"AWS","name":"prod","assumeRoleInfos":[
-      {"accountId":"111","roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true}
+      {"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true}
     ]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -168,8 +297,8 @@ func TestApplyPlanRequiresBothRemovalBounds(t *testing.T) {
 				switch {
 				case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 					_, _ = w.Write([]byte(`[{"type":"AWS","name":"prod","assumeRoleInfos":[
-						{"accountId":"111","roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true},
-						{"accountId":"222","roleArn":"arn:aws:iam::222:role/ForwardRole","enabled":true}
+						{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true},
+						{"accountId":"222222222222","roleArn":"arn:aws:iam::222222222222:role/ForwardRole","enabled":true}
 					]}]`))
 				case r.Method == http.MethodPatch:
 					patched = true
@@ -181,7 +310,7 @@ func TestApplyPlanRequiresBothRemovalBounds(t *testing.T) {
 
 			planPath := filepath.Join(t.TempDir(), "payload.json")
 			if err := os.WriteFile(planPath, []byte(`{"prod":{"type":"AWS","name":"prod","assumeRoleInfos":[
-				{"accountId":"111","roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true}
+				{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true}
 			]}}`), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -218,7 +347,7 @@ func TestApplyPlanBlocksConcurrentSetupChange(t *testing.T) {
 				enabled = "false"
 			}
 			_, _ = w.Write([]byte(`[{"type":"AWS","name":"prod","assumeRoleInfos":[
-				{"accountId":"111","roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":` + enabled + `}
+				{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":` + enabled + `}
 			]}]`))
 		case r.Method == http.MethodPatch:
 			patched = true
@@ -230,7 +359,8 @@ func TestApplyPlanBlocksConcurrentSetupChange(t *testing.T) {
 
 	planPath := filepath.Join(t.TempDir(), "payload.json")
 	if err := os.WriteFile(planPath, []byte(`{"prod":{"type":"AWS","name":"prod","assumeRoleInfos":[
-		{"accountId":"111","roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true}
+		{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true},
+		{"accountId":"222222222222","roleArn":"arn:aws:iam::222222222222:role/ForwardRole","enabled":true}
 	]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}

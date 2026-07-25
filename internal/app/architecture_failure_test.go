@@ -85,7 +85,7 @@ func TestP0FinalGetPatchRaceRejectsConcurrentEdit(t *testing.T) {
 	})
 
 	t.Run("external ID", func(t *testing.T) {
-		fake := newP0RaceForwardServer(t, 1, nil)
+		fake := newP0RaceForwardServer(t, 2, nil)
 		defer fake.server.Close()
 
 		_, err := ChangeExternalID(context.Background(), ExternalIDConfig{
@@ -341,6 +341,7 @@ func TestP0ApplyPlanDisableRequiresDestructiveAuthorization(t *testing.T) {
 		allowRemovals     bool
 		maxRemovals       int
 		maxRemovalPercent float64
+		allowUnattended   bool
 		wantError         string
 	}{
 		{
@@ -357,6 +358,7 @@ func TestP0ApplyPlanDisableRequiresDestructiveAuthorization(t *testing.T) {
 			allowRemovals:     true,
 			maxRemovals:       2,
 			maxRemovalPercent: 100,
+			allowUnattended:   true,
 		},
 	}
 	for _, test := range tests {
@@ -395,15 +397,16 @@ func TestP0ApplyPlanDisableRequiresDestructiveAuthorization(t *testing.T) {
 				},
 			})
 			_, err := ApplyPlan(context.Background(), ApplyPlanConfig{
-				Host:              server.URL,
-				Username:          "alice",
-				Password:          "secret",
-				NetworkID:         "network-1",
-				PlanPath:          planPath,
-				APIPrefix:         "/api",
-				AllowRemovals:     test.allowRemovals,
-				MaxRemovals:       test.maxRemovals,
-				MaxRemovalPercent: test.maxRemovalPercent,
+				Host:                       server.URL,
+				Username:                   "alice",
+				Password:                   "secret",
+				NetworkID:                  "network-1",
+				PlanPath:                   planPath,
+				APIPrefix:                  "/api",
+				AllowRemovals:              test.allowRemovals,
+				MaxRemovals:                test.maxRemovals,
+				MaxRemovalPercent:          test.maxRemovalPercent,
+				AllowUnattendedDestructive: test.allowUnattended,
 			})
 			if test.wantError == "" {
 				if err != nil {

@@ -315,9 +315,6 @@ func newExternalIDCommand(v *viper.Viper) *cobra.Command {
 			externalIDFile, _ := cmd.Flags().GetString("external-id-file")
 			apply, _ := cmd.Flags().GetBool("apply")
 			yes, _ := cmd.Flags().GetBool("yes")
-			if err := confirmApply(apply, yes, os.Stdin, os.Stderr); err != nil {
-				return err
-			}
 			output, _ := cmd.Flags().GetString("output")
 			summary, err := app.ChangeExternalID(cmd.Context(), app.ExternalIDConfig{
 				Host:           v.GetString("host"),
@@ -334,6 +331,17 @@ func newExternalIDCommand(v *viper.Viper) *cobra.Command {
 				Insecure:       v.GetBool("insecure"),
 				Timeout:        v.GetDuration("timeout"),
 				Apply:          apply,
+				Unattended:     yes,
+				AuthorizationActor: func() string {
+					if yes {
+						return "CLI external-id --yes"
+					}
+					return "CLI external-id interactive confirmation"
+				}(),
+				ConfirmApply: func(planDigest string) error {
+					fmt.Fprintf(os.Stderr, "External ID apply intent SHA-256: %s\n", planDigest)
+					return confirmApply(true, yes, os.Stdin, os.Stderr)
+				},
 			})
 			if err != nil {
 				return err
@@ -554,17 +562,19 @@ func newApplyPlanCommand(v *viper.Viper) *cobra.Command {
 				return err
 			}
 			summary, err := app.ApplyPlan(cmd.Context(), app.ApplyPlanConfig{
-				Host:              v.GetString("host"),
-				Username:          v.GetString("username"),
-				Password:          password,
-				NetworkID:         networkID,
-				PlanPath:          flagString(cmd, v, "plan"),
-				APIPrefix:         v.GetString("api-prefix"),
-				Insecure:          v.GetBool("insecure"),
-				Timeout:           v.GetDuration("timeout"),
-				AllowRemovals:     flagBool(cmd, v, "allow-removals"),
-				MaxRemovals:       flagInt(cmd, v, "max-removals"),
-				MaxRemovalPercent: flagFloat64(cmd, v, "max-removal-percent"),
+				Host:                       v.GetString("host"),
+				Username:                   v.GetString("username"),
+				Password:                   password,
+				NetworkID:                  networkID,
+				PlanPath:                   flagString(cmd, v, "plan"),
+				APIPrefix:                  v.GetString("api-prefix"),
+				Insecure:                   v.GetBool("insecure"),
+				Timeout:                    v.GetDuration("timeout"),
+				AllowRemovals:              flagBool(cmd, v, "allow-removals"),
+				MaxRemovals:                flagInt(cmd, v, "max-removals"),
+				MaxRemovalPercent:          flagFloat64(cmd, v, "max-removal-percent"),
+				AllowUnattendedDestructive: flagBool(cmd, v, "allow-unattended-destructive"),
+				AuthorizationActor:         "CLI apply-plan --yes",
 			})
 			if err != nil {
 				return err
@@ -575,14 +585,16 @@ func newApplyPlanCommand(v *viper.Viper) *cobra.Command {
 	bindNetworkFlag(v, cmd.Flags())
 	cmd.Flags().String("plan", "aws_sync_payload.json", "reviewed payload file to apply")
 	cmd.Flags().Bool("yes", false, "confirm applying the reviewed payload file")
-	cmd.Flags().Bool("allow-removals", false, "allow reviewed commercial-partition account removals; GovCloud removals must use their source workflow")
-	cmd.Flags().Int("max-removals", 0, "required nonzero aggregate account-removal ceiling when removals are planned")
-	cmd.Flags().Float64("max-removal-percent", 0, "required nonzero per-setup removal-percentage ceiling when removals are planned")
+	cmd.Flags().Bool("allow-removals", false, "allow reviewed commercial-partition account removals or disables; GovCloud destructive changes must use their source workflow")
+	cmd.Flags().Int("max-removals", 0, "required nonzero aggregate removal-or-disable ceiling when destructive changes are planned")
+	cmd.Flags().Float64("max-removal-percent", 0, "required nonzero per-setup removal-or-disable percentage ceiling when destructive changes are planned")
+	cmd.Flags().Bool("allow-unattended-destructive", false, "allow apply-plan --yes to remove or disable accounts despite the lack of atomic compare-and-swap")
 	mustBind(v, cmd.Flags(), "plan")
 	mustBind(v, cmd.Flags(), "yes")
 	mustBind(v, cmd.Flags(), "allow-removals")
 	mustBind(v, cmd.Flags(), "max-removals")
 	mustBind(v, cmd.Flags(), "max-removal-percent")
+	mustBind(v, cmd.Flags(), "allow-unattended-destructive")
 	return cmd
 }
 

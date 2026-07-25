@@ -52,12 +52,17 @@ func TestChangeExternalIDSetsAndClearsWithoutNQE(t *testing.T) {
 			if err := json.Unmarshal(data, &fields); err != nil {
 				t.Fatalf("decode patch fields: %v", err)
 			}
-			if len(fields) != 2 || fields["type"] == nil || fields["assumeRoleInfos"] == nil {
-				t.Fatalf("external ID PATCH changed unrelated fields: %s", string(data))
+			for _, field := range []string{"type", "name", "regions", "regionToProxyServerId", "assumeRoleInfos"} {
+				if fields[field] == nil {
+					t.Fatalf("gateway External ID PATCH omitted preserved field %s: %s", field, string(data))
+				}
 			}
 			var payload api.PatchPayload
 			if err := json.Unmarshal(data, &payload); err != nil {
 				t.Fatalf("decode patch: %v", err)
+			}
+			if payload.Name != stored.Name || payload.Regions["us-east-1"] != 123 {
+				t.Fatalf("gateway External ID PATCH changed preserved setup metadata: %#v", payload)
 			}
 			stored.AssumeRoleInfos = payload.AssumeRoleInfos
 			patchCount++
@@ -90,6 +95,9 @@ func TestChangeExternalIDSetsAndClearsWithoutNQE(t *testing.T) {
 	if !setSummary.Patched || setSummary.PreviousExternalIDConfigured || !setSummary.TargetExternalIDConfigured {
 		t.Fatalf("unexpected set summary: %#v", setSummary)
 	}
+	if setSummary.PlanDigest == "" || setSummary.RollbackOutput == "" || setSummary.RollbackSHA256 == "" || setSummary.ResultJournalOutput == "" {
+		t.Fatalf("expected gateway digest and recovery artifacts: %#v", setSummary)
+	}
 	if patchCount != 1 || stored.AssumeRoleInfos[0].ExternalID != "customer-value" || stored.AssumeRoleInfos[1].ExternalID != "customer-value" {
 		t.Fatalf("expected set PATCH: count=%d stored=%#v", patchCount, stored.AssumeRoleInfos)
 	}
@@ -109,6 +117,69 @@ func TestChangeExternalIDSetsAndClearsWithoutNQE(t *testing.T) {
 	}
 	if patchCount != 2 || stored.AssumeRoleInfos[0].ExternalID != "" || stored.AssumeRoleInfos[1].ExternalID != "" {
 		t.Fatalf("expected clear PATCH: count=%d stored=%#v", patchCount, stored.AssumeRoleInfos)
+	}
+}
+
+func TestChangeExternalIDConfirmsComputedDigestBeforeGatewayApply(t *testing.T) {
+	getCount := 0
+	patchCount := 0
+	stored := api.CloudAccount{
+		Type: "AWS",
+		Name: "setup-a",
+		AssumeRoleInfos: []api.AssumeRoleInfo{{
+			AccountID: "111111111111",
+			RoleArn:   "arn:aws:iam::111111111111:role/ForwardRole",
+			Enabled:   true,
+		}},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			getCount++
+			_ = json.NewEncoder(w).Encode([]api.CloudAccount{stored})
+		case http.MethodPatch:
+			patchCount++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	output := filepath.Join(t.TempDir(), "external-id.json")
+	confirmationCount := 0
+	summary, err := ChangeExternalID(context.Background(), ExternalIDConfig{
+		Host:       server.URL,
+		Username:   "alice",
+		Password:   "secret",
+		NetworkID:  "network-1",
+		SetupID:    "setup-a",
+		ExternalID: "rotated",
+		Output:     output,
+		APIPrefix:  "/api",
+		Apply:      true,
+		ConfirmApply: func(planDigest string) error {
+			confirmationCount++
+			if planDigest == "" {
+				t.Fatal("confirmation received an empty plan digest")
+			}
+			if _, err := os.Stat(output); err != nil {
+				t.Fatalf("target payload was not written before confirmation: %v", err)
+			}
+			if patchCount != 0 {
+				t.Fatal("PATCH occurred before digest confirmation")
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ChangeExternalID() error = %v", err)
+	}
+	if confirmationCount != 1 || getCount != 2 || patchCount != 1 {
+		t.Fatalf("confirmation/weak re-read/PATCH counts = %d/%d/%d, want 1/2/1", confirmationCount, getCount, patchCount)
+	}
+	if summary.PlanDigest == "" || summary.ResultJournalOutput == "" {
+		t.Fatalf("missing gateway digest or result journal: %#v", summary)
 	}
 }
 

@@ -10,8 +10,6 @@ import (
 func TestPatchCloudAccountProductionCallersAreChokepointed(t *testing.T) {
 	allowed := map[string]bool{
 		filepath.Clean("internal/app/apply_gateway.go"): true,
-		filepath.Clean("internal/app/apply_plan.go"):    true,
-		filepath.Clean("internal/app/external_id.go"):   true,
 	}
 	counts := make(map[string]int)
 	err := filepath.Walk(filepath.Clean("../.."), func(path string, info os.FileInfo, err error) error {
@@ -35,7 +33,7 @@ func TestPatchCloudAccountProductionCallersAreChokepointed(t *testing.T) {
 		}
 		relative = filepath.Clean(relative)
 		if !allowed[relative] {
-			t.Errorf("production caller of api.PatchCloudAccount outside gateway/Phase 3b holdouts: %s", relative)
+			t.Errorf("production caller of api.PatchCloudAccount outside gateway: %s", relative)
 		}
 		counts[relative] += count
 		return nil

@@ -140,7 +140,9 @@ func TestApplyPlanCommandHonorsLocalYesFlag(t *testing.T) {
 	defer server.Close()
 
 	planPath := filepath.Join(t.TempDir(), "payload.json")
-	if err := os.WriteFile(planPath, []byte(`{"setup-a":{"type":"AWS","name":"setup-a","regionToProxyServerId":{},"assumeRoleInfos":[]}}`), 0o600); err != nil {
+	if err := os.WriteFile(planPath, []byte(`{"setup-a":{"type":"AWS","name":"setup-a","regionToProxyServerId":{},"assumeRoleInfos":[
+		{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true}
+	]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	captureStdout(t, func() {

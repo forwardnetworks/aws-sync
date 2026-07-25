@@ -11,20 +11,23 @@ import (
 )
 
 type ExternalIDConfig struct {
-	Host           string
-	Username       string
-	Password       string
-	NetworkID      string
-	SetupID        string
-	AccountIDs     []string
-	ExternalID     string
-	Clear          bool
-	ExternalIDFile string
-	Output         string
-	APIPrefix      string
-	Insecure       bool
-	Timeout        time.Duration
-	Apply          bool
+	Host               string
+	Username           string
+	Password           string
+	NetworkID          string
+	SetupID            string
+	AccountIDs         []string
+	ExternalID         string
+	Clear              bool
+	ExternalIDFile     string
+	Output             string
+	APIPrefix          string
+	Insecure           bool
+	Timeout            time.Duration
+	Apply              bool
+	ConfirmApply       func(planDigest string) error
+	AuthorizationActor string
+	Unattended         bool
 }
 
 type ExternalIDSummary struct {
@@ -47,6 +50,10 @@ type ExternalIDSummary struct {
 	Changes                      []ExternalIDChange     `json:"changes"`
 	Output                       string                 `json:"output"`
 	PayloadSHA256                string                 `json:"payload_sha256"`
+	PlanDigest                   string                 `json:"plan_digest,omitempty"`
+	RollbackOutput               string                 `json:"rollback_output,omitempty"`
+	RollbackSHA256               string                 `json:"rollback_sha256,omitempty"`
+	ResultJournalOutput          string                 `json:"result_journal_output,omitempty"`
 	Payload                      ExternalIDPatchPayload `json:"payload"`
 }
 
@@ -241,13 +248,67 @@ func ChangeExternalID(ctx context.Context, cfg ExternalIDConfig) (*ExternalIDSum
 	if !cfg.Apply || changedCount == 0 {
 		return summary, nil
 	}
-	if _, _, err := writeJSONPayload(auditPath(output), payloads); err != nil {
+
+	rollbackPayloads, err := buildRollbackPayloads(accounts, []string{setupID})
+	if err != nil {
 		return nil, err
 	}
-	if err := client.PatchCloudAccount(ctx, networkID, setupID, payload); err != nil {
-		return nil, fmt.Errorf("patch setup %s: %w", setupID, err)
+	fullTarget := clonePatchPayload(rollbackPayloads[setupID])
+	fullTarget.AssumeRoleInfos = append([]api.AssumeRoleInfo(nil), infos...)
+	typedSetupID, err := NewSetupID(setupID)
+	if err != nil {
+		return nil, err
 	}
-	summary.Patched = true
+	changeSet, err := classifyPatchPayload(account, typedSetupID, fullTarget)
+	if err != nil {
+		return nil, fmt.Errorf("classify External ID change for setup %s: %w", setupID, err)
+	}
+	intent, err := newPayloadApplyIntent(
+		networkID,
+		output,
+		InventorySnapshot{
+			Source:           "external-id",
+			SelectedSetupIDs: []SetupID{typedSetupID},
+			Completeness:     InventoryCompletenessUnknown,
+		},
+		ReconcilePolicy{
+			Kind:                 ExplicitOperations,
+			PlanningInstant:      time.Now().UTC(),
+			OrganizationEvidence: AllowMissingOrganizationEvidence,
+		},
+		accounts,
+		auditPayloads{setupID: fullTarget},
+		map[string]ChangeSet{setupID: changeSet},
+	)
+	if err != nil {
+		return nil, err
+	}
+	summary.PlanDigest = intent.Digest()
+	if cfg.ConfirmApply != nil {
+		if err := cfg.ConfirmApply(intent.Digest()); err != nil {
+			return summary, err
+		}
+	}
+	actor := strings.TrimSpace(cfg.AuthorizationActor)
+	if actor == "" {
+		actor = "external-id caller"
+	}
+	applyResult, applyErr := GuardAndApply(ctx, client, intent, ApplyAuthorization{
+		PlanDigest: intent.Digest(),
+		Actor:      actor,
+		Approved:   true,
+		Unattended: cfg.Unattended,
+	})
+	summary.Patched = applyResult.PatchedCount > 0
+	summary.RollbackOutput = applyResult.RollbackOutput
+	summary.RollbackSHA256 = applyResult.RollbackSHA256
+	summary.ResultJournalOutput = applyResult.JournalOutput
+	if applyErr != nil {
+		if applyResult.JournalOutput != "" {
+			return summary, fmt.Errorf("%w; apply result journal: %s", applyErr, applyResult.JournalOutput)
+		}
+		return summary, applyErr
+	}
 	return summary, nil
 }
 

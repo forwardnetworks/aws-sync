@@ -181,6 +181,60 @@ func newApplyIntent(
 	return ApplyIntent{state: state}, nil
 }
 
+// newPayloadApplyIntent is the compatibility constructor for operator-authored
+// payload workflows. Callers must classify every target through the typed
+// reconciliation diff before constructing the immutable gateway intent.
+func newPayloadApplyIntent(
+	networkID string,
+	outputPath string,
+	snapshot InventorySnapshot,
+	policy ReconcilePolicy,
+	cloudAccounts []api.CloudAccount,
+	targets auditPayloads,
+	changes map[string]ChangeSet,
+) (ApplyIntent, error) {
+	if len(targets) == 0 {
+		return ApplyIntent{}, fmt.Errorf("apply intent requires at least one target payload")
+	}
+	setupIDs := make([]string, 0, len(targets))
+	for setupID := range targets {
+		setupIDs = append(setupIDs, setupID)
+		if _, ok := changes[setupID]; !ok {
+			return ApplyIntent{}, fmt.Errorf("apply intent target %s has no classified change set", setupID)
+		}
+	}
+	sort.Strings(setupIDs)
+	baselines, err := buildRollbackPayloads(cloudAccounts, setupIDs)
+	if err != nil {
+		return ApplyIntent{}, err
+	}
+	snapshot.NetworkID = strings.TrimSpace(networkID)
+
+	state := &applyIntentState{
+		networkID:  strings.TrimSpace(networkID),
+		outputPath: outputPath,
+		snapshot:   cloneInventorySnapshot(snapshot),
+		policy:     cloneReconcilePolicy(policy),
+		baselines:  cloneAuditPayloads(baselines),
+		targets:    cloneAuditPayloads(targets),
+		setups:     make([]applySetupIntent, 0, len(setupIDs)),
+	}
+	for _, setupID := range setupIDs {
+		state.setups = append(state.setups, applySetupIntent{
+			setupID:  setupID,
+			baseline: clonePatchPayload(baselines[setupID]),
+			target:   clonePatchPayload(targets[setupID]),
+			changes:  cloneChangeSet(changes[setupID]),
+		})
+	}
+	digest, err := computeApplyIntentDigest(state)
+	if err != nil {
+		return ApplyIntent{}, err
+	}
+	state.digest = digest
+	return ApplyIntent{state: state}, nil
+}
+
 // Digest returns the SHA-256 approval binding for this immutable intent.
 func (i ApplyIntent) Digest() string {
 	if i.state == nil {
