@@ -1562,7 +1562,12 @@ func emitSummaryHuman(summary *app.Summary) error {
 		fmt.Fprintf(os.Stdout, "  journal:   %s\n", summary.ResultJournalOutput)
 	}
 	if summary.RemovalBlocked {
-		fmt.Fprintln(os.Stdout, "\nApply blocked. Add --allow-removals, --allow-no-candidates, --allow-no-org-evidence, and --allow-unattended-destructive as needed.")
+		if summary.RemovalBlockReason != "" {
+			fmt.Fprintf(os.Stdout, "\nApply would be blocked: %s\n", summary.RemovalBlockReason)
+		} else {
+			fmt.Fprintln(os.Stdout, "\nApply blocked.")
+		}
+		fmt.Fprintln(os.Stdout, "For destructive apply, add --allow-removals, --max-removals, --max-removal-percent, and --allow-unattended-destructive as needed.")
 	}
 	fmt.Fprintln(os.Stdout, "\nSetups:")
 	addedTotal, reenabledTotal, disabledTotal, removedTotal := 0, 0, 0, 0

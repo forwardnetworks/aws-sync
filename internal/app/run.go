@@ -171,6 +171,7 @@ type Summary struct {
 	SkippedSetups       []SkipSummary                   `json:"skipped_setups,omitempty"`
 	CandidateCheck      []CandidateCheck                `json:"candidate_check,omitempty"`
 	RemovalBlocked      bool                            `json:"removal_blocked,omitempty"`
+	RemovalBlockReason  string                          `json:"removal_block_reason,omitempty"`
 }
 
 type CandidateCheck struct {
@@ -404,6 +405,10 @@ func runPlannedSyncFromSnapshot(
 	)
 	summary.PlanDigest = intent.Digest()
 	if !cfg.Apply {
+		if blockErr := unattendedDestructiveApplyError(intent.state, cfg.Unattended, cfg.AllowUnattendedDestructive); blockErr != nil {
+			summary.RemovalBlocked = true
+			summary.RemovalBlockReason = blockErr.Error()
+		}
 		return summary, nil
 	}
 	approvedDigest := intent.Digest()

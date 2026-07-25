@@ -145,6 +145,96 @@ func TestEmitSummaryHumanReportsSkippedNQERows(t *testing.T) {
 	}
 }
 
+func TestSyncAccountsDryRunReportsUnattendedDestructiveGate(t *testing.T) {
+	patchCount := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+			_, _ = w.Write([]byte(`[{
+              "type":"AWS",
+              "name":"setup-a",
+              "assumeRoleInfos":[
+                {"accountId":"111111111111","accountName":"keep","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true},
+                {"accountId":"222222222222","accountName":"remove","roleArn":"arn:aws:iam::222222222222:role/ForwardRole","enabled":true}
+              ]
+            }]`))
+		case r.Method == http.MethodPatch:
+			patchCount++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "accounts.json")
+	if err := os.WriteFile(manifestPath, []byte(`[{"id":"111111111111","name":"keep"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := func(outputPath string, jsonOutput bool) []string {
+		result := []string{
+			"sync-accounts",
+			"--host", server.URL,
+			"--username", "alice",
+			"--password", "secret",
+			"--network-id", "network-1",
+			"--accounts-file", manifestPath,
+			"--setup-id", "setup-a",
+			"--output", outputPath,
+			"--yes",
+			"--allow-removals",
+			"--max-removals", "1",
+			"--max-removal-percent", "100",
+			"--insecure",
+		}
+		if jsonOutput {
+			result = append(result, "--json")
+		}
+		return result
+	}
+
+	jsonOutput := captureStdout(t, func() {
+		cmd := newRootCommand()
+		cmd.SetArgs(args(filepath.Join(dir, "json-payload.json"), true))
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("JSON dry-run Execute() error = %v", err)
+		}
+	})
+	var summary app.Summary
+	if err := json.Unmarshal([]byte(jsonOutput), &summary); err != nil {
+		t.Fatalf("decode JSON dry-run summary: %v\n%s", err, jsonOutput)
+	}
+	if !summary.RemovalBlocked || !strings.Contains(summary.RemovalBlockReason, "--allow-unattended-destructive") {
+		t.Fatalf("JSON dry-run did not report unattended destructive gate: %#v", summary)
+	}
+
+	humanOutput := captureStdout(t, func() {
+		cmd := newRootCommand()
+		cmd.SetArgs(args(filepath.Join(dir, "human-payload.json"), false))
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("human dry-run Execute() error = %v", err)
+		}
+	})
+	for _, want := range []string{
+		"Apply would be blocked:",
+		"--allow-unattended-destructive",
+		"--allow-removals",
+		"--max-removals",
+		"--max-removal-percent",
+	} {
+		if !strings.Contains(humanOutput, want) {
+			t.Fatalf("human dry-run output missing %q:\n%s", want, humanOutput)
+		}
+	}
+	if strings.Contains(humanOutput, "--allow-no-candidates") || strings.Contains(humanOutput, "--allow-no-org-evidence") {
+		t.Fatalf("human dry-run output lists retired NQE removal flags:\n%s", humanOutput)
+	}
+	if patchCount != 0 {
+		t.Fatalf("dry-run unexpectedly patched %d setup(s)", patchCount)
+	}
+}
+
 func TestApplyPlanCommandHonorsLocalYesFlag(t *testing.T) {
 	patched := false
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

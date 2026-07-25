@@ -6,9 +6,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/forwardnetworks/aws-sync/internal/api"
 )
@@ -176,5 +178,94 @@ func TestSyncAWSAccountManifestDryRunReportsRemovalAndApplyRequiresApproval(t *t
 	}
 	if len(patchedPayload.AssumeRoleInfos) != 1 || patchedPayload.AssumeRoleInfos[0].AccountID != "111111111111" {
 		t.Fatalf("approved manifest removal PATCH = %#v; want only reviewed account 111111111111", patchedPayload.AssumeRoleInfos)
+	}
+}
+
+func TestApprovalDigestStableAcrossIndependentPlanningProcesses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/networks/network-1/cloudAccounts" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`[{
+          "type":"AWS",
+          "name":"setup-a",
+          "regions":{"us-east-1":{"testInstant":0}},
+          "assumeRoleInfos":[{
+            "accountId":"111111111111",
+            "accountName":"keep",
+            "roleArn":"arn:aws:iam::111111111111:role/ForwardRole",
+            "enabled":true
+          }]
+        }]`))
+	}))
+	defer server.Close()
+
+	runPlanningProcess := func(name string, instant time.Time) Summary {
+		t.Helper()
+		dir := t.TempDir()
+		resultPath := filepath.Join(dir, "summary.json")
+		cmd := exec.Command(os.Args[0], "-test.run=^TestApprovalDigestPlanningProcess$")
+		cmd.Env = append(os.Environ(),
+			"AWSSYNC_PLAN_DIGEST_CHILD=1",
+			"AWSSYNC_PLAN_DIGEST_HOST="+server.URL,
+			"AWSSYNC_PLAN_DIGEST_INSTANT="+instant.Format(time.RFC3339Nano),
+			"AWSSYNC_PLAN_DIGEST_OUTPUT="+filepath.Join(dir, name+"-payload.json"),
+			"AWSSYNC_PLAN_DIGEST_RESULT="+resultPath,
+		)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("planning process %s failed: %v\n%s", name, err, output)
+		}
+		data, err := os.ReadFile(resultPath)
+		if err != nil {
+			t.Fatalf("read planning result %s: %v", name, err)
+		}
+		var summary Summary
+		if err := json.Unmarshal(data, &summary); err != nil {
+			t.Fatalf("decode planning result %s: %v", name, err)
+		}
+		return summary
+	}
+
+	first := runPlanningProcess("first", time.Unix(100, 0).UTC())
+	second := runPlanningProcess("second", time.Unix(200, 0).UTC())
+	if first.PlanDigest == "" || first.PlanDigest != second.PlanDigest {
+		t.Fatalf("approval digests differ across independent planning processes: %q != %q", first.PlanDigest, second.PlanDigest)
+	}
+	if first.PayloadSHA256 == second.PayloadSHA256 {
+		t.Fatalf("test setup did not produce distinct exact payloads: both hashes are %q", first.PayloadSHA256)
+	}
+}
+
+func TestApprovalDigestPlanningProcess(t *testing.T) {
+	if os.Getenv("AWSSYNC_PLAN_DIGEST_CHILD") != "1" {
+		return
+	}
+	planningInstant, err := time.Parse(time.RFC3339Nano, os.Getenv("AWSSYNC_PLAN_DIGEST_INSTANT"))
+	if err != nil {
+		t.Fatalf("parse planning instant: %v", err)
+	}
+	summary, err := SyncAWSAccountManifest(context.Background(), Config{
+		Host:      os.Getenv("AWSSYNC_PLAN_DIGEST_HOST"),
+		Username:  "user",
+		Password:  "pass",
+		NetworkID: "network-1",
+		SetupIDs:  []string{"setup-a"},
+		APIPrefix: "/api",
+		Output:    os.Getenv("AWSSYNC_PLAN_DIGEST_OUTPUT"),
+		Policy:    NewAuthoritativeManifestReconcilePolicy(planningInstant),
+	}, []AWSOrganizationAccount{
+		{ID: "111111111111", Name: "keep"},
+		{ID: "222222222222", Name: "add"},
+	})
+	if err != nil {
+		t.Fatalf("plan account manifest: %v", err)
+	}
+	data, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatalf("encode planning summary: %v", err)
+	}
+	if err := os.WriteFile(os.Getenv("AWSSYNC_PLAN_DIGEST_RESULT"), data, 0o600); err != nil {
+		t.Fatalf("write planning summary: %v", err)
 	}
 }

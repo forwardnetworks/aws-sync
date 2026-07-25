@@ -112,9 +112,18 @@ type applyDigestMaterial struct {
 	NetworkID string                 `json:"network_id"`
 	Baselines auditPayloads          `json:"baselines"`
 	Snapshot  InventorySnapshot      `json:"snapshot"`
-	Policy    ReconcilePolicy        `json:"policy"`
+	Policy    applyDigestPolicy      `json:"policy"`
 	Targets   auditPayloads          `json:"targets"`
 	Changes   []applyDigestChangeSet `json:"changes"`
+}
+
+type applyDigestPolicy struct {
+	Kind                 ReconcilePolicyKind        `json:"kind"`
+	OrganizationEvidence OrganizationEvidencePolicy `json:"organization_evidence"`
+	DefaultRoleName      string                     `json:"default_role_name"`
+	UniformExternalID    *string                    `json:"uniform_external_id"`
+	ExternalIDByAccount  map[AccountID]string       `json:"external_id_by_account"`
+	Operations           []ExplicitAccountOperation `json:"operations"`
 }
 
 type applyDigestChangeSet struct {
@@ -259,18 +268,43 @@ func computeApplyIntentDigest(state *applyIntentState) (string, error) {
 		})
 	}
 	data, err := json.Marshal(applyDigestMaterial{
-		Version:   1,
+		Version:   2,
 		NetworkID: state.networkID,
-		Baselines: state.baselines,
+		Baselines: approvalDigestPayloads(state.baselines),
 		Snapshot:  state.snapshot,
-		Policy:    state.policy,
-		Targets:   state.targets,
+		Policy:    approvalDigestPolicy(state.policy),
+		Targets:   approvalDigestPayloads(state.targets),
 		Changes:   changes,
 	})
 	if err != nil {
 		return "", fmt.Errorf("encode immutable apply intent: %w", err)
 	}
 	return fmt.Sprintf("%x", sha256.Sum256(data)), nil
+}
+
+func approvalDigestPolicy(policy ReconcilePolicy) applyDigestPolicy {
+	// PlanningInstant is execution metadata, not a reconciliation decision.
+	// The exact bytes it produces remain covered by payload_sha256.
+	return applyDigestPolicy{
+		Kind:                 policy.Kind,
+		OrganizationEvidence: policy.OrganizationEvidence,
+		DefaultRoleName:      policy.DefaultRoleName,
+		UniformExternalID:    policy.UniformExternalID,
+		ExternalIDByAccount:  policy.ExternalIDByAccount,
+		Operations:           policy.Operations,
+	}
+}
+
+func approvalDigestPayloads(payloads auditPayloads) auditPayloads {
+	result := cloneAuditPayloads(payloads)
+	for setupID, payload := range result {
+		// Region membership is approval-relevant; volatile test instants are not.
+		for region := range payload.Regions {
+			payload.Regions[region] = 0
+		}
+		result[setupID] = payload
+	}
+	return result
 }
 
 // GuardAndApply is the sole Phase 3a account-list PATCH gateway. Forward does
@@ -430,13 +464,27 @@ func validateApplyAuthorization(state *applyIntentState, authorization ApplyAuth
 	if err := validateDestructiveEvidence(state, authorization); err != nil {
 		return err
 	}
-	if authorization.Unattended && !authorization.AllowUnattendedDestructive {
-		return fmt.Errorf(
-			"refusing unattended destructive apply without --allow-unattended-destructive: plan removes or disables %d account(s); Forward provides no atomic compare-and-swap",
-			totalDestructive,
-		)
+	if err := unattendedDestructiveApplyError(state, authorization.Unattended, authorization.AllowUnattendedDestructive); err != nil {
+		return err
 	}
 	return nil
+}
+
+func unattendedDestructiveApplyError(state *applyIntentState, unattended, allowed bool) error {
+	if !unattended || allowed {
+		return nil
+	}
+	totalDestructive := 0
+	for _, setup := range state.setups {
+		totalDestructive += len(setup.changes.Remove) + len(setup.changes.Disable)
+	}
+	if totalDestructive == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"refusing unattended destructive apply without --allow-unattended-destructive: plan removes or disables %d account(s); Forward provides no atomic compare-and-swap",
+		totalDestructive,
+	)
 }
 
 func validateDestructiveEvidence(state *applyIntentState, authorization ApplyAuthorization) error {

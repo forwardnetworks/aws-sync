@@ -71,6 +71,25 @@ func TestParseNQESnapshotAllowsMalformedRowsAndMarksIncomplete(t *testing.T) {
 	}
 }
 
+func TestParseNQESnapshotMalformedRowsReplaceStaleCompletenessReason(t *testing.T) {
+	snapshot, err := parseNQESnapshotFromMapsWithOptions([]map[string]any{{
+		"Cloud Setup ID":   "setup-a",
+		"Cloud Account ID": "not-an-account",
+	}}, parseNQESnapshotOptions{
+		AllowMalformedRows: true,
+		Completeness:       InventoryCompletenessLikelyIncomplete,
+		CompletenessReason: "NQE pagination ended with a terminating short page",
+		PageLimit:          1000,
+	})
+	if err != nil {
+		t.Fatalf("parseNQESnapshotFromMapsWithOptions() error = %v", err)
+	}
+	const want = "--allow-malformed-rows skipped malformed NQE rows, so the inventory is incomplete"
+	if snapshot.CompletenessReason != want {
+		t.Fatalf("completeness reason = %q, want %q", snapshot.CompletenessReason, want)
+	}
+}
+
 func TestParseNQESnapshotFromMapsRejectsDuplicateAccountAcrossRows(t *testing.T) {
 	items := []map[string]any{
 		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Cloud Account Name": "acct-a"},

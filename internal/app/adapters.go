@@ -86,9 +86,7 @@ func parseNQESnapshotFromMapsWithOptions(items []map[string]any, options parseNQ
 				})
 				snapshot.IgnoredAccounts = append(snapshot.IgnoredAccounts, AccountSummary{AccountID: rawNQEAccountID(item)})
 				snapshot.Completeness = InventoryCompletenessLikelyIncomplete
-				if snapshot.CompletenessReason == "" {
-					snapshot.CompletenessReason = "--allow-malformed-rows skipped malformed NQE rows, so the inventory is incomplete"
-				}
+				snapshot.CompletenessReason = "--allow-malformed-rows skipped malformed NQE rows, so the inventory is incomplete"
 				continue
 			}
 			return nil, err
