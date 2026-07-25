@@ -46,35 +46,39 @@ const (
 )
 
 type Config struct {
-	Host                  string
-	Username              string
-	Password              string
-	NetworkID             string
-	SnapshotID            string
-	Query                 string
-	QueryID               string
-	QuerySetupParam       string
-	SetupIDs              []string
-	Output                string
-	ManualOutput          string
-	APIPrefix             string
-	Insecure              bool
-	Timeout               time.Duration
-	Apply                 bool
-	AllowRemovals         bool
-	MaxRemovals           int
-	MaxRemovalPercent     float64
-	AllowNoCandidates     bool
-	AllowNoOrgEvidence    bool
-	PruneMissing          bool
-	MaxSnapshotAge        time.Duration
-	ExternalIDFile        string
-	Source                string
-	AuthoritativeInput    bool
-	Policy                ReconcilePolicy
-	PinSnapshot           bool
-	ExpectedPayloadSHA256 string
-	AllowMalformedRows    bool
+	Host                       string
+	Username                   string
+	Password                   string
+	NetworkID                  string
+	SnapshotID                 string
+	Query                      string
+	QueryID                    string
+	QuerySetupParam            string
+	SetupIDs                   []string
+	Output                     string
+	ManualOutput               string
+	APIPrefix                  string
+	Insecure                   bool
+	Timeout                    time.Duration
+	Apply                      bool
+	AllowRemovals              bool
+	MaxRemovals                int
+	MaxRemovalPercent          float64
+	AllowNoCandidates          bool
+	AllowNoOrgEvidence         bool
+	PruneMissing               bool
+	MaxSnapshotAge             time.Duration
+	ExternalIDFile             string
+	Source                     string
+	AuthoritativeInput         bool
+	Policy                     ReconcilePolicy
+	PinSnapshot                bool
+	ExpectedPayloadSHA256      string
+	ExpectedPlanDigest         string
+	AllowMalformedRows         bool
+	Unattended                 bool
+	AllowUnattendedDestructive bool
+	AuthorizationActor         string
 }
 
 // ReconcilePolicyFromLegacyFlags is the CLI-boundary compatibility mapping for
@@ -151,6 +155,9 @@ type Summary struct {
 	ManualPayloads      map[string][]api.AssumeRoleInfo `json:"manual_payloads,omitempty"`
 	RollbackOutput      string                          `json:"rollback_output,omitempty"`
 	RollbackSHA256      string                          `json:"rollback_sha256,omitempty"`
+	PlanDigest          string                          `json:"plan_digest,omitempty"`
+	ResultJournalOutput string                          `json:"result_journal_output,omitempty"`
+	ApplyJournal        *ApplyJournal                   `json:"apply_journal,omitempty"`
 	Apply               bool                            `json:"apply"`
 	FetchedItemCount    int                             `json:"fetched_item_count"`
 	IgnoredNQEItemCount int                             `json:"ignored_nqe_item_count,omitempty"`
@@ -197,8 +204,11 @@ type SetupSummary struct {
 	AddedAccounts                []AccountSummary  `json:"added_accounts,omitempty"`
 	RemovedAccounts              []AccountSummary  `json:"removed_accounts,omitempty"`
 	ReenabledAccounts            []AccountSummary  `json:"reenabled_accounts,omitempty"`
+	DisabledAccounts             []AccountSummary  `json:"disabled_accounts,omitempty"`
 	UnchangedAccountCount        int               `json:"unchanged_account_count"`
 	Patched                      bool              `json:"patched"`
+	ApplyStatus                  ApplyStatus       `json:"apply_status"`
+	ApplyError                   string            `json:"apply_error,omitempty"`
 }
 
 type AccountSummary struct {
@@ -299,6 +309,9 @@ func Run(ctx context.Context, cfg Config) (*Summary, error) {
 	if err != nil {
 		return nil, err
 	}
+	snapshot.Source = "nqe"
+	snapshot.NetworkID = cfg.NetworkID
+	snapshot.SnapshotID = cfg.SnapshotID
 	return runPlannedSyncFromSnapshot(ctx, cfg, client, snapshot, cloudAccounts)
 }
 
@@ -317,6 +330,9 @@ func runPlannedSync(
 	if err != nil {
 		return nil, err
 	}
+	snapshot.Source = "nqe"
+	snapshot.NetworkID = cfg.NetworkID
+	snapshot.SnapshotID = cfg.SnapshotID
 	return runPlannedSyncFromSnapshot(ctx, cfg, client, snapshot, cloudAccounts)
 }
 
@@ -369,6 +385,10 @@ func runPlannedSyncFromSnapshot(
 		}
 		manualPayloadsForSummary = manualPayloads
 	}
+	intent, err := newApplyIntent(cfg, snapshot, cloudAccounts, plan, outputPath)
+	if err != nil {
+		return nil, err
+	}
 
 	summary := buildSummary(
 		cfg,
@@ -381,75 +401,38 @@ func runPlannedSyncFromSnapshot(
 		plan,
 		0,
 	)
-	if cfg.Apply && plan.HasRemovals() && !cfg.AllowRemovals {
-		summary.RemovalBlocked = true
-		return summary, fmt.Errorf("planned account removals require --allow-removals")
+	summary.PlanDigest = intent.Digest()
+	if !cfg.Apply {
+		return summary, nil
 	}
-	if cfg.Apply {
-		if err := requireRemovalBounds(plan.removalStats(), cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
-			summary.RemovalBlocked = true
-			return summary, err
-		}
-		if err := validateRemovalStats(plan.removalStats(), cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
-			summary.RemovalBlocked = true
-			return summary, err
-		}
+	approvedDigest := intent.Digest()
+	if strings.TrimSpace(cfg.ExpectedPlanDigest) != "" {
+		approvedDigest = strings.TrimSpace(cfg.ExpectedPlanDigest)
 	}
-	if cfg.Apply && cfg.Policy.OrganizationEvidence != ReviewedAuthoritativeInventory && plan.HasCandidateRemovalRisk() && !cfg.AllowNoCandidates {
-		summary.RemovalBlocked = true
-		return summary, fmt.Errorf("planned removals with no uncollected candidate accounts visible require --allow-no-candidates")
-	}
-	if cfg.Apply && cfg.Policy.OrganizationEvidence != ReviewedAuthoritativeInventory && plan.HasGovCloudRemovalsWithoutOrganizationEvidence() {
-		summary.RemovalBlocked = true
-		return summary, fmt.Errorf("GovCloud account removals require positive AWS Organizations evidence; use sync-accounts with an authoritative reviewed manifest when Organizations is unavailable")
-	}
-	if cfg.Apply &&
-		cfg.Policy.OrganizationEvidence == RequireOrganizationEvidence &&
-		plan.HasNoOrganizationEvidenceForRemovals() {
-		missingSetups := strings.Join(plan.setupsWithoutOrganizationEvidenceForRemovals(), ", ")
-		summary.RemovalBlocked = true
-		return summary, fmt.Errorf("planned removals with no AWS Organizations evidence in NQE for setup(s): %s require --allow-no-org-evidence", missingSetups)
-	}
-
-	rollbackOutputPath := ""
-	rollbackSHA256 := ""
-	if cfg.Apply {
-		rollbackPayloads, err := buildRollbackPayloads(cloudAccounts, selectedSetupIDs(plan.Setups))
-		if err != nil {
-			return summary, err
-		}
-		rollbackOutputPath = rollbackPath(outputPath)
-		rollbackSHA256, err = writeAuditPayloads(rollbackOutputPath, rollbackPayloads)
-		if err != nil {
-			return summary, fmt.Errorf("write pre-apply rollback payload: %w", err)
-		}
-		summary.RollbackOutput = rollbackOutputPath
-		summary.RollbackSHA256 = rollbackSHA256
-		if err := verifyCloudAccountsUnchanged(ctx, client, cfg.NetworkID, selectedSetupIDs(plan.Setups), rollbackPayloads); err != nil {
-			return summary, err
-		}
-		if _, err := writeAuditPayloads(auditPath(outputPath), plan.Payloads); err != nil {
-			return nil, err
+	actor := strings.TrimSpace(cfg.AuthorizationActor)
+	if actor == "" {
+		if cfg.Unattended {
+			actor = "unattended app caller"
+		} else {
+			actor = "attended app caller"
 		}
 	}
-	patchedCount, err := applyPlan(ctx, cfg, client, plan)
-	if err != nil {
-		return nil, err
+	applyResult, applyErr := GuardAndApply(ctx, client, intent, ApplyAuthorization{
+		PlanDigest:                 approvedDigest,
+		Actor:                      actor,
+		Approved:                   true,
+		AllowDestructive:           cfg.AllowRemovals,
+		MaxRemovals:                cfg.MaxRemovals,
+		MaxRemovalPercent:          cfg.MaxRemovalPercent,
+		AllowNoCandidates:          cfg.AllowNoCandidates,
+		Unattended:                 cfg.Unattended,
+		AllowUnattendedDestructive: cfg.AllowUnattendedDestructive,
+	})
+	applyResultToSummary(summary, applyResult)
+	if applyErr != nil && applyResult.JournalOutput != "" {
+		return summary, fmt.Errorf("%w; apply result journal: %s", applyErr, applyResult.JournalOutput)
 	}
-	result := buildSummary(
-		cfg,
-		outputPath,
-		payloadSHA256,
-		manualOutputPath,
-		manualPayloadSHA256,
-		manualPayloadsForSummary,
-		snapshot.ObservedRowCount,
-		plan,
-		patchedCount,
-	)
-	result.RollbackOutput = rollbackOutputPath
-	result.RollbackSHA256 = rollbackSHA256
-	return result, nil
+	return summary, applyErr
 }
 
 func RunAWSOrganizations(ctx context.Context, cfg AWSOrganizationConfig, source AWSOrganizationSource) (*Summary, error) {
@@ -927,23 +910,6 @@ func queryInputs(cfg Config) (string, string, map[string]any) {
 	return query, "", nil
 }
 
-func applyPlan(ctx context.Context, cfg Config, client *api.Client, plan *patchPlan) (int, error) {
-	if !cfg.Apply {
-		return 0, nil
-	}
-	patchedCount := 0
-	for _, setup := range plan.Setups {
-		if setup.ChangeSet.Empty() {
-			continue
-		}
-		if err := client.PatchCloudAccount(ctx, cfg.NetworkID, setup.SetupID, setup.Payload); err != nil {
-			return patchedCount, fmt.Errorf("patch setup %s: %w", setup.SetupID, err)
-		}
-		patchedCount++
-	}
-	return patchedCount, nil
-}
-
 func buildSummary(
 	cfg Config,
 	outputPath string,
@@ -990,8 +956,9 @@ func buildSummary(
 			AddedAccounts:                accountSummaries(setup.AddedAccounts),
 			RemovedAccounts:              accountSummaries(setup.RemovedAccounts),
 			ReenabledAccounts:            accountSummaries(setup.ReenabledAccounts),
+			DisabledAccounts:             accountSummaries(setup.DisabledAccounts),
 			UnchangedAccountCount:        len(setup.UnchangedAccounts),
-			Patched:                      cfg.Apply && !setup.ChangeSet.Empty(),
+			ApplyStatus:                  ApplyStatusPlanned,
 		})
 	}
 
@@ -1021,6 +988,29 @@ func buildSummary(
 		PlannedSetups:       setupSummaries,
 		SkippedSetups:       plan.Skips,
 		CandidateCheck:      plan.CandidateChecks,
+	}
+}
+
+func applyResultToSummary(summary *Summary, result ApplyResult) {
+	summary.PatchedSetupCount = result.PatchedCount
+	summary.RollbackOutput = result.RollbackOutput
+	summary.RollbackSHA256 = result.RollbackSHA256
+	summary.ResultJournalOutput = result.JournalOutput
+	summary.RemovalBlocked = result.Blocked
+	journal := result.Journal
+	summary.ApplyJournal = &journal
+	entries := make(map[string]ApplyJournalEntry, len(result.Journal.Setups))
+	for _, entry := range result.Journal.Setups {
+		entries[entry.SetupID] = entry
+	}
+	for index := range summary.PlannedSetups {
+		entry, ok := entries[summary.PlannedSetups[index].SetupID]
+		if !ok {
+			continue
+		}
+		summary.PlannedSetups[index].ApplyStatus = entry.Status
+		summary.PlannedSetups[index].ApplyError = entry.Error
+		summary.PlannedSetups[index].Patched = entry.Status == ApplyStatusApplied
 	}
 }
 

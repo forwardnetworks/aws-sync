@@ -231,9 +231,29 @@ func TestBuildPlanOmitsPayloadForEmptyChangeSet(t *testing.T) {
 	if len(plan.Payloads) != 0 {
 		t.Fatalf("empty ChangeSet emitted payload: %#v", plan.Payloads)
 	}
-	patched, err := applyPlan(context.Background(), Config{Apply: true}, nil, plan)
-	if err != nil || patched != 0 {
-		t.Fatalf("empty ChangeSet apply = (%d, %v), want no mutation", patched, err)
+	snapshot, err := parseNQESnapshotFromMapsWithOptions(items, parseNQESnapshotOptions{
+		Completeness: InventoryCompletenessComplete,
+	})
+	if err != nil {
+		t.Fatalf("parse snapshot: %v", err)
+	}
+	cfg := Config{
+		NetworkID: "network-1",
+		Policy: ReconcilePolicy{
+			Kind:            CompleteInventory,
+			PlanningInstant: time.Unix(1, 0).UTC(),
+		},
+	}
+	intent, err := newApplyIntent(cfg, snapshot, cloudAccounts, plan, t.TempDir()+"/payload.json")
+	if err != nil {
+		t.Fatalf("newApplyIntent() error = %v", err)
+	}
+	result, err := GuardAndApply(context.Background(), nil, intent, ApplyAuthorization{
+		PlanDigest: intent.Digest(),
+		Approved:   true,
+	})
+	if err != nil || result.PatchedCount != 0 {
+		t.Fatalf("empty ChangeSet apply = (%d, %v), want no mutation", result.PatchedCount, err)
 	}
 }
 

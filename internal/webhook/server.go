@@ -63,6 +63,10 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Run == nil {
 		cfg.Run = app.Run
 	}
+	cfg.App.Unattended = true
+	if strings.TrimSpace(cfg.App.AuthorizationActor) == "" {
+		cfg.App.AuthorizationActor = "webhook"
+	}
 	if strings.TrimSpace(cfg.App.Host) == "" {
 		return nil, fmt.Errorf("Forward host is required")
 	}
