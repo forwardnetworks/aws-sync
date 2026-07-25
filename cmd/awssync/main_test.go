@@ -99,6 +99,31 @@ func TestRootCommandHonorsLocalSnapshotAndOutputFlags(t *testing.T) {
 	}
 }
 
+func TestEmitSummaryHumanReportsSkippedNQERows(t *testing.T) {
+	stdout := captureStdout(t, func() {
+		err := emitSummaryHuman(&app.Summary{
+			Host:                "https://fwd.example",
+			NetworkID:           "network-1",
+			Output:              "payload.json",
+			FetchedItemCount:    2,
+			IgnoredNQEItemCount: 1,
+			SkippedNQERows: []app.MalformedNQERowSummary{{
+				Row:       2,
+				SetupID:   "setup-a",
+				AccountID: "bad-row",
+				Reason:    "invalid AWS account ID",
+			}},
+		})
+		if err != nil {
+			t.Fatalf("emitSummaryHuman() error = %v", err)
+		}
+	})
+	if !strings.Contains(stdout, "ignored:   1 invalid NQE account row(s)") ||
+		!strings.Contains(stdout, "row 2 setup=setup-a account_id=bad-row: invalid AWS account ID") {
+		t.Fatalf("expected skipped row details in human output:\n%s", stdout)
+	}
+}
+
 func TestApplyPlanCommandHonorsLocalYesFlag(t *testing.T) {
 	patched := false
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

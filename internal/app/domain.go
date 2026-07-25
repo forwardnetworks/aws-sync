@@ -179,6 +179,10 @@ const (
 	InventoryCompletenessComplete
 )
 
+func (c InventoryCompleteness) Proven() bool {
+	return c == InventoryCompletenessComplete
+}
+
 // InventorySnapshot is a typed snapshot of discovered account inventory.
 type InventorySnapshot struct {
 	Source             string
@@ -189,10 +193,20 @@ type InventorySnapshot struct {
 	SelectedSetupIDs   []SetupID
 	ExpectedRowCount   *int
 	ObservedRowCount   int
+	PageLimit          int
 	Completeness       InventoryCompleteness
+	CompletenessReason string
 	DiscoveredAccounts []DiscoveredAccount
 	IgnoredAccounts    []AccountSummary
+	SkippedRows        []MalformedNQERowSummary
 	CompleteIndicator  bool
+}
+
+type MalformedNQERowSummary struct {
+	Row       int    `json:"row"`
+	SetupID   string `json:"setup_id,omitempty"`
+	AccountID string `json:"account_id,omitempty"`
+	Reason    string `json:"reason"`
 }
 
 // DiscoveredAccount captures one discovered row in a typed inventory.

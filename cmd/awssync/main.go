@@ -96,6 +96,7 @@ func newRootCommand() *cobra.Command {
 					MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
 					ExternalIDFile:     flagString(cmd, v, "external-id-file"),
 					PinSnapshot:        true,
+					AllowMalformedRows: flagBool(cmd, v, "allow-malformed-rows"),
 				}
 				previewSummary, err := app.Run(cmd.Context(), preview)
 				if err != nil {
@@ -134,6 +135,7 @@ func newRootCommand() *cobra.Command {
 				MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
 				ExternalIDFile:     flagString(cmd, v, "external-id-file"),
 				PinSnapshot:        true,
+				AllowMalformedRows: flagBool(cmd, v, "allow-malformed-rows"),
 			}
 			summary, err := app.Run(cmd.Context(), cfg)
 			if err != nil {
@@ -358,6 +360,7 @@ func bindPreflightFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	flags.Float64("max-removal-percent", 0, "required nonzero per-setup removal-percentage ceiling when removals are planned")
 	flags.Duration("max-snapshot-age", 0, "fail if latest processed snapshot is older than this duration; 0 disables the check")
 	flags.String("external-id-file", "", "CSV file of explicit per-account External IDs for mixed-ID setups")
+	flags.Bool("allow-malformed-rows", false, "skip malformed NQE account rows; removals remain blocked because skipped rows make inventory incomplete")
 	mustBind(v, flags, "snapshot-id")
 	mustBind(v, flags, "query-id")
 	mustBind(v, flags, "query-setup-param")
@@ -368,6 +371,7 @@ func bindPreflightFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	mustBind(v, flags, "max-removal-percent")
 	mustBind(v, flags, "max-snapshot-age")
 	mustBind(v, flags, "external-id-file")
+	mustBind(v, flags, "allow-malformed-rows")
 }
 
 func bindProcessingFlags(v *viper.Viper, flags *pflag.FlagSet) {
@@ -386,6 +390,7 @@ func bindProcessingFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	flags.Bool("prune-missing", false, "plan removal of configured accounts missing from NQE; additive preservation is the default")
 	flags.Duration("max-snapshot-age", 0, "fail if latest processed snapshot is older than this duration; 0 disables the check")
 	flags.String("external-id-file", "", "CSV file of explicit per-account External IDs for mixed-ID setups")
+	flags.Bool("allow-malformed-rows", false, "skip malformed NQE account rows; removals remain blocked because skipped rows make inventory incomplete")
 	mustBind(v, flags, "query-id")
 	mustBind(v, flags, "query-setup-param")
 	mustBind(v, flags, "setup-id")
@@ -401,6 +406,7 @@ func bindProcessingFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	mustBind(v, flags, "prune-missing")
 	mustBind(v, flags, "max-snapshot-age")
 	mustBind(v, flags, "external-id-file")
+	mustBind(v, flags, "allow-malformed-rows")
 }
 
 func newPreflightCommand(v *viper.Viper) *cobra.Command {
@@ -440,6 +446,7 @@ func newPreflightCommand(v *viper.Viper) *cobra.Command {
 				MaxRemovalPercent:  flagFloat64(cmd, v, "max-removal-percent"),
 				MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
 				ExternalIDFile:     flagString(cmd, v, "external-id-file"),
+				AllowMalformedRows: flagBool(cmd, v, "allow-malformed-rows"),
 			})
 			if err != nil {
 				return err
@@ -884,6 +891,7 @@ func newServeWebhookCommand(v *viper.Viper) *cobra.Command {
 					PruneMissing:       flagBool(cmd, v, "prune-missing"),
 					MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
 					ExternalIDFile:     flagString(cmd, v, "external-id-file"),
+					AllowMalformedRows: flagBool(cmd, v, "allow-malformed-rows"),
 				},
 			})
 			if err != nil {
@@ -1448,6 +1456,17 @@ func emitSummaryHuman(summary *app.Summary) error {
 	}
 	if summary.IgnoredNQEItemCount > 0 {
 		fmt.Fprintf(os.Stdout, "  ignored:   %d invalid NQE account row(s)\n", summary.IgnoredNQEItemCount)
+		for _, row := range summary.SkippedNQERows {
+			setup := row.SetupID
+			if setup == "" {
+				setup = "<missing>"
+			}
+			accountID := row.AccountID
+			if accountID == "" {
+				accountID = "<missing>"
+			}
+			fmt.Fprintf(os.Stdout, "    row %d setup=%s account_id=%s: %s\n", row.Row, setup, accountID, row.Reason)
+		}
 	}
 	fmt.Fprintf(os.Stdout, "  planned:   %d\n", summary.PlannedSetupCount)
 	fmt.Fprintf(os.Stdout, "  patched:   %d\n", summary.PatchedSetupCount)

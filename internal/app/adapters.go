@@ -12,6 +12,13 @@ var nqeSetupIDColumns = []string{"Cloud Setup ID", "Setup ID", "Cloud Account Se
 
 type externalIDBySetupAssignments map[SetupID]map[AccountID]string
 
+type parseNQESnapshotOptions struct {
+	AllowMalformedRows bool
+	Completeness       InventoryCompleteness
+	CompletenessReason string
+	PageLimit          int
+}
+
 func adaptExternalIDAssignments(assignments externalIDAssignments) (externalIDBySetupAssignments, error) {
 	if len(assignments) == 0 {
 		return nil, nil
@@ -41,10 +48,23 @@ func adaptExternalIDAssignments(assignments externalIDAssignments) (externalIDBy
 	return converted, nil
 }
 
+// parseNQESnapshotFromMaps adapts rows with no pagination metadata available.
+// NQE cannot prove its result is complete, so completeness defaults to unknown
+// and absence-based removal is refused downstream. Callers holding pagination
+// metadata must use parseNQESnapshotFromMapsWithOptions instead.
 func parseNQESnapshotFromMaps(items []map[string]any) (*InventorySnapshot, error) {
-	snapshot := &InventorySnapshot{
-		Source:       "nqe",
+	return parseNQESnapshotFromMapsWithOptions(items, parseNQESnapshotOptions{
 		Completeness: InventoryCompletenessUnknown,
+	})
+}
+
+func parseNQESnapshotFromMapsWithOptions(items []map[string]any, options parseNQESnapshotOptions) (*InventorySnapshot, error) {
+	snapshot := &InventorySnapshot{
+		Source:             "nqe",
+		ObservedRowCount:   len(items),
+		PageLimit:          options.PageLimit,
+		Completeness:       options.Completeness,
+		CompletenessReason: strings.TrimSpace(options.CompletenessReason),
 	}
 	seenBySetup := make(map[SetupID]map[AccountID]bool)
 	accountOwners := make(map[AccountID]SetupID)
@@ -57,6 +77,20 @@ func parseNQESnapshotFromMaps(items []map[string]any) (*InventorySnapshot, error
 		}
 		accountID, err := extractNQEAccountID(item, r)
 		if err != nil {
+			if options.AllowMalformedRows && isMalformedNQEAccountIDError(err) {
+				snapshot.SkippedRows = append(snapshot.SkippedRows, MalformedNQERowSummary{
+					Row:       r,
+					SetupID:   setupID.String(),
+					AccountID: rawNQEAccountID(item),
+					Reason:    err.Error(),
+				})
+				snapshot.IgnoredAccounts = append(snapshot.IgnoredAccounts, AccountSummary{AccountID: rawNQEAccountID(item)})
+				snapshot.Completeness = InventoryCompletenessLikelyIncomplete
+				if snapshot.CompletenessReason == "" {
+					snapshot.CompletenessReason = "--allow-malformed-rows skipped malformed NQE rows, so the inventory is incomplete"
+				}
+				continue
+			}
 			return nil, err
 		}
 		accountName, err := extractOptionalString(item, "Cloud Account Name", r)
@@ -110,7 +144,6 @@ func parseNQESnapshotFromMaps(items []map[string]any) (*InventorySnapshot, error
 			Membership:          MembershipPreserve,
 		})
 	}
-	snapshot.ObservedRowCount = len(snapshot.DiscoveredAccounts)
 	if len(selectedSetups) > 0 {
 		snapshot.SelectedSetupIDs = make([]SetupID, 0, len(selectedSetups))
 		for setupID := range selectedSetups {
@@ -121,6 +154,26 @@ func parseNQESnapshotFromMaps(items []map[string]any) (*InventorySnapshot, error
 		})
 	}
 	return snapshot, nil
+}
+
+func isMalformedNQEAccountIDError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := err.Error()
+	return strings.Contains(message, "Cloud Account ID") ||
+		strings.Contains(message, "invalid AWS account ID")
+}
+
+func rawNQEAccountID(item map[string]any) string {
+	raw, ok := item["Cloud Account ID"]
+	if !ok || raw == nil {
+		return ""
+	}
+	if value, ok := raw.(string); ok {
+		return strings.TrimSpace(value)
+	}
+	return fmt.Sprintf("%v", raw)
 }
 
 func extractNQESetupID(item map[string]any, row int) (SetupID, error) {

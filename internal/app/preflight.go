@@ -75,11 +75,12 @@ func Preflight(ctx context.Context, cfg Config) (*PreflightSummary, error) {
 		return result, nil
 	}
 	query, queryID, parameters := queryInputs(cfg)
-	items, err := client.QueryAWSAccounts(ctx, cfg.NetworkID, cfg.SnapshotID, query, queryID, parameters, cfg.SetupIDs)
+	queryResult, err := client.QueryAWSAccountsWithMetadata(ctx, cfg.NetworkID, cfg.SnapshotID, query, queryID, parameters, cfg.SetupIDs)
 	if err != nil {
 		result.fail("nqe_aws_accounts", err.Error())
 		return result, nil
 	}
+	items := queryResult.Items
 	result.FetchedItemCount = len(items)
 	if len(items) == 0 {
 		result.fail("nqe_aws_accounts", "query returned no AWS account rows")
@@ -93,7 +94,7 @@ func Preflight(ctx context.Context, cfg Config) (*PreflightSummary, error) {
 		return result, nil
 	}
 
-	snapshot, err := parseNQESnapshotFromMaps(items)
+	snapshot, err := parseNQESnapshotFromMapsWithOptions(items, nqeParseOptionsFromQueryResult(queryResult, cfg.AllowMalformedRows))
 	if err != nil {
 		result.fail("patch_plan", err.Error())
 		return result, nil
@@ -130,7 +131,12 @@ func Preflight(ctx context.Context, cfg Config) (*PreflightSummary, error) {
 		result.pass("nqe_setup_id_differentiator", fmt.Sprintf("NQE rows include setup IDs: %s", strings.Join(setupIDValues, ", ")))
 	}
 
-	plan, err := buildPlanForConfig(cfg, items, cloudAccounts)
+	planOptions, err := buildPlanOptionsFromConfig(cfg)
+	if err != nil {
+		result.fail("patch_plan", err.Error())
+		return result, nil
+	}
+	plan, err := buildPlanFromSnapshot(snapshot, cloudAccounts, cfg.SetupIDs, planOptions)
 	if err != nil {
 		result.fail("patch_plan", err.Error())
 		return result, nil

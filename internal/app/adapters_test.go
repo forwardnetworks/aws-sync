@@ -47,6 +47,30 @@ func TestParseNQESnapshotFromMapsRejectsNumericAccountID(t *testing.T) {
 	}
 }
 
+func TestParseNQESnapshotAllowsMalformedRowsAndMarksIncomplete(t *testing.T) {
+	items := []map[string]any{
+		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Cloud Account Name": "acct-a"},
+		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "not-an-account", "Cloud Account Name": "bad"},
+	}
+	snapshot, err := parseNQESnapshotFromMapsWithOptions(items, parseNQESnapshotOptions{
+		AllowMalformedRows: true,
+		Completeness:       InventoryCompletenessComplete,
+		PageLimit:          1000,
+	})
+	if err != nil {
+		t.Fatalf("parseNQESnapshotFromMapsWithOptions() error = %v", err)
+	}
+	if len(snapshot.DiscoveredAccounts) != 1 {
+		t.Fatalf("expected one valid account, got %#v", snapshot.DiscoveredAccounts)
+	}
+	if snapshot.Completeness != InventoryCompletenessLikelyIncomplete {
+		t.Fatalf("skipped malformed row must make inventory incomplete, got %v", snapshot.Completeness)
+	}
+	if len(snapshot.SkippedRows) != 1 || snapshot.SkippedRows[0].Row != 2 || snapshot.SkippedRows[0].AccountID != "not-an-account" {
+		t.Fatalf("expected skipped row details, got %#v", snapshot.SkippedRows)
+	}
+}
+
 func TestParseNQESnapshotFromMapsRejectsDuplicateAccountAcrossRows(t *testing.T) {
 	items := []map[string]any{
 		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Cloud Account Name": "acct-a"},

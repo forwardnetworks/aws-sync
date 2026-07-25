@@ -73,6 +73,7 @@ type Config struct {
 	AuthoritativeInput    bool
 	PinSnapshot           bool
 	ExpectedPayloadSHA256 string
+	AllowMalformedRows    bool
 }
 
 type Summary struct {
@@ -106,6 +107,7 @@ type Summary struct {
 	FetchedItemCount    int                             `json:"fetched_item_count"`
 	IgnoredNQEItemCount int                             `json:"ignored_nqe_item_count,omitempty"`
 	IgnoredNQEAccounts  []AccountSummary                `json:"ignored_nqe_accounts,omitempty"`
+	SkippedNQERows      []MalformedNQERowSummary        `json:"skipped_nqe_rows,omitempty"`
 	PlannedSetupCount   int                             `json:"planned_setup_count"`
 	PatchedSetupCount   int                             `json:"patched_setup_count"`
 	SkippedSetupCount   int                             `json:"skipped_setup_count"`
@@ -236,7 +238,7 @@ func Run(ctx context.Context, cfg Config) (*Summary, error) {
 		return nil, err
 	}
 	query, queryID, parameters := queryInputs(cfg)
-	items, err := client.QueryAWSAccounts(ctx, cfg.NetworkID, cfg.SnapshotID, query, queryID, parameters, cfg.SetupIDs)
+	queryResult, err := client.QueryAWSAccountsWithMetadata(ctx, cfg.NetworkID, cfg.SnapshotID, query, queryID, parameters, cfg.SetupIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -244,7 +246,7 @@ func Run(ctx context.Context, cfg Config) (*Summary, error) {
 	if err != nil {
 		return nil, err
 	}
-	snapshot, err := parseNQESnapshotFromMaps(items)
+	snapshot, err := parseNQESnapshotFromMapsWithOptions(queryResult.Items, nqeParseOptionsFromQueryResult(queryResult, cfg.AllowMalformedRows))
 	if err != nil {
 		return nil, err
 	}
@@ -258,7 +260,10 @@ func runPlannedSync(
 	items []map[string]any,
 	cloudAccounts []api.CloudAccount,
 ) (*Summary, error) {
-	snapshot, err := parseNQESnapshotFromMaps(items)
+	snapshot, err := parseNQESnapshotFromMapsWithOptions(items, parseNQESnapshotOptions{
+		AllowMalformedRows: cfg.AllowMalformedRows,
+		Completeness:       InventoryCompletenessComplete,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -272,7 +277,11 @@ func runPlannedSyncFromSnapshot(
 	snapshot *InventorySnapshot,
 	cloudAccounts []api.CloudAccount,
 ) (*Summary, error) {
-	plan, err := buildPlanFromSnapshot(snapshot, cloudAccounts, cfg.SetupIDs, buildPlanOptions{})
+	planOptions, err := buildPlanOptionsFromConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := buildPlanFromSnapshot(snapshot, cloudAccounts, cfg.SetupIDs, planOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -950,6 +959,7 @@ func buildSummary(
 		FetchedItemCount:    fetchedItemCount,
 		IgnoredNQEItemCount: len(plan.IgnoredAccounts),
 		IgnoredNQEAccounts:  plan.IgnoredAccounts,
+		SkippedNQERows:      plan.SkippedRows,
 		PlannedSetupCount:   len(plan.Setups),
 		PatchedSetupCount:   patchedCount,
 		SkippedSetupCount:   len(plan.Skips),
@@ -976,6 +986,7 @@ type patchPlan struct {
 	Skips           []SkipSummary
 	CandidateChecks []CandidateCheck
 	IgnoredAccounts []AccountSummary
+	SkippedRows     []MalformedNQERowSummary
 }
 
 type plannedSetup struct {
@@ -1074,8 +1085,13 @@ type buildPlanOptions struct {
 	PreserveMissing     bool
 }
 
+// buildPlan is a test-only helper. It asserts a proven-complete inventory so
+// fixtures can exercise removal paths directly; production callers must derive
+// completeness from real pagination metadata via buildPlanForConfig.
 func buildPlan(items []map[string]any, cloudAccounts []api.CloudAccount, queryID string, requestedSetupIDs []string) (*patchPlan, error) {
-	snapshot, err := parseNQESnapshotFromMaps(items)
+	snapshot, err := parseNQESnapshotFromMapsWithOptions(items, parseNQESnapshotOptions{
+		Completeness: InventoryCompletenessComplete,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1084,6 +1100,21 @@ func buildPlan(items []map[string]any, cloudAccounts []api.CloudAccount, queryID
 }
 
 func buildPlanForConfig(cfg Config, items []map[string]any, cloudAccounts []api.CloudAccount) (*patchPlan, error) {
+	planOptions, err := buildPlanOptionsFromConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	snapshot, err := parseNQESnapshotFromMapsWithOptions(items, parseNQESnapshotOptions{
+		AllowMalformedRows: cfg.AllowMalformedRows,
+		Completeness:       InventoryCompletenessComplete,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return buildPlanFromSnapshot(snapshot, cloudAccounts, cfg.SetupIDs, planOptions)
+}
+
+func buildPlanOptionsFromConfig(cfg Config) (buildPlanOptions, error) {
 	defaultSetupID := ""
 	setupIDs := cleanSetupIDs(cfg.SetupIDs)
 	if len(setupIDs) == 1 {
@@ -1091,24 +1122,24 @@ func buildPlanForConfig(cfg Config, items []map[string]any, cloudAccounts []api.
 	}
 	assignments, err := loadExternalIDAssignments(cfg.ExternalIDFile, defaultSetupID)
 	if err != nil {
-		return nil, err
+		return buildPlanOptions{}, err
 	}
 	adaptedAssignments, err := adaptExternalIDAssignments(assignments)
 	if err != nil {
-		return nil, err
+		return buildPlanOptions{}, err
 	}
-	snapshot, err := parseNQESnapshotFromMaps(items)
-	if err != nil {
-		return nil, err
-	}
-	return buildPlanFromSnapshot(snapshot, cloudAccounts, cfg.SetupIDs, buildPlanOptions{
+	return buildPlanOptions{
 		ExternalIDByAccount: legacyExternalIDAssignments(adaptedAssignments),
 		PreserveMissing:     !cfg.AuthoritativeInput && !cfg.PruneMissing,
-	})
+	}, nil
 }
 
+// buildPlanWithOptions is a test-only helper. See buildPlan on the asserted
+// completeness.
 func buildPlanWithOptions(items []map[string]any, cloudAccounts []api.CloudAccount, _ string, requestedSetupIDs []string, opts buildPlanOptions) (*patchPlan, error) {
-	snapshot, err := parseNQESnapshotFromMaps(items)
+	snapshot, err := parseNQESnapshotFromMapsWithOptions(items, parseNQESnapshotOptions{
+		Completeness: InventoryCompletenessComplete,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1124,7 +1155,40 @@ func buildPlanWithOptions(items []map[string]any, cloudAccounts []api.CloudAccou
 	})
 }
 
+func nqeParseOptionsFromQueryResult(result api.QueryAWSAccountsResult, allowMalformedRows bool) parseNQESnapshotOptions {
+	completeness := InventoryCompletenessComplete
+	if result.CompletenessUnproven {
+		completeness = InventoryCompletenessLikelyIncomplete
+	}
+	return parseNQESnapshotOptions{
+		AllowMalformedRows: allowMalformedRows,
+		Completeness:       completeness,
+		CompletenessReason: result.CompletenessReason,
+		PageLimit:          result.PageLimit,
+	}
+}
+
+func incompleteInventoryRemovalError(snapshot *InventorySnapshot) error {
+	reason := strings.TrimSpace(snapshot.CompletenessReason)
+	if reason == "" {
+		reason = "inventory completeness is unproven"
+	}
+	pageLimit := snapshot.PageLimit
+	if pageLimit == 0 {
+		pageLimit = api.PageLimit
+	}
+	return fmt.Errorf(
+		"refusing absence-based removals because inventory completeness is unproven: %s; observed_count=%d PageLimit=%d. Fix the NQE query/data and rerun --prune-missing only after a proven complete inventory, or rerun without --prune-missing to add/re-enable only",
+		reason,
+		snapshot.ObservedRowCount,
+		pageLimit,
+	)
+}
+
 func buildPlanFromSnapshot(snapshot *InventorySnapshot, cloudAccounts []api.CloudAccount, requestedSetupIDs []string, opts buildPlanOptions) (*patchPlan, error) {
+	if !opts.PreserveMissing && !snapshot.Completeness.Proven() {
+		return nil, incompleteInventoryRemovalError(snapshot)
+	}
 	cloudMetaMap, err := adaptCloudAccountsBySetupID(cloudAccounts, requestedSetupIDs)
 	if err != nil {
 		return nil, err
@@ -1174,7 +1238,11 @@ func buildPlanFromSnapshot(snapshot *InventorySnapshot, cloudAccounts []api.Clou
 		return plannedSetupIDs[i] < plannedSetupIDs[j]
 	})
 
-	plan := &patchPlan{Payloads: make(auditPayloads)}
+	plan := &patchPlan{
+		Payloads:        make(auditPayloads),
+		IgnoredAccounts: append([]AccountSummary(nil), snapshot.IgnoredAccounts...),
+		SkippedRows:     append([]MalformedNQERowSummary(nil), snapshot.SkippedRows...),
+	}
 	for _, setupID := range plannedSetupIDs {
 		meta, ok := cloudMetaMap[setupID]
 		if !ok {

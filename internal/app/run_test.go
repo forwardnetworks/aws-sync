@@ -722,6 +722,67 @@ func TestBuildPlanForConfigIsAdditiveWhenNQEReturnsOnlyEnabledSubset(t *testing.
 	}
 }
 
+func TestBuildPlanAllowMalformedRowsWithPruneMissingFailsClosed(t *testing.T) {
+	items := []map[string]any{
+		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Cloud Account Name": "acct-a"},
+		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "bad-row", "Cloud Account Name": "bad"},
+	}
+	cloudAccounts := []api.CloudAccount{{
+		Name: "setup-a",
+		AssumeRoleInfos: []api.AssumeRoleInfo{
+			{AccountID: "111111111111", AccountName: "acct-a", RoleArn: "arn:aws:iam::111111111111:role/ForwardRole", Enabled: true},
+			{AccountID: "222222222222", AccountName: "acct-b", RoleArn: "arn:aws:iam::222222222222:role/ForwardRole", Enabled: true},
+		},
+	}}
+
+	_, err := buildPlanForConfig(Config{
+		AllowMalformedRows: true,
+		PruneMissing:       true,
+	}, items, cloudAccounts)
+	if err == nil ||
+		!strings.Contains(err.Error(), "inventory completeness is unproven") ||
+		!strings.Contains(err.Error(), "observed_count=2 PageLimit=1000") {
+		t.Fatalf("expected incomplete-inventory prune refusal, got %v", err)
+	}
+}
+
+func TestBuildPlanPruneMissingRequiresProvenCompleteInventory(t *testing.T) {
+	snapshot := &InventorySnapshot{
+		Source:             "nqe",
+		ObservedRowCount:   1000,
+		PageLimit:          1000,
+		Completeness:       InventoryCompletenessLikelyIncomplete,
+		CompletenessReason: "NQE result count is an exact multiple of PageLimit, so truncation cannot be ruled out",
+		DiscoveredAccounts: []DiscoveredAccount{{
+			SetupID:     SetupID("setup-a"),
+			AccountID:   AccountID("111111111111"),
+			AccountName: "acct-a",
+		}},
+	}
+	cloudAccounts := []api.CloudAccount{{
+		Name: "setup-a",
+		AssumeRoleInfos: []api.AssumeRoleInfo{
+			{AccountID: "111111111111", AccountName: "acct-a", RoleArn: "arn:aws:iam::111111111111:role/ForwardRole", Enabled: true},
+			{AccountID: "222222222222", AccountName: "acct-b", RoleArn: "arn:aws:iam::222222222222:role/ForwardRole", Enabled: true},
+		},
+	}}
+
+	_, err := buildPlanFromSnapshot(snapshot, cloudAccounts, nil, buildPlanOptions{})
+	if err == nil ||
+		!strings.Contains(err.Error(), "NQE result count is an exact multiple of PageLimit") ||
+		!strings.Contains(err.Error(), "observed_count=1000 PageLimit=1000") {
+		t.Fatalf("expected incomplete-inventory prune refusal, got %v", err)
+	}
+
+	additive, err := buildPlanFromSnapshot(snapshot, cloudAccounts, nil, buildPlanOptions{PreserveMissing: true})
+	if err != nil {
+		t.Fatalf("additive planning should not require complete inventory: %v", err)
+	}
+	if len(additive.Setups[0].RemovedAccounts) != 0 {
+		t.Fatalf("additive planning removed accounts: %#v", additive.Setups[0].RemovedAccounts)
+	}
+}
+
 func TestBuildPlanCountsOnlyNewUncollectedAccountsAsCandidates(t *testing.T) {
 	items := []map[string]any{
 		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Collected?": true},
