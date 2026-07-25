@@ -40,16 +40,23 @@ type Event struct {
 }
 
 type Server struct {
-	cfg    Config
-	logger *log.Logger
-	run    RunFunc
-	jobs   chan Event
+	cfg          Config
+	logger       *log.Logger
+	run          RunFunc
+	persistState func(string, webhookState) error
+	jobs         chan Event
 
 	stateMu            sync.Mutex
 	state              webhookState
 	active             map[string]snapshotWatermark
+	queued             map[string]bool
+	scheduleGeneration map[string]uint64
 	lookupSnapshotTime bool
 	workerRunning      atomic.Bool
+	workerDone         chan struct{}
+	maxAttempts        int
+	retryBaseDelay     time.Duration
+	retryMaxDelay      time.Duration
 }
 
 func New(cfg Config) (*Server, error) {
@@ -102,15 +109,26 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 
-	return &Server{
+	server := &Server{
 		cfg:                cfg,
 		logger:             cfg.Logger,
 		run:                cfg.Run,
-		jobs:               make(chan Event, 32),
+		persistState:       persistWebhookState,
+		jobs:               make(chan Event, webhookQueueCapacity),
 		state:              state,
 		active:             make(map[string]snapshotWatermark),
+		queued:             make(map[string]bool),
+		scheduleGeneration: make(map[string]uint64),
 		lookupSnapshotTime: usingDefaultRun || cfg.App.Apply || isLoopbackHost(cfg.App.Host),
-	}, nil
+		workerDone:         make(chan struct{}),
+		maxAttempts:        webhookMaxAttempts,
+		retryBaseDelay:     webhookRetryBaseDelay,
+		retryMaxDelay:      webhookRetryMaxDelay,
+	}
+	if err := server.recoverInFlightJobs(); err != nil {
+		return nil, err
+	}
+	return server, nil
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -119,9 +137,10 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc(s.cfg.Path, s.handleEvent)
 
 	httpServer := &http.Server{Addr: s.cfg.Listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	go s.worker(ctx)
+	workerCtx, stopWorker := context.WithCancel(ctx)
+	go s.worker(workerCtx)
 	go func() {
-		<-ctx.Done()
+		<-workerCtx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = httpServer.Shutdown(shutdownCtx)
@@ -129,6 +148,8 @@ func (s *Server) Run(ctx context.Context) error {
 
 	s.logger.Printf("webhook server listening on %s%s", s.cfg.Listen, s.cfg.Path)
 	err := httpServer.ListenAndServe()
+	stopWorker()
+	s.waitForWorker()
 	if err != nil && err != http.ErrServerClosed {
 		return err
 	}
@@ -136,7 +157,17 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "queueDepth": len(s.jobs), "path": s.cfg.Path})
+	s.stateMu.Lock()
+	pendingDepth := len(s.state.PendingEvents)
+	deadLetterDepth := len(s.state.DeadLetterEvents)
+	s.stateMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":              true,
+		"queueDepth":      len(s.jobs),
+		"pendingDepth":    pendingDepth,
+		"deadLetterDepth": deadLetterDepth,
+		"path":            s.cfg.Path,
+	})
 }
 
 func (s *Server) handleEvent(w http.ResponseWriter, r *http.Request) {
@@ -192,15 +223,6 @@ func (s *Server) handleEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for {
-		s.stateMu.Lock()
-		s.pruneCompletedLocked(time.Now().UTC())
-		if _, duplicate := s.state.CompletedEvents[key]; duplicate {
-			s.stateMu.Unlock()
-			writeJSON(w, http.StatusAccepted, eventResponse(event, true))
-			return
-		}
-		s.stateMu.Unlock()
-
 		done, admitted := registerProcessAdmission(s.cfg.StatePath, key)
 		if !admitted {
 			select {
@@ -220,23 +242,67 @@ func (s *Server) handleEvent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, err.Error())
 			return
 		}
-		s.stateMu.Lock()
-		_, duplicate := s.state.CompletedEvents[key]
-		s.stateMu.Unlock()
+		duplicate, err := s.admitEvent(event)
+		if err != nil {
+			finishProcessAdmission(s.cfg.StatePath, key)
+			writeError(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
 		if duplicate {
 			finishProcessAdmission(s.cfg.StatePath, key)
-			writeJSON(w, http.StatusAccepted, eventResponse(event, true))
-			return
 		}
-		select {
-		case s.jobs <- event:
-			writeJSON(w, http.StatusAccepted, eventResponse(event, false))
-			return
-		default:
-			finishProcessAdmission(s.cfg.StatePath, key)
-			writeError(w, http.StatusServiceUnavailable, "job queue is full")
-			return
+		writeJSON(w, http.StatusAccepted, eventResponse(event, duplicate))
+		return
+	}
+}
+
+func (s *Server) admitEvent(event Event) (bool, error) {
+	key := eventDedupeKey(event)
+	now := time.Now().UTC()
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+
+	s.pruneCompletedLocked(now)
+	if _, duplicate := s.state.CompletedEvents[key]; duplicate {
+		return true, nil
+	}
+	if job, pending := s.state.PendingEvents[key]; pending {
+		if job.Status == webhookJobQueued && !s.queued[key] {
+			select {
+			case s.jobs <- job.Event:
+				s.queued[key] = true
+				s.invalidateScheduleLocked(key)
+			default:
+			}
 		}
+		return true, nil
+	}
+	if len(s.state.PendingEvents) >= webhookQueueCapacity {
+		return false, fmt.Errorf("job queue is full")
+	}
+
+	previous := cloneWebhookState(s.state)
+	next := cloneWebhookState(s.state)
+	delete(next.DeadLetterEvents, key)
+	next.PendingEvents[key] = pendingWebhookEvent{
+		Event:      event,
+		Status:     webhookJobQueued,
+		AcceptedAt: now,
+	}
+	if err := s.persistState(s.cfg.StatePath, next); err != nil {
+		return false, fmt.Errorf("persist accepted webhook event: %w", err)
+	}
+	s.state = next
+	select {
+	case s.jobs <- event:
+		s.queued[key] = true
+		return false, nil
+	default:
+		if err := s.persistState(s.cfg.StatePath, previous); err != nil {
+			return false, fmt.Errorf("job queue is full; event remains durably pending because admission rollback failed: %w", err)
+		}
+		s.state = previous
+		return false, fmt.Errorf("job queue is full")
 	}
 }
 
@@ -258,70 +324,172 @@ func (s *Server) authorized(r *http.Request) bool {
 func (s *Server) worker(ctx context.Context) {
 	s.workerRunning.Store(true)
 	defer func() {
-		s.releaseQueuedAdmissions()
+		s.releasePendingAdmissions()
 		s.workerRunning.Store(false)
+		close(s.workerDone)
 	}()
+	s.startPendingJobs(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case event := <-s.jobs:
-			cfg := s.cfg.App
-			cfg.NetworkID = event.NetworkID
-			cfg.SnapshotID = event.SnapshotID
-			cfg.SetupIDs = append([]string(nil), event.SetupIDs...)
-
-			snapshotTime, snapshotTimeKnown, err := s.resolveSnapshotTime(ctx, event)
-			if err != nil && cfg.Apply {
-				s.logger.Printf("webhook job failed before reconciliation: networkId=%s snapshotId=%s setupIds=%v err=%v", event.NetworkID, event.SnapshotID, cfg.SetupIDs, err)
-				s.finishPending(event)
-				continue
-			}
-			if err != nil {
-				s.logger.Printf("webhook snapshot ordering unavailable for non-apply job: networkId=%s snapshotId=%s err=%v", event.NetworkID, event.SnapshotID, err)
-			}
-			if snapshotTimeKnown {
-				if err := s.beginSnapshot(event, snapshotTime); err != nil {
-					s.logger.Printf("webhook job rejected by snapshot watermark: networkId=%s snapshotId=%s setupIds=%v err=%v", event.NetworkID, event.SnapshotID, cfg.SetupIDs, err)
-					s.finishPending(event)
-					continue
-				}
-			}
-			s.logger.Printf("processing webhook event: networkId=%s snapshotId=%s setupIds=%v", event.NetworkID, event.SnapshotID, cfg.SetupIDs)
-			summary, err := s.run(ctx, cfg)
-			if err != nil {
-				s.logger.Printf("webhook job failed: networkId=%s snapshotId=%s setupIds=%v err=%v", event.NetworkID, event.SnapshotID, cfg.SetupIDs, err)
-				s.endSnapshot(event)
-				s.finishPending(event)
-				continue
-			}
-			if err := s.recordSuccess(event, snapshotTime, snapshotTimeKnown); err != nil {
-				s.logger.Printf("webhook job completed but durable state could not be recorded: networkId=%s snapshotId=%s setupIds=%v err=%v", event.NetworkID, event.SnapshotID, cfg.SetupIDs, err)
-				s.endSnapshot(event)
-				s.finishPending(event)
-				continue
-			}
-			s.endSnapshot(event)
-			s.finishPending(event)
-			encoded, err := json.Marshal(summary)
-			if err != nil {
-				s.logger.Printf("webhook job completed but summary could not be encoded: networkId=%s snapshotId=%s err=%v", event.NetworkID, event.SnapshotID, err)
-				continue
-			}
-			s.logger.Printf("webhook job completed: %s", encoded)
+			s.processJob(ctx, event)
 		}
 	}
 }
 
-func (s *Server) releaseQueuedAdmissions() {
-	for {
-		select {
-		case event := <-s.jobs:
-			s.finishPending(event)
-		default:
+func (s *Server) waitForWorker() {
+	<-s.workerDone
+}
+
+func (s *Server) processJob(ctx context.Context, event Event) {
+	defer finishProcessAdmission(s.cfg.StatePath, eventDedupeKey(event))
+	job, exists, err := s.markJobInFlight(event)
+	if err != nil {
+		s.logger.Printf("webhook job could not be marked in-flight: networkId=%s snapshotId=%s setupIds=%v err=%v", event.NetworkID, event.SnapshotID, event.SetupIDs, err)
+		s.scheduleJob(ctx, event, time.Now().UTC().Add(s.retryBaseDelay))
+		return
+	}
+	if !exists {
+		return
+	}
+	event = job.Event
+	cfg := s.cfg.App
+	cfg.NetworkID = event.NetworkID
+	cfg.SnapshotID = event.SnapshotID
+	cfg.SetupIDs = append([]string(nil), event.SetupIDs...)
+
+	snapshotTime, snapshotTimeKnown, err := s.resolveSnapshotTime(ctx, event)
+	if err != nil && cfg.Apply {
+		s.failJob(ctx, job, fmt.Errorf("resolve snapshot ordering metadata: %w", err))
+		return
+	}
+	if err != nil {
+		s.logger.Printf("webhook snapshot ordering unavailable for non-apply job: networkId=%s snapshotId=%s err=%v", event.NetworkID, event.SnapshotID, err)
+	}
+	if snapshotTimeKnown {
+		if err := s.beginSnapshot(event, snapshotTime); err != nil {
+			s.failJob(ctx, job, err)
 			return
 		}
+		defer s.endSnapshot(event)
 	}
+
+	s.logger.Printf("processing webhook event: networkId=%s snapshotId=%s setupIds=%v attempt=%d/%d", event.NetworkID, event.SnapshotID, cfg.SetupIDs, job.Attempts, s.maxAttempts)
+	summary, err := s.run(ctx, cfg)
+	if err != nil {
+		s.failJob(ctx, job, err)
+		return
+	}
+	if err := s.recordSuccess(event, snapshotTime, snapshotTimeKnown); err != nil {
+		s.logger.Printf("webhook job completed but durable state could not be recorded; leaving it in-flight for restart recovery: networkId=%s snapshotId=%s setupIds=%v err=%v", event.NetworkID, event.SnapshotID, cfg.SetupIDs, err)
+		return
+	}
+	encoded, err := json.Marshal(summary)
+	if err != nil {
+		s.logger.Printf("webhook job completed but summary could not be encoded: networkId=%s snapshotId=%s err=%v", event.NetworkID, event.SnapshotID, err)
+		return
+	}
+	s.logger.Printf("webhook job completed: %s", encoded)
+}
+
+func (s *Server) releasePendingAdmissions() {
+	s.stateMu.Lock()
+	keys := make([]string, 0, len(s.state.PendingEvents))
+	for key := range s.state.PendingEvents {
+		keys = append(keys, key)
+	}
+	s.stateMu.Unlock()
+	for _, key := range keys {
+		finishProcessAdmission(s.cfg.StatePath, key)
+	}
+}
+
+func (s *Server) failJob(ctx context.Context, job pendingWebhookEvent, runErr error) {
+	event := job.Event
+	if ctx.Err() != nil {
+		s.logger.Printf("webhook job interrupted during shutdown; leaving it in-flight for restart recovery: networkId=%s snapshotId=%s setupIds=%v err=%v", event.NetworkID, event.SnapshotID, event.SetupIDs, runErr)
+		return
+	}
+	nextAttempt, deadLettered, err := s.recordJobFailure(job, runErr)
+	if err != nil {
+		s.logger.Printf("webhook job failed and durable retry state could not be recorded; leaving it in-flight for restart recovery: networkId=%s snapshotId=%s setupIds=%v err=%v stateErr=%v", event.NetworkID, event.SnapshotID, event.SetupIDs, runErr, err)
+		return
+	}
+	if deadLettered {
+		s.logger.Printf("webhook job exhausted %d attempts and was dead-lettered: networkId=%s snapshotId=%s setupIds=%v err=%v", s.maxAttempts, event.NetworkID, event.SnapshotID, event.SetupIDs, runErr)
+		return
+	}
+	s.logger.Printf("webhook job failed; retry scheduled for %s: networkId=%s snapshotId=%s setupIds=%v err=%v", nextAttempt.Format(time.RFC3339Nano), event.NetworkID, event.SnapshotID, event.SetupIDs, runErr)
+	s.scheduleJob(ctx, event, *nextAttempt)
+}
+
+func (s *Server) startPendingJobs(ctx context.Context) {
+	s.stateMu.Lock()
+	jobs := make([]pendingWebhookEvent, 0, len(s.state.PendingEvents))
+	for _, job := range s.state.PendingEvents {
+		jobs = append(jobs, clonePendingWebhookEvent(job))
+	}
+	s.stateMu.Unlock()
+	sort.Slice(jobs, func(i, j int) bool {
+		return jobs[i].AcceptedAt.Before(jobs[j].AcceptedAt)
+	})
+	for _, job := range jobs {
+		when := time.Now().UTC()
+		if job.NextAttemptAt != nil {
+			when = *job.NextAttemptAt
+		}
+		s.scheduleJob(ctx, job.Event, when)
+	}
+}
+
+func (s *Server) scheduleJob(ctx context.Context, event Event, when time.Time) {
+	key := eventDedupeKey(event)
+	s.stateMu.Lock()
+	s.scheduleGeneration[key]++
+	generation := s.scheduleGeneration[key]
+	s.stateMu.Unlock()
+
+	go func() {
+		delay := time.Until(when)
+		if delay < 0 {
+			delay = 0
+		}
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		s.enqueueScheduledJob(ctx, event, generation)
+	}()
+}
+
+func (s *Server) enqueueScheduledJob(ctx context.Context, event Event, generation uint64) {
+	key := eventDedupeKey(event)
+	s.stateMu.Lock()
+	job, exists := s.state.PendingEvents[key]
+	if !exists || job.Status != webhookJobQueued || s.queued[key] || s.scheduleGeneration[key] != generation {
+		s.stateMu.Unlock()
+		return
+	}
+	select {
+	case s.jobs <- job.Event:
+		s.queued[key] = true
+		s.stateMu.Unlock()
+		return
+	default:
+		s.stateMu.Unlock()
+	}
+	if ctx.Err() == nil {
+		s.scheduleJob(ctx, event, time.Now().UTC().Add(s.retryBaseDelay))
+	}
+}
+
+func (s *Server) invalidateScheduleLocked(key string) {
+	s.scheduleGeneration[key]++
 }
 
 func (s *Server) intersectConfiguredScope(event Event) (Event, error) {

@@ -681,6 +681,16 @@ Create the Forward webhook through the Forward API:
 
 Forward webhooks use Basic Auth credentials when credentials are configured. The `--webhook-basic-username` and `--webhook-basic-password` values on `configure-webhook` must match the receiver values on `serve-webhook`.
 
+The receiver persists each accepted event before returning `202`. By default, queue state shares `$UserConfigDir/awssync/webhook-state.json` with durable dedupe and snapshot watermarks; use `--webhook-state-file` to set an explicit service-owned path. Keep this file on durable local storage and writable only by the service user. `/healthz` reports `pendingDepth` and `deadLetterDepth` in addition to the in-memory `queueDepth`.
+
+Failed jobs run at most five times. The delays after failures are 1, 2, 4, and 8 seconds (the exponential delay is capped at 30 seconds). After the fifth failure, the full event, attempt timestamps, and last error remain under `dead_letter_events` in the state JSON. Inspect pending and dead-letter work with the service user, for example:
+
+```bash
+jq '{pending_events, dead_letter_events}' /var/lib/awssync/webhook-state.json
+```
+
+Correct the underlying error before draining a dead-letter entry. Then POST the original event body to the configured receiver path with the normal Basic Auth credentials. Re-delivery removes that entry from `dead_letter_events`, persists it as a fresh pending job with a reset failure count, and returns `202`; the new cycle is bounded to five attempts again. Normal scope and snapshot-watermark checks still run, so an obsolete event may be rejected instead of requeued. To discard an obsolete entry, stop the receiver, remove only that exact record from `dead_letter_events`, preserve mode `0600`, and restart. Do not edit the state file while the receiver is running.
+
 `configure-webhook` is repeatable. It creates a missing webhook and updates the same named webhook if it already exists. If only specific AWS setups should sync from webhook events, add one or more `--setup-id` values. The tool adds those setup IDs to the receiver URL so the receiver can scope the run. Add `--webhook-per-setup` to create or update one webhook per setup ID.
 
 ```bash
@@ -707,6 +717,7 @@ Recommended service practices:
 - Use `--allow-no-candidates` only after confirming management or delegated discovery is working.
 - Use `--allow-no-org-evidence` only after independent verification that AWS Organizations discovery remains complete.
 - Send service logs to the normal log collection system.
+- Alert when `/healthz` reports a nonzero `deadLetterDepth`, and retain the webhook state file across service restarts.
 
 Linux systemd command example:
 

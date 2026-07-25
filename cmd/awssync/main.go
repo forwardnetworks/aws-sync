@@ -982,7 +982,7 @@ func newServeWebhookCommand(v *viper.Viper) *cobra.Command {
 	cmd.Flags().String("path", "/forward/snapshot-ready", "HTTP path for webhook POST requests")
 	cmd.Flags().String("webhook-basic-username", "", "Basic Auth username required on incoming webhook requests when --apply is enabled")
 	cmd.Flags().String("webhook-basic-password", "", "Basic Auth password required on incoming webhook requests when --apply is enabled")
-	cmd.Flags().String("webhook-state-file", "", "durable dedupe and snapshot-watermark JSON file (defaults to the user config directory)")
+	cmd.Flags().String("webhook-state-file", "", "durable pending, dead-letter, dedupe, and snapshot-watermark JSON file (defaults to the user config directory)")
 	bindNetworkFlag(v, cmd.Flags())
 	bindProcessingFlags(v, cmd.Flags())
 	mustBind(v, cmd.Flags(), "listen")

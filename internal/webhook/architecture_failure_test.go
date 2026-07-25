@@ -132,6 +132,7 @@ func TestP0WebhookDeliveryAndScopeSafety(t *testing.T) {
 		}
 		p0WaitForAttempt(t, attemptCh, 1)
 		firstCancel()
+		first.waitForWorker()
 
 		restarted := newP0WebhookServer(t, cfg)
 		secondCtx, secondCancel := context.WithCancel(context.Background())
