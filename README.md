@@ -4,6 +4,8 @@
 
 Most operators should use `safe-sync`. It runs the safety checks, shows a short preview, and asks before changing Forward. It can add or re-enable accounts, but it cannot remove them.
 
+Upgrading an existing deployment? Read [Upgrading `awssync`](docs/upgrading.md) before replacing the binary; this release intentionally breaks retired prune automation, applying webhook receivers without fixed authentication and network scope, and unattended destructive applies without an additional acknowledgement.
+
 ## Routine Safe Sync
 
 ### 1. Download and verify
@@ -59,6 +61,7 @@ For two AWS setups:
 6. Otherwise, prompts for the word `apply`.
 7. Confirms that the reviewed payload has not changed.
 8. Writes a rollback file before PATCHing Forward.
+9. Updates a durable per-setup result journal as the apply proceeds.
 
 Example preview:
 
@@ -133,9 +136,9 @@ Fix the reported condition and run the same command again. Do not add removal ov
 
 `safe-sync` and the standard NQE workflow cannot remove accounts. NQE reports observed snapshot inventory, which combines successfully collected accounts with accounts visible through Organizations metadata; absence is not proof of deletion. The recognized `--prune-missing` flag now fails with an explanation instead of producing a plan.
 
-Use `sync-accounts` with a complete, human-reviewed manifest for lifecycle removals. Applying a manifest removal still requires `--allow-removals`, nonzero `--max-removals` and `--max-removal-percent` ceilings, and the normal destructive-apply authorization. Never remove an account only because its collection fails.
+Use `sync-accounts` with a complete, human-reviewed manifest for lifecycle removals. Applying a manifest removal requires `--allow-removals` plus nonzero `--max-removals` and `--max-removal-percent` ceilings. A destructive run using `--yes`, CI, or another unattended context also requires `--allow-unattended-destructive`. Never remove an account only because its collection fails.
 
-See [AWS account sync procedure](docs/aws-account-sync-procedure.md#apply-the-sync) for the reviewed removal commands and rollback procedure.
+See [AWS account sync procedure](docs/aws-account-sync-procedure.md#reviewed-manifest-removal) for the reviewed removal commands and rollback procedure.
 
 ## Automation
 
@@ -150,9 +153,11 @@ For scheduled additive-only operation, use the standard command without removal 
   --apply --yes --json
 ```
 
-The standard command is additive by default, pins one processed snapshot, writes the payload before PATCH, verifies current setup state, and writes `<output>.rollback.json`.
+The standard command is additive by default, pins one processed snapshot, writes the payload before PATCH, verifies current setup state, and writes `<output>.rollback.json`. Every apply also maintains `<output>.result.json`, whose per-setup status distinguishes applied, conflicted, and failed work after a partial or ambiguous run.
 
 For event-driven operation, `serve-webhook` accepts Forward `SNAPSHOT_READY` events and serializes jobs through a bounded queue.
+
+An applying receiver requires `--yes`, an explicit `--network-id`, and inbound Basic Auth credentials. Configure Forward to send the same credentials, and keep the receiver's durable state file on service-owned storage. Failed events are attempted at most five times and then remain dead-lettered for operator recovery.
 
 Do not pass Forward or AWS secrets on command lines in shared process environments. Use protected environment injection or a service-manager secret facility.
 
@@ -160,7 +165,7 @@ Do not pass Forward or AWS secrets on command lines in shared process environmen
 
 These are separate from routine synchronization:
 
-- [External ID procedure](docs/aws-account-sync-procedure.md#customer-defined-external-id-with-an-iam-user)
+- [External ID procedure](docs/aws-account-sync-procedure.md#add-a-customer-defined-external-id-to-an-existing-setup)
 - [New AWS Organizations onboarding](docs/aws-account-sync-procedure.md#onboard-from-aws-organizations-directly)
 - [Account-manifest workflow](docs/architecture-flow.md)
 - [AWS GovCloud workflow](docs/govcloud-workflow.md)
@@ -174,9 +179,11 @@ Existing per-account External IDs are preserved during ordinary synchronization.
 - `safe-sync` cannot remove accounts.
 - Human-readable output is the default; `--json` is for standard-command automation.
 - The latest processed snapshot is pinned before planning.
-- Invalid NQE account-ID placeholders are ignored and reported.
+- Malformed NQE account IDs fail by default; `--allow-malformed-rows` skips and reports them only for incomplete additive runs.
 - Every apply writes a complete pre-change rollback payload.
+- Every apply writes a durable per-setup result journal.
 - The reviewed target payload and current Forward setup are revalidated before PATCH.
+- Forward exposes no atomic compare-and-swap token; unattended destructive applies require a separate explicit acknowledgement.
 - Generated payloads use atomic owner-only `0600` files.
 - Idempotent reads and full-state updates use bounded transient retries.
 
@@ -184,6 +191,7 @@ Existing per-account External IDs are preserved during ordinary synchronization.
 
 | Guide | Use it for |
 | --- | --- |
+| [Upgrade guide](docs/upgrading.md) | Breaking changes and migration steps for existing automation |
 | [Routine safe sync](docs/routine-safe-sync.md) | One-page operator handoff |
 | [Quick start](docs/quick-start.md) | Standard CLI examples and troubleshooting |
 | [AWS account sync procedure](docs/aws-account-sync-procedure.md) | IAM prerequisites, automation, removals, and rollback |

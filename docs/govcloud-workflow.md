@@ -135,10 +135,11 @@ If removals are intentional, the apply is blocked unless the operator also suppl
   --allow-removals \
   --max-removals 5 \
   --max-removal-percent 5 \
+  --allow-unattended-destructive \
   --yes
 ```
 
-Set the ceilings to the reviewed change, not to the full account population. `--max-removals` limits the total removals in the run, and `--max-removal-percent` prevents a single setup from losing more than the approved percentage. Exceeding either value blocks before PATCH.
+Set the ceilings to the reviewed change, not to the full account population. `--max-removals` limits the total removals in the run, and `--max-removal-percent` prevents a single setup from losing more than the approved percentage. Exceeding either value blocks before PATCH. `--allow-unattended-destructive` is also required here because `--yes` skips the human confirmation and Forward provides no atomic compare-and-swap token. For a human-attended removal, omit both `--yes` and `--allow-unattended-destructive` and type `apply` after reviewing the preview.
 
 After any update, run a Forward connectivity test for representative accounts, run a new snapshot, and inspect per-account collection errors.
 

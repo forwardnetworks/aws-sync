@@ -46,40 +46,46 @@ flowchart LR
 
 ## GovCloud Inventory Decision
 
-GovCloud resource collection and Organizations inventory are separate capabilities. Use the regular Forward snapshot/NQE path when Forward has positive GovCloud Organizations evidence. Use a complete, reviewed manifest when Organizations is unavailable or cannot be delegated.
+GovCloud resource collection and Organizations inventory are separate capabilities. The regular Forward snapshot/NQE path is additive even when positive Organizations evidence is present. Every lifecycle removal uses a complete, reviewed manifest.
 
 ```mermaid
 flowchart TD
     start["GovCloud AWS setup\narn:aws-us-gov roles"]
     snapshot["Run connectivity test\nand fresh Forward snapshot"]
+    change{"Lifecycle removal?"}
     org_check{"Forward NQE shows positive\nOrganizations evidence?"}
-    nqe["Regular preflight + NQE plan"]
+    nqe["Regular preflight + additive NQE plan\nnever removes"]
     manifest["Authoritative account manifest\nonboard-accounts or sync-accounts"]
     removals{"Plan contains removals?"}
     review["Review exact account IDs"]
     approve["Explicit --allow-removals\nall removal paths"]
     blast{"Within --max-removals\nand --max-removal-percent?"}
+    unattended{"Unattended destructive apply?"}
+    acknowledge["Explicit\n--allow-unattended-destructive"]
+    gateway["Guarded account-list\napply gateway"]
     apply["PATCH Forward setup"]
-    block["BLOCK\nno empty/unproven inventory apply"]
+    block["BLOCK\nno unreviewed or over-limit removal"]
 
-    start --> snapshot --> org_check
-    org_check -- "yes" --> nqe --> removals
-    org_check -- "no / unavailable" --> manifest --> removals
-    removals -- "no" --> apply
-    removals -- "yes, NQE evidence present" --> review
-    removals -- "yes, authoritative manifest" --> review
-    review --> approve --> blast
-    blast -- "yes" --> apply
+    start --> change
+    change -- "no" --> snapshot --> org_check
+    change -- "yes" --> manifest --> removals
+    org_check -- "yes" --> nqe --> gateway
+    org_check -- "no / unavailable" --> manifest
+    removals -- "no" --> gateway
+    removals -- "yes" --> review --> approve --> blast
+    blast -- "yes" --> unattended
     blast -- "no" --> block
-    removals -- "yes, NQE evidence absent" --> block
+    unattended -- "no" --> gateway
+    unattended -- "yes" --> acknowledge --> gateway
+    gateway --> apply
 
     classDef neutral fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A;
     classDef safe fill:#E1F5EE,stroke:#0F6E56,color:#04342C;
     classDef warn fill:#FAEEDA,stroke:#854F0B,color:#412402;
     classDef blocked fill:#FCEBEB,stroke:#A32D2D,color:#501313;
 
-    class start,snapshot,org_check,nqe,manifest,removals,review neutral;
-    class approve,blast,apply safe;
+    class start,snapshot,change,org_check,nqe,manifest,removals,review,unattended neutral;
+    class approve,blast,acknowledge,gateway,apply safe;
     class block blocked;
 ```
 
@@ -102,7 +108,9 @@ flowchart TB
         plan["plan / dry-run\nPOST /nqe + GET /cloudAccounts"]
         external_ids["Per-account External ID merge\npreserve existing values\nexplicit CSV for ambiguous additions"]
         disk["payload.json\nwritten to disk before any change"]
-        safety["Removal gates\nexplicit approval + count/% ceilings"]
+        gateway["Guarded apply gateway\napproval digest + current-state re-read"]
+        rollback["rollback.json\ncomplete pre-change setup"]
+        journal["result.json\nper-setup durable disposition"]
         apply["--apply\nPATCH /cloudAccounts/{setupId}"]
         apply_plan["apply-plan\nreload current state + validate\nGovCloud removals refused"]
     end
@@ -121,11 +129,10 @@ flowchart TB
 
     preflight -- "read-only" --> fwd
     plan --> external_ids --> disk
-    disk --> safety --> apply
+    disk --> gateway --> rollback --> apply --> journal
     disk --> apply_plan
-    apply_plan --> safety
+    apply_plan --> gateway
     apply --> patch_accts
-    apply_plan --> patch_accts
     plan --> nqe
     plan --> get_accts
     plan --> get_snap
@@ -135,9 +142,9 @@ flowchart TB
     classDef artifact fill:#FAEEDA,stroke:#854F0B,color:#412402;
 
     class cli,cron,preflight neutral;
-    class plan,external_ids,safety,apply,apply_plan neutral;
+    class plan,external_ids,gateway,apply,apply_plan neutral;
     class nqe,get_accts,patch_accts,get_snap fwdnode;
-    class disk artifact;
+    class disk,rollback,journal artifact;
 ```
 
 The account list is full-state, but External IDs are merged by AWS account ID. Existing mixed values are preserved. When a mixed-ID setup gains an account, planning stops unless `--external-id-file` explicitly supplies the new account's value; omitted existing accounts remain unchanged.
@@ -211,7 +218,10 @@ flowchart TB
         sync["sync-accounts\nGET current setup"]
         diff["Print exact add/remove IDs\nwrite payload before change"]
         removal{"Any removals?"}
-        patch["--apply --yes\nPATCH /cloudAccounts/{setupId}"]
+        unattended{"--yes / CI?"}
+        acknowledge["--allow-unattended-destructive"]
+        gateway["guarded apply gateway"]
+        patch["--apply\nPATCH /cloudAccounts/{setupId}"]
         approved["--allow-removals\nexplicit approval"]
         blast["--max-removals\n--max-removal-percent"]
     end
@@ -219,18 +229,21 @@ flowchart TB
     manifest --> validate
     validate --> onboard --> create_files --> post
     validate --> sync --> diff --> removal
-    removal -- "no" --> patch
-    removal -- "yes" --> approved --> blast --> patch
+    removal -- "no" --> gateway
+    removal -- "yes" --> approved --> blast --> unattended
+    unattended -- "no, interactive" --> gateway
+    unattended -- "yes" --> acknowledge --> gateway
+    gateway --> patch
 
     classDef neutral fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A;
     classDef fwdnode fill:#E6F1FB,stroke:#185FA5,color:#042C53;
     classDef artifact fill:#FAEEDA,stroke:#854F0B,color:#412402;
     classDef safe fill:#E1F5EE,stroke:#0F6E56,color:#04342C;
 
-    class manifest,validate,onboard,sync,diff,removal neutral;
+    class manifest,validate,onboard,sync,diff,removal,unattended neutral;
     class create_files artifact;
     class post,patch fwdnode;
-    class approved,blast safe;
+    class approved,blast,acknowledge,gateway safe;
 ```
 
 For GovCloud, use `--partition aws-us-gov` when onboarding. Existing-setup sync derives and preserves the partition from the current role ARNs. Mixed partitions or a mismatch between role ARNs and configured regions fail before a payload can be applied.
@@ -321,8 +334,11 @@ flowchart TB
     end
 
     subgraph daemon["awssync serve-webhook  (long-lived process)"]
-        recv["HTTP receiver\nlistens on configured port\nBasic Auth protected"]
-        sync["plan + PATCH\nsame as batch mode\nbut pinned to event snapshot ID"]
+        recv["HTTP receiver\nBasic Auth protected\nfixed --network-id scope"]
+        state["durable state file · 0600\npending + dedupe + watermarks"]
+        sync["plan + guarded PATCH\npinned to event snapshot ID"]
+        retry{"Job succeeded\nwithin 5 attempts?"}
+        dead["dead_letter_events\noperator recovery required"]
     end
 
     subgraph fwd["Forward platform"]
@@ -333,7 +349,9 @@ flowchart TB
 
     cfg -- "HTTPS · Basic Auth\nFWD_USER / FWD_PASS" --> fwd
     webhook_out -- "inbound HTTP\nBasic Auth (shared secret)" --> recv
-    recv --> sync
+    recv --> state --> sync --> retry
+    retry -- "yes" --> state
+    retry -- "no" --> dead --> state
     sync --> nqe2
     sync --> patch2
 
@@ -343,9 +361,9 @@ flowchart TB
     classDef fwdnode fill:#E6F1FB,stroke:#185FA5,color:#042C53;
     classDef warn fill:#FAEEDA,stroke:#854F0B,color:#412402;
 
-    class cfg,recv,sync neutral;
+    class cfg,recv,sync,retry neutral;
     class webhook_out,nqe2,patch2 fwdnode;
-    class note warn;
+    class state,dead,note warn;
 ```
 
 ---
@@ -433,6 +451,8 @@ flowchart LR
 | Listening port | Configurable (default example: `:8080`) |
 | Protocol | HTTP (TLS terminated at reverse proxy recommended for production) |
 | Authentication | HTTP Basic Auth — shared secret between Forward and receiver |
+| Apply scope | Applying receivers require an explicitly configured Forward network ID |
+| Recovery state | Durable owner-only file containing pending work, dedupe, watermarks, and dead letters |
 | Caller | Forward platform (SaaS: internet; on-prem: Forward app server) |
 
 ---
@@ -449,17 +469,17 @@ flowchart LR
 - `discover-org` writes both onboarding JSON files before any optional `POST /cloudAccounts`.
 - `onboard-accounts` writes both onboarding JSON files before any optional `POST /cloudAccounts`.
 - Static-key collector secrets are only included in the create payload when explicitly supplied. Without the secret, the file contains a placeholder and is marked not POST-ready.
-- Removals require explicit `--allow-removals` flag; `awssync` will not silently
-  remove accounts from a Forward setup.
+- Removals require explicit `--allow-removals`; unattended destructive applies additionally require `--allow-unattended-destructive` because Forward provides no atomic compare-and-swap token.
 - NQE sync always preserves configured accounts absent from observed inventory. `--prune-missing` is retired and returns an actionable refusal; authoritative `sync-accounts` manifest reconciliation is the supported lifecycle-removal path.
 - Both nonzero `--max-removals` and `--max-removal-percent` ceilings are mandatory for any removal and are rechecked immediately before apply.
 - Existing disabled or failed `Collected? false` rows are not treated as AWS Organizations discovery candidates.
-- CLI NQE plans pin one processed snapshot, and every apply writes a full pre-change rollback payload before the first PATCH.
-- GovCloud NQE removals additionally require positive Organizations evidence. Generic no-evidence flags cannot override this gate.
-- Manifest removals require an authoritative complete manifest plus `--allow-removals`.
+- CLI NQE plans pin one processed snapshot. Snapshot timestamps more than five minutes ahead of the local clock are rejected.
+- Every apply uses the same guarded gateway, writes a full pre-change rollback payload before the first PATCH, and atomically updates a per-setup result journal.
+- Approval digests are stable across independent invocations for the same approval-relevant inputs. The immediate current-state re-read is a weak conflict detector, not atomic compare-and-swap.
+- GovCloud NQE sync is additive. GovCloud lifecycle removals require an authoritative complete manifest plus `--allow-removals`; generic NQE evidence flags cannot substitute for that source.
 - `apply-plan` reloads current state and refuses GovCloud removals, so a saved payload cannot bypass the source workflow's safety checks.
-- Webhook receiver is protected by HTTP Basic Auth with a shared secret
-  independent of Forward user credentials.
+- Applying webhook receivers require HTTP Basic Auth with a shared secret independent of Forward user credentials and a fixed network scope. Accepted events are persisted before `202`; a job is attempted at most five times before it is dead-lettered.
+- `status` reports `observation_atomic=false` because its latest-processed and snapshot-list values come from separate Forward API reads.
 
 For the full operational procedure see
 [AWS Account Sync Procedure](aws-account-sync-procedure.md) and
