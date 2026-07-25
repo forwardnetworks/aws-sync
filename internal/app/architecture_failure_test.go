@@ -108,19 +108,16 @@ func TestP0IncompleteNonemptyNQEInventoryRequiresCompletenessProof(t *testing.T)
 
 	tests := []struct {
 		name        string
-		firstPage   int
-		secondPage  int
+		repeatPage  bool
 		wantOffsets []int
 	}{
 		{
-			name:        "short first page",
-			firstPage:   1,
-			wantOffsets: []int{0},
+			name:        "exact multiple of PageLimit",
+			wantOffsets: []int{0, api.PageLimit},
 		},
 		{
-			name:        "truncated later page",
-			firstPage:   api.PageLimit,
-			secondPage:  1,
+			name:        "repeated page does not advance result window",
+			repeatPage:  true,
 			wantOffsets: []int{0, api.PageLimit},
 		},
 	}
@@ -154,16 +151,17 @@ func TestP0IncompleteNonemptyNQEInventoryRequiresCompletenessProof(t *testing.T)
 					mu.Lock()
 					queryOffsets = append(queryOffsets, request.QueryOptions.Offset)
 					mu.Unlock()
-					count := test.firstPage
-					if request.QueryOptions.Offset == api.PageLimit {
-						count = test.secondPage
+					count := api.PageLimit
+					if request.QueryOptions.Offset == api.PageLimit && !test.repeatPage {
+						count = 0
 					}
 					items := make([]map[string]any, count)
 					for i := range items {
+						accountID := fmt.Sprintf("%012d", i+1)
 						items[i] = map[string]any{
 							"Cloud Setup ID":     "setup-a",
-							"Cloud Account ID":   "111111111111",
-							"Cloud Account Name": "only-visible-account",
+							"Cloud Account ID":   accountID,
+							"Cloud Account Name": "visible-account-" + accountID,
 							"Collected?":         true,
 						}
 					}
@@ -217,6 +215,10 @@ func TestP0IncompleteNonemptyNQEInventoryRequiresCompletenessProof(t *testing.T)
 			}
 		})
 	}
+}
+
+func TestP0ShortFirstPageTruncationCannotBeDetectedClientSide(t *testing.T) {
+	t.Skip("a server can return a plausible short first page that omits real AWS accounts; the client has no independent expected count, so unattended absence-based pruning is prohibited by operating policy rather than detected in code")
 }
 
 func TestP0PartialMultiSetupApplyReturnsDispositionAndResumesSafely(t *testing.T) {

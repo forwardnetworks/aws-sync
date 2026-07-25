@@ -433,3 +433,60 @@ func SetupIDsFromSnapshot(snapshot *InventorySnapshot) []string {
 	sort.Strings(result)
 	return result
 }
+
+func adaptCurrentSetup(meta cloudSetupMetadata) (CurrentSetup, error) {
+	current := CurrentSetup{
+		SetupID: meta.setupID,
+		Metadata: SetupMetadata{
+			CloudType:           strings.TrimSpace(meta.cloudType),
+			ProxyServerID:       strings.TrimSpace(meta.proxyServerID),
+			RegionToProxyServer: stringMap(meta.regionToProxyServer),
+			Regions:             make(map[string]int64, len(meta.regions)),
+		},
+		Accounts: make([]SetupAccount, 0, len(meta.assumeRoleInfos)),
+	}
+	for region, regionMeta := range meta.regions {
+		current.Metadata.Regions[region] = regionMeta.TestInstant
+	}
+	for row, info := range meta.assumeRoleInfos {
+		accountID, roleARN, err := parseCloudSetupAccountInfo(info, meta.setupID, row+1)
+		if err != nil {
+			return CurrentSetup{}, err
+		}
+		accountName := strings.TrimSpace(info.AccountName)
+		if accountName == "" {
+			accountName = accountID.String()
+		}
+		current.Accounts = append(current.Accounts, SetupAccount{
+			AccountID:   accountID,
+			AccountName: accountName,
+			RoleARN:     roleARN,
+			ExternalID:  strings.TrimSpace(info.ExternalID),
+			Enabled:     info.Enabled,
+		})
+	}
+	return current, nil
+}
+
+func patchPayloadFromDesired(desired DesiredSetup) api.PatchPayload {
+	payload := api.PatchPayload{
+		Type:                  desired.Metadata.CloudType,
+		Name:                  desired.SetupID.String(),
+		Regions:               cloneInt64Map(desired.Metadata.Regions),
+		RegionToProxyServerID: cloneStringMap(desired.Metadata.RegionToProxyServer),
+		AssumeRoleInfos:       make([]api.AssumeRoleInfo, 0, len(desired.Accounts)),
+	}
+	if desired.Metadata.ProxyServerID != "" {
+		payload.ProxyServerID = desired.Metadata.ProxyServerID
+	}
+	for _, account := range desired.Accounts {
+		payload.AssumeRoleInfos = append(payload.AssumeRoleInfos, api.AssumeRoleInfo{
+			AccountID:   account.AccountID.String(),
+			AccountName: account.AccountName,
+			RoleArn:     account.RoleARN.String(),
+			ExternalID:  account.ExternalID,
+			Enabled:     account.Enabled,
+		})
+	}
+	return payload
+}

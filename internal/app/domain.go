@@ -220,3 +220,126 @@ type DiscoveredAccount struct {
 	HasOrganizationalID bool
 	Membership          DesiredMembership
 }
+
+// SetupAccount is the typed account state used by the reconciliation engine.
+type SetupAccount struct {
+	AccountID   AccountID
+	AccountName string
+	RoleARN     RoleARN
+	ExternalID  string
+	Enabled     bool
+}
+
+// SetupMetadata contains the setup-level fields controlled by reconciliation.
+type SetupMetadata struct {
+	CloudType           string
+	ProxyServerID       string
+	RegionToProxyServer map[string]string
+	Regions             map[string]int64
+}
+
+// CurrentSetup is the typed Forward state supplied to ComputeDesired.
+type CurrentSetup struct {
+	SetupID  SetupID
+	Metadata SetupMetadata
+	Accounts []SetupAccount
+}
+
+// DesiredSetup is the immutable target produced by ComputeDesired.
+type DesiredSetup struct {
+	SetupID  SetupID
+	Metadata SetupMetadata
+	Accounts []SetupAccount
+}
+
+// ReconcilePolicyKind is the tag identifying how inventory affects membership.
+type ReconcilePolicyKind string
+
+const (
+	Additive           ReconcilePolicyKind = "Additive"
+	CompleteInventory  ReconcilePolicyKind = "CompleteInventory"
+	ExplicitOperations ReconcilePolicyKind = "ExplicitOperations"
+)
+
+// OrganizationEvidencePolicy records how a policy treats missing NQE
+// Organizations evidence without reintroducing interacting CLI booleans.
+type OrganizationEvidencePolicy string
+
+const (
+	RequireOrganizationEvidence      OrganizationEvidencePolicy = "RequireOrganizationEvidence"
+	AllowMissingOrganizationEvidence OrganizationEvidencePolicy = "AllowMissingOrganizationEvidence"
+	ReviewedAuthoritativeInventory   OrganizationEvidencePolicy = "ReviewedAuthoritativeInventory"
+)
+
+// ExplicitAccountOperation is an account operation supplied by an
+// ExplicitOperations policy. Value is used by Rename, RotateExternalID, and
+// ChangeRole.
+type ExplicitAccountOperation struct {
+	Kind      ChangeKind
+	AccountID AccountID
+	Value     string
+}
+
+// ReconcilePolicy is a tagged reconciliation policy. PlanningInstant is
+// mandatory: ComputeDesired never consults a clock or supplies a fallback.
+type ReconcilePolicy struct {
+	Kind                 ReconcilePolicyKind
+	PlanningInstant      time.Time
+	OrganizationEvidence OrganizationEvidencePolicy
+	DefaultRoleName      string
+	UniformExternalID    *string
+	ExternalIDByAccount  map[AccountID]string
+	Operations           []ExplicitAccountOperation
+}
+
+// ChangeKind enumerates field-level changes emitted by ComputeDesired.
+type ChangeKind string
+
+const (
+	ChangeAdd              ChangeKind = "Add"
+	ChangeEnable           ChangeKind = "Enable"
+	ChangeDisable          ChangeKind = "Disable"
+	ChangeRemove           ChangeKind = "Remove"
+	ChangeRename           ChangeKind = "Rename"
+	ChangeRotateExternalID ChangeKind = "RotateExternalID"
+	ChangeRole             ChangeKind = "ChangeRole"
+)
+
+// AccountChange contains the before/after account state for one field-level
+// classification. Before is nil for Add and After is nil for Remove.
+type AccountChange struct {
+	AccountID AccountID
+	Before    *SetupAccount
+	After     *SetupAccount
+}
+
+// SetupMetadataChange classifies a setup-level field change.
+type SetupMetadataChange struct {
+	Field  string
+	Before any
+	After  any
+}
+
+// ChangeSet is the field-level diff between CurrentSetup and DesiredSetup.
+// One account may appear in more than one field slice.
+type ChangeSet struct {
+	Add              []AccountChange
+	Enable           []AccountChange
+	Disable          []AccountChange
+	Remove           []AccountChange
+	Rename           []AccountChange
+	RotateExternalID []AccountChange
+	ChangeRole       []AccountChange
+	SetupMetadata    []SetupMetadataChange
+}
+
+func (c ChangeSet) Empty() bool {
+	return len(c.Add) == 0 &&
+		len(c.Enable) == 0 &&
+		len(c.Disable) == 0 &&
+		len(c.Remove) == 0 &&
+		len(c.Rename) == 0 &&
+		len(c.RotateExternalID) == 0 &&
+		len(c.ChangeRole) == 0 &&
+		len(c.SetupMetadata) == 0
+}

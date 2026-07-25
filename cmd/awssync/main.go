@@ -72,6 +72,13 @@ func newRootCommand() *cobra.Command {
 			apply := flagBool(cmd, v, "apply")
 			yes := flagBool(cmd, v, "yes")
 			snapshotID := flagString(cmd, v, "snapshot-id")
+			planningInstant := time.Now().UTC()
+			policy := app.ReconcilePolicyFromLegacyFlags(
+				flagBool(cmd, v, "prune-missing"),
+				false,
+				flagBool(cmd, v, "allow-no-org-evidence"),
+				planningInstant,
+			)
 			if apply && !yes && term.IsTerminal(int(os.Stdin.Fd())) {
 				preview := app.Config{
 					Host:               v.GetString("host"),
@@ -95,6 +102,7 @@ func newRootCommand() *cobra.Command {
 					PruneMissing:       flagBool(cmd, v, "prune-missing"),
 					MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
 					ExternalIDFile:     flagString(cmd, v, "external-id-file"),
+					Policy:             policy,
 					PinSnapshot:        true,
 					AllowMalformedRows: flagBool(cmd, v, "allow-malformed-rows"),
 				}
@@ -134,6 +142,7 @@ func newRootCommand() *cobra.Command {
 				PruneMissing:       flagBool(cmd, v, "prune-missing"),
 				MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
 				ExternalIDFile:     flagString(cmd, v, "external-id-file"),
+				Policy:             policy,
 				PinSnapshot:        true,
 				AllowMalformedRows: flagBool(cmd, v, "allow-malformed-rows"),
 			}
@@ -193,6 +202,7 @@ func newSafeSyncCommand(v *viper.Viper) *cobra.Command {
 				return err
 			}
 			const maxSnapshotAge = 24 * time.Hour
+			planningInstant := time.Now().UTC()
 			base := app.Config{
 				Host:           v.GetString("host"),
 				Username:       v.GetString("username"),
@@ -203,6 +213,12 @@ func newSafeSyncCommand(v *viper.Viper) *cobra.Command {
 				Insecure:       v.GetBool("insecure"),
 				Timeout:        v.GetDuration("timeout"),
 				MaxSnapshotAge: maxSnapshotAge,
+				Policy: app.ReconcilePolicyFromLegacyFlags(
+					false,
+					false,
+					false,
+					planningInstant,
+				),
 			}
 			preflight, err := app.Preflight(cmd.Context(), base)
 			if err != nil {
@@ -428,6 +444,7 @@ func newPreflightCommand(v *viper.Viper) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			planningInstant := time.Now().UTC()
 			summary, err := app.Preflight(cmd.Context(), app.Config{
 				Host:               v.GetString("host"),
 				Username:           v.GetString("username"),
@@ -447,6 +464,12 @@ func newPreflightCommand(v *viper.Viper) *cobra.Command {
 				MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
 				ExternalIDFile:     flagString(cmd, v, "external-id-file"),
 				AllowMalformedRows: flagBool(cmd, v, "allow-malformed-rows"),
+				Policy: app.ReconcilePolicyFromLegacyFlags(
+					flagBool(cmd, v, "prune-missing"),
+					false,
+					flagBool(cmd, v, "allow-no-org-evidence"),
+					planningInstant,
+				),
 			})
 			if err != nil {
 				return err
@@ -808,6 +831,7 @@ func newSyncAccountsCommand(v *viper.Viper) *cobra.Command {
 				return err
 			}
 			apply := flagBool(cmd, v, "apply")
+			planningInstant := time.Now().UTC()
 			if err := confirmApply(apply, flagBool(cmd, v, "yes"), os.Stdin, os.Stderr); err != nil {
 				return err
 			}
@@ -827,6 +851,12 @@ func newSyncAccountsCommand(v *viper.Viper) *cobra.Command {
 				MaxRemovals:       flagInt(cmd, v, "max-removals"),
 				MaxRemovalPercent: flagFloat64(cmd, v, "max-removal-percent"),
 				ExternalIDFile:    flagString(cmd, v, "external-id-file"),
+				Policy: app.ReconcilePolicyFromLegacyFlags(
+					false,
+					true,
+					false,
+					planningInstant,
+				),
 			}, accounts)
 			if err != nil {
 				return err
@@ -865,6 +895,12 @@ func newServeWebhookCommand(v *viper.Viper) *cobra.Command {
 			if flagBool(cmd, v, "apply") && !flagBool(cmd, v, "yes") {
 				return fmt.Errorf("serve-webhook with --apply requires --yes")
 			}
+			policy := app.ReconcilePolicyFromLegacyFlags(
+				flagBool(cmd, v, "prune-missing"),
+				false,
+				flagBool(cmd, v, "allow-no-org-evidence"),
+				time.Time{},
+			)
 			srv, err := webhook.New(webhook.Config{
 				Listen:        flagString(cmd, v, "listen"),
 				Path:          flagString(cmd, v, "path"),
@@ -892,6 +928,7 @@ func newServeWebhookCommand(v *viper.Viper) *cobra.Command {
 					MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
 					ExternalIDFile:     flagString(cmd, v, "external-id-file"),
 					AllowMalformedRows: flagBool(cmd, v, "allow-malformed-rows"),
+					Policy:             policy,
 				},
 			})
 			if err != nil {

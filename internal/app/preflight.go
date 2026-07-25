@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/forwardnetworks/aws-sync/internal/api"
 )
@@ -33,6 +34,7 @@ type PreflightCheck struct {
 }
 
 func Preflight(ctx context.Context, cfg Config) (*PreflightSummary, error) {
+	cfg = prepareReconcileConfig(cfg, time.Now().UTC())
 	if err := validateRemovalLimitValues(cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
 		return nil, err
 	}

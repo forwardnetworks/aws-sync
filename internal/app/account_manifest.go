@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/forwardnetworks/aws-sync/internal/api"
 )
@@ -66,6 +67,14 @@ func RunAWSAccountManifest(ctx context.Context, cfg AWSOrganizationConfig, accou
 }
 
 func SyncAWSAccountManifest(ctx context.Context, cfg Config, accounts []AWSOrganizationAccount) (*Summary, error) {
+	cfg.AuthoritativeInput = true
+	if cfg.Policy.Kind == "" {
+		cfg.Policy = ReconcilePolicyFromLegacyFlags(false, true, cfg.AllowNoOrgEvidence, time.Now().UTC())
+	} else {
+		cfg.Policy.Kind = CompleteInventory
+		cfg.Policy.OrganizationEvidence = ReviewedAuthoritativeInventory
+		cfg = prepareReconcileConfig(cfg, time.Now().UTC())
+	}
 	setupIDs := cleanSetupIDs(cfg.SetupIDs)
 	if len(setupIDs) != 1 {
 		return nil, fmt.Errorf("account-manifest sync requires exactly one --setup-id")
@@ -81,7 +90,6 @@ func SyncAWSAccountManifest(ctx context.Context, cfg Config, accounts []AWSOrgan
 	}
 	cfg.NetworkID = networkID
 	cfg.Source = "account_manifest"
-	cfg.AuthoritativeInput = true
 
 	cloudAccounts, err := client.CloudAccounts(ctx, networkID)
 	if err != nil {
