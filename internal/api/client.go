@@ -387,11 +387,59 @@ func (c *Client) ListSnapshots(ctx context.Context, networkID string) ([]Snapsho
 	if strings.TrimSpace(networkID) == "" {
 		return nil, fmt.Errorf("network ID is required")
 	}
-	var snapshots NetworkSnapshots
-	if err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/networks/%s/snapshots?includeArchived=true", networkID), nil, &snapshots); err != nil {
-		return nil, err
+	var allSnapshots []SnapshotInfo
+	seenSnapshotIDs := make(map[string]int)
+	var previousPage []SnapshotInfo
+	for offset := 0; ; offset += PageLimit {
+		var page NetworkSnapshots
+		endpointPath := fmt.Sprintf(
+			"/networks/%s/snapshots?includeArchived=true&offset=%d&limit=%d",
+			networkID,
+			offset,
+			PageLimit,
+		)
+		if err := c.doJSON(ctx, http.MethodGet, endpointPath, nil, &page); err != nil {
+			return nil, err
+		}
+		if len(page.Snapshots) > PageLimit {
+			return nil, fmt.Errorf("list snapshots returned %d entries at offset %d, exceeding requested limit %d", len(page.Snapshots), offset, PageLimit)
+		}
+		if offset > 0 && sameSnapshotPage(previousPage, page.Snapshots) {
+			return nil, fmt.Errorf("list snapshots pagination repeated the page at offset %d", offset)
+		}
+		for _, snapshot := range page.Snapshots {
+			snapshotID := strings.TrimSpace(snapshot.ID)
+			if snapshotID == "" {
+				continue
+			}
+			if firstOffset, ok := seenSnapshotIDs[snapshotID]; ok {
+				return nil, fmt.Errorf(
+					"list snapshots pagination repeated snapshot %s at offset %d (first seen at offset %d)",
+					snapshotID,
+					offset,
+					firstOffset,
+				)
+			}
+			seenSnapshotIDs[snapshotID] = offset
+		}
+		allSnapshots = append(allSnapshots, page.Snapshots...)
+		if len(page.Snapshots) < PageLimit {
+			return allSnapshots, nil
+		}
+		previousPage = append(previousPage[:0], page.Snapshots...)
 	}
-	return snapshots.Snapshots, nil
+}
+
+func sameSnapshotPage(left, right []SnapshotInfo) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 func (c *Client) CloudAccounts(ctx context.Context, networkID string) ([]CloudAccount, error) {
 	if strings.TrimSpace(networkID) == "" {

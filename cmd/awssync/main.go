@@ -1415,6 +1415,9 @@ func emitResult(cmd *cobra.Command, v *viper.Viper, value any) error {
 func emitStatusHuman(result *monitor.StatusResult) error {
 	fmt.Fprintln(os.Stdout, "Snapshot status")
 	fmt.Fprintf(os.Stdout, "  network: %s\n", result.NetworkID)
+	fmt.Fprintf(os.Stdout, "  observation atomic: %t\n", result.ObservationAtomic)
+	fmt.Fprintf(os.Stdout, "  latest/list consistent: %t\n", result.LatestListConsistent)
+	fmt.Fprintf(os.Stdout, "  observation warning: %s\n", result.ObservationWarning)
 	if result.LatestProcessedSnapshot != nil {
 		fmt.Fprintf(os.Stdout, "  latest processed: %s\n", result.LatestProcessedSnapshot.ID)
 	}

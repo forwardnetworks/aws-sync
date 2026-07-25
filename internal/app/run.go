@@ -845,11 +845,10 @@ func validateSnapshotFreshness(ctx context.Context, client *api.Client, cfg Conf
 }
 
 func validateSnapshotAge(snapshot api.SnapshotInfo, maxAge time.Duration, description string) error {
-	snapshotTime, err := snapshotTimestamp(snapshot)
+	age, err := checkedSnapshotAge(snapshot, description)
 	if err != nil {
-		return fmt.Errorf("check %s snapshot freshness: %w", description, err)
+		return err
 	}
-	age := time.Since(snapshotTime)
 	if age > maxAge {
 		return fmt.Errorf(
 			"%s snapshot %s is stale: age %s exceeds max %s",
@@ -868,11 +867,10 @@ func pinLatestProcessedSnapshot(ctx context.Context, client *api.Client, cfg *Co
 		return fmt.Errorf("pin latest processed snapshot: %w", err)
 	}
 	if cfg.MaxSnapshotAge > 0 {
-		snapshotTime, err := snapshotTimestamp(*latest)
+		age, err := checkedSnapshotAge(*latest, "latest processed")
 		if err != nil {
-			return fmt.Errorf("check latest processed snapshot freshness: %w", err)
+			return err
 		}
-		age := time.Since(snapshotTime)
 		if age > cfg.MaxSnapshotAge {
 			return fmt.Errorf(
 				"latest processed snapshot %s is stale: age %s exceeds max %s; pass --snapshot-id or increase --max-snapshot-age",
@@ -884,6 +882,36 @@ func pinLatestProcessedSnapshot(ctx context.Context, client *api.Client, cfg *Co
 	}
 	cfg.SnapshotID = latest.ID
 	return nil
+}
+
+// snapshotClockSkewTolerance is how far ahead of the local clock a snapshot
+// timestamp may be before it is treated as bad data rather than clock drift.
+// Forward and this host are different machines, so small skew is expected and
+// must not fail a run; anything beyond this indicates a real problem.
+const snapshotClockSkewTolerance = 5 * time.Minute
+
+func checkedSnapshotAge(snapshot api.SnapshotInfo, description string) (time.Duration, error) {
+	snapshotTime, err := snapshotTimestamp(snapshot)
+	if err != nil {
+		return 0, fmt.Errorf("check %s snapshot freshness: %w", description, err)
+	}
+	age := time.Since(snapshotTime)
+	if age < -snapshotClockSkewTolerance {
+		return 0, fmt.Errorf(
+			"%s snapshot %s has invalid future timestamp %s (%s ahead of the local clock, tolerance %s)",
+			description,
+			snapshot.ID,
+			snapshotTime.Format(time.RFC3339),
+			(-age).Round(time.Second),
+			snapshotClockSkewTolerance,
+		)
+	}
+	if age < 0 {
+		// Within tolerance: ordinary NTP drift between this host and Forward.
+		// Treat as freshly processed rather than failing the run.
+		age = 0
+	}
+	return age, nil
 }
 
 func snapshotTimestamp(snapshot api.SnapshotInfo) (time.Time, error) {
