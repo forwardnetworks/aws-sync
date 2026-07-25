@@ -1,13 +1,19 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/forwardnetworks/aws-sync/internal/api"
 )
 
 func TestApplyPlanPatchesReviewedPayload(t *testing.T) {
@@ -69,6 +75,119 @@ func TestApplyPlanPatchesReviewedPayload(t *testing.T) {
 	if _, err := os.Stat(summary.RollbackOutput); err != nil {
 		t.Fatalf("expected rollback file: %v", err)
 	}
+}
+
+func TestApplyPlanAcceptsPreBranchBinaryArtifacts(t *testing.T) {
+	tests := []struct {
+		name        string
+		artifact    string
+		baseline    string
+		wantEnabled bool
+	}{
+		{
+			name:        "generated apply plan",
+			artifact:    "pre_branch_apply_plan.json",
+			baseline:    "pre_branch_apply_plan.rollback.json",
+			wantEnabled: true,
+		},
+		{
+			name:        "generated rollback",
+			artifact:    "pre_branch_apply_plan.rollback.json",
+			baseline:    "pre_branch_apply_plan.json",
+			wantEnabled: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			planPath, targetPayloads := materializePreBranchJSONArtifact(t, test.artifact)
+			_, baselinePayloads := materializePreBranchJSONArtifact(t, test.baseline)
+			baseline := baselinePayloads["setup-a"]
+			current := api.CloudAccount{
+				Type:                  baseline.Type,
+				Name:                  baseline.Name,
+				ProxyServerID:         baseline.ProxyServerID,
+				RegionToProxyServerID: baseline.RegionToProxyServerID,
+				Regions:               make(map[string]api.RegionMeta, len(baseline.Regions)),
+				AssumeRoleInfos:       baseline.AssumeRoleInfos,
+			}
+			for region, instant := range baseline.Regions {
+				current.Regions[region] = api.RegionMeta{TestInstant: instant}
+			}
+
+			patchCount := 0
+			var patched api.PatchPayload
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+					_ = json.NewEncoder(w).Encode([]api.CloudAccount{current})
+				case r.Method == http.MethodPatch && r.URL.Path == "/api/networks/network-1/cloudAccounts/setup-a":
+					patchCount++
+					if err := json.NewDecoder(r.Body).Decode(&patched); err != nil {
+						t.Fatalf("decode PATCH: %v", err)
+					}
+					_, _ = w.Write([]byte(`{}`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			summary, err := ApplyPlan(context.Background(), ApplyPlanConfig{
+				Host:                       server.URL,
+				Username:                   "alice",
+				Password:                   "secret",
+				NetworkID:                  "network-1",
+				PlanPath:                   planPath,
+				APIPrefix:                  "/api",
+				AllowRemovals:              true,
+				MaxRemovals:                2,
+				MaxRemovalPercent:          100,
+				AllowUnattendedDestructive: true,
+			})
+			if err != nil {
+				t.Fatalf("ApplyPlan() with %s: %v", test.artifact, err)
+			}
+			if patchCount != 1 || summary.PatchedSetupCount != 1 {
+				t.Fatalf("patch count = %d, summary = %+v; want one PATCH", patchCount, summary)
+			}
+			if summary.ResultJournalOutput == "" {
+				t.Fatalf("accepted artifact did not produce a result journal: %+v", summary)
+			}
+			want := targetPayloads["setup-a"]
+			if len(patched.AssumeRoleInfos) != 2 || patched.AssumeRoleInfos[1].Enabled != test.wantEnabled {
+				t.Fatalf("old artifact account state was misread: %#v", patched.AssumeRoleInfos)
+			}
+			if patched.ProxyServerID != want.ProxyServerID || patched.Regions["us-east-1"] != 123 {
+				t.Fatalf("old artifact recovery fields were misread: %#v", patched)
+			}
+		})
+	}
+}
+
+func materializePreBranchJSONArtifact(t *testing.T, name string) (string, map[string]api.PatchPayload) {
+	t.Helper()
+	wantSHA256 := map[string]string{
+		"pre_branch_apply_plan.json":          "da2612db7cbd41071306e6a8d28404d36de74ae98ebb9dd9ecf2c28dfa63738e",
+		"pre_branch_apply_plan.rollback.json": "804a9a15d5aab5e5b65ff796990d61ad17bc64df9e59fcc3d5fbf385c94565b5",
+	}[name]
+	data, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatalf("read pre-branch artifact %s: %v", name, err)
+	}
+	data = bytes.TrimSuffix(data, []byte("\n"))
+	digest := sha256.Sum256(data)
+	if got := hex.EncodeToString(digest[:]); got != wantSHA256 {
+		t.Fatalf("pre-branch artifact %s SHA-256 = %s; want %s", name, got, wantSHA256)
+	}
+	var payloads map[string]api.PatchPayload
+	if err := json.Unmarshal(data, &payloads); err != nil {
+		t.Fatalf("decode pre-branch artifact %s in test setup: %v", name, err)
+	}
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("materialize pre-branch artifact %s: %v", name, err)
+	}
+	return path, payloads
 }
 
 func TestApplyPlanSuppressesZeroDiffPatch(t *testing.T) {

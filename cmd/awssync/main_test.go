@@ -278,6 +278,59 @@ func TestApplyPlanCommandHonorsLocalYesFlag(t *testing.T) {
 	}
 }
 
+func TestHumanRecoveryOutputIncludesArtifactPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		emit func() error
+		want []string
+	}{
+		{
+			name: "apply-plan",
+			emit: func() error {
+				return emitApplyPlanHuman(&app.ApplyPlanSummary{
+					RollbackOutput:      "/tmp/plan.rollback.json",
+					RollbackSHA256:      "rollback-digest",
+					ResultJournalOutput: "/tmp/plan.result.json",
+				})
+			},
+			want: []string{
+				"rollback:  /tmp/plan.rollback.json",
+				"rollback sha256: rollback-digest",
+				"journal:   /tmp/plan.result.json",
+			},
+		},
+		{
+			name: "external-id",
+			emit: func() error {
+				return emitExternalIDHuman(&app.ExternalIDSummary{
+					RollbackOutput:      "/tmp/external-id.rollback.json",
+					RollbackSHA256:      "rollback-digest",
+					ResultJournalOutput: "/tmp/external-id.result.json",
+				})
+			},
+			want: []string{
+				"rollback:   /tmp/external-id.rollback.json",
+				"rollback sha256: rollback-digest",
+				"journal:    /tmp/external-id.result.json",
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stdout := captureStdout(t, func() {
+				if err := test.emit(); err != nil {
+					t.Fatalf("emit human output: %v", err)
+				}
+			})
+			for _, want := range test.want {
+				if !strings.Contains(stdout, want) {
+					t.Fatalf("human output missing %q:\n%s", want, stdout)
+				}
+			}
+		})
+	}
+}
+
 func TestSafeSyncRunsPreflightPreviewAndAdditiveApply(t *testing.T) {
 	enabled := false
 	patched := false

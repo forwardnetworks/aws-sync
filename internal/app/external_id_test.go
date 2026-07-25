@@ -280,6 +280,54 @@ func TestChangeExternalIDUsesCSVSetAndClearActions(t *testing.T) {
 	}
 }
 
+func TestChangeExternalIDAcceptsPreBranchCSVArtifact(t *testing.T) {
+	stored := api.CloudAccount{
+		Type: "AWS",
+		Name: "setup-a",
+		AssumeRoleInfos: []api.AssumeRoleInfo{
+			{
+				AccountID:  "111111111111",
+				RoleArn:    "arn:aws:iam::111111111111:role/ForwardRole",
+				ExternalID: "old-external-id",
+				Enabled:    true,
+			},
+			{
+				AccountID:  "222222222222",
+				RoleArn:    "arn:aws:iam::222222222222:role/ForwardRole",
+				ExternalID: "remove-me",
+				Enabled:    false,
+			},
+		},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]api.CloudAccount{stored})
+	}))
+	defer server.Close()
+
+	summary, err := ChangeExternalID(context.Background(), ExternalIDConfig{
+		Host:           server.URL,
+		Username:       "alice",
+		Password:       "secret",
+		NetworkID:      "network-1",
+		SetupID:        "setup-a",
+		ExternalIDFile: filepath.Join("testdata", "pre_branch_external_ids.csv"),
+		Output:         filepath.Join(t.TempDir(), "payload.json"),
+		APIPrefix:      "/api",
+	})
+	if err != nil {
+		t.Fatalf("ChangeExternalID() with pre-branch CSV: %v", err)
+	}
+	if summary.Mode != "file" || summary.SetAccountCount != 1 || summary.ClearedAccountCount != 1 {
+		t.Fatalf("pre-branch CSV was misread: %#v", summary)
+	}
+	if got := summary.Payload.AssumeRoleInfos; got[0].ExternalID != "new-external-id" || got[1].ExternalID != "" {
+		t.Fatalf("pre-branch CSV values were misread: %#v", got)
+	}
+	if summary.PayloadSHA256 != "ac8741e262a2ee661839c6aee67e168557a30488b1b9f0ff37bf8c382ad69d05" {
+		t.Fatalf("current payload SHA-256 = %s; old binary produced ac8741e262a2ee661839c6aee67e168557a30488b1b9f0ff37bf8c382ad69d05", summary.PayloadSHA256)
+	}
+}
+
 func TestLoadExternalIDAssignmentsRejectsUnsafeRows(t *testing.T) {
 	for name, contents := range map[string]string{
 		"blank set":       "account_id,action,external_id\n111111111111,set,\n",

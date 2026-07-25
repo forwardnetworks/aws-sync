@@ -1445,8 +1445,13 @@ func emitApplyPlanHuman(summary *app.ApplyPlanSummary) error {
 	fmt.Fprintf(os.Stdout, "  network:   %s\n", summary.NetworkID)
 	fmt.Fprintf(os.Stdout, "  plan:      %s\n", summary.PlanPath)
 	fmt.Fprintf(os.Stdout, "  patched:   %d (%s)\n", summary.PatchedSetupCount, strings.Join(summary.PatchedSetups, ", "))
-	fmt.Fprintf(os.Stdout, "  rollback:  %s\n", summary.RollbackOutput)
-	fmt.Fprintf(os.Stdout, "  rollback sha256: %s\n", summary.RollbackSHA256)
+	if summary.RollbackOutput != "" {
+		fmt.Fprintf(os.Stdout, "  rollback:  %s\n", summary.RollbackOutput)
+		fmt.Fprintf(os.Stdout, "  rollback sha256: %s\n", summary.RollbackSHA256)
+	}
+	if summary.ResultJournalOutput != "" {
+		fmt.Fprintf(os.Stdout, "  journal:   %s\n", summary.ResultJournalOutput)
+	}
 	return nil
 }
 
@@ -1464,6 +1469,13 @@ func emitExternalIDHuman(summary *app.ExternalIDSummary) error {
 	fmt.Fprintf(os.Stdout, "  patched:    %t\n", summary.Patched)
 	fmt.Fprintf(os.Stdout, "  output:     %s\n", summary.Output)
 	fmt.Fprintf(os.Stdout, "  sha256:     %s\n", summary.PayloadSHA256)
+	if summary.RollbackOutput != "" {
+		fmt.Fprintf(os.Stdout, "  rollback:   %s\n", summary.RollbackOutput)
+		fmt.Fprintf(os.Stdout, "  rollback sha256: %s\n", summary.RollbackSHA256)
+	}
+	if summary.ResultJournalOutput != "" {
+		fmt.Fprintf(os.Stdout, "  journal:    %s\n", summary.ResultJournalOutput)
+	}
 	return nil
 }
 
