@@ -176,6 +176,8 @@ func TestSafeSyncRunsPreflightPreviewAndAdditiveApply(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprintf(w, `{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}`, processedAt)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots":
+			_, _ = fmt.Fprintf(w, `{"snapshots":[{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}]}`, processedAt)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111111111111","Cloud Account Name":"acct-a","Collected?":false}]}`))
@@ -247,6 +249,8 @@ func TestSafeSyncHandlesMultipleSetups(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
 			_, _ = fmt.Fprintf(w, `{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}`, processedAt)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots":
+			_, _ = fmt.Fprintf(w, `{"snapshots":[{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}]}`, processedAt)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			_, _ = w.Write([]byte(`{"items":[
 					{"Cloud Setup ID":"setup-a","Cloud Account ID":"111111111111","Collected?":false},
@@ -303,6 +307,8 @@ func TestSafeSyncRequiresConfirmationOutsideAutomation(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
 			_, _ = fmt.Fprintf(w, `{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}`, processedAt)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots":
+			_, _ = fmt.Fprintf(w, `{"snapshots":[{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}]}`, processedAt)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111111111111","Collected?":false}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
@@ -345,6 +351,8 @@ func TestSafeSyncDoesNotPatchWhenNoChangesAreNeeded(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
 			_, _ = fmt.Fprintf(w, `{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}`, processedAt)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots":
+			_, _ = fmt.Fprintf(w, `{"snapshots":[{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}]}`, processedAt)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111111111111","Collected?":true}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":

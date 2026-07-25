@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -105,7 +106,9 @@ func TestP0WebhookDeliveryAndScopeSafety(t *testing.T) {
 	t.Run("restart retains successful dedupe", func(t *testing.T) {
 		var attempts atomic.Int32
 		attemptCh := make(chan int, 2)
+		statePath := filepath.Join(t.TempDir(), "webhook-state.json")
 		cfg := Config{
+			StatePath: statePath,
 			Run: func(_ context.Context, cfg app.Config) (*app.Summary, error) {
 				attempt := int(attempts.Add(1))
 				attemptCh <- attempt
@@ -316,11 +319,17 @@ func newP0WebhookServer(t *testing.T, cfg Config) *Server {
 			Password: "secret",
 		}
 	}
+	if cfg.StatePath == "" {
+		cfg.StatePath = filepath.Join(t.TempDir(), "webhook-state.json")
+	}
 	cfg.Logger = log.New(io.Discard, "", 0)
 	server, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	t.Cleanup(func() {
+		waitForWebhookStateIdle(t, server)
+	})
 	return server
 }
 

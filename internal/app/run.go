@@ -814,24 +814,43 @@ func defaultManualOutputPath() string {
 }
 
 func validateSnapshotFreshness(ctx context.Context, client *api.Client, cfg Config) error {
-	if cfg.MaxSnapshotAge <= 0 || strings.TrimSpace(cfg.SnapshotID) != "" {
+	if cfg.MaxSnapshotAge <= 0 {
 		return nil
+	}
+	explicitSnapshotID := strings.TrimSpace(cfg.SnapshotID)
+	if explicitSnapshotID != "" {
+		snapshots, err := client.ListSnapshots(ctx, cfg.NetworkID)
+		if err != nil {
+			return fmt.Errorf("check explicit snapshot freshness: %w", err)
+		}
+		for _, snapshot := range snapshots {
+			if strings.TrimSpace(snapshot.ID) != explicitSnapshotID {
+				continue
+			}
+			return validateSnapshotAge(snapshot, cfg.MaxSnapshotAge, "explicit")
+		}
+		return fmt.Errorf("check explicit snapshot freshness: snapshot %s was not found in network %s", explicitSnapshotID, cfg.NetworkID)
 	}
 	latest, err := client.LatestProcessedSnapshot(ctx, cfg.NetworkID)
 	if err != nil {
 		return fmt.Errorf("check latest processed snapshot freshness: %w", err)
 	}
-	snapshotTime, err := snapshotTimestamp(*latest)
+	return validateSnapshotAge(*latest, cfg.MaxSnapshotAge, "latest processed")
+}
+
+func validateSnapshotAge(snapshot api.SnapshotInfo, maxAge time.Duration, description string) error {
+	snapshotTime, err := snapshotTimestamp(snapshot)
 	if err != nil {
-		return fmt.Errorf("check latest processed snapshot freshness: %w", err)
+		return fmt.Errorf("check %s snapshot freshness: %w", description, err)
 	}
 	age := time.Since(snapshotTime)
-	if age > cfg.MaxSnapshotAge {
+	if age > maxAge {
 		return fmt.Errorf(
-			"latest processed snapshot %s is stale: age %s exceeds max %s; pass --snapshot-id or increase --max-snapshot-age",
-			latest.ID,
+			"%s snapshot %s is stale: age %s exceeds max %s",
+			description,
+			snapshot.ID,
 			age.Round(time.Second),
-			cfg.MaxSnapshotAge,
+			maxAge,
 		)
 	}
 	return nil

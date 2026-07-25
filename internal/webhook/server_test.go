@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -55,6 +56,38 @@ func TestHandleEventRequiresBasicAuth(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unexpected status %d", resp.StatusCode)
+	}
+}
+
+func TestNewRequiresBasicAuthWhenApplyEnabled(t *testing.T) {
+	_, err := New(Config{
+		StatePath: filepath.Join(t.TempDir(), "webhook-state.json"),
+		App: app.Config{
+			Host:     "https://fwd.example",
+			Username: "alice",
+			Password: "secret",
+			Apply:    true,
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "Basic authentication") {
+		t.Fatalf("New() error = %v; want apply-mode Basic Auth requirement", err)
+	}
+}
+
+func TestNewRequiresConfiguredNetworkWhenApplyEnabled(t *testing.T) {
+	_, err := New(Config{
+		BasicUsername: "hook",
+		BasicPassword: "secret",
+		StatePath:     filepath.Join(t.TempDir(), "webhook-state.json"),
+		App: app.Config{
+			Host:     "https://fwd.example",
+			Username: "alice",
+			Password: "secret",
+			Apply:    true,
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "network ID is required") {
+		t.Fatalf("New() error = %v; want apply-mode configured-network requirement", err)
 	}
 }
 
@@ -190,15 +223,46 @@ func newTestServer(t *testing.T, cfg Config) (*httptest.Server, *Server) {
 	t.Cleanup(cancel)
 	cfg.Listen = "127.0.0.1:0"
 	cfg.Path = "/forward/snapshot-ready"
+	cfg.StatePath = filepath.Join(t.TempDir(), "webhook-state.json")
 	cfg.Logger = log.New(io.Discard, "", 0)
 	cfg.App = app.Config{Host: "https://fwd.example", Username: "u", Password: "p"}
 	server, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	t.Cleanup(func() {
+		waitForWebhookStateIdle(t, server)
+	})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", server.handleHealthz)
 	mux.HandleFunc(server.cfg.Path, server.handleEvent)
 	go server.worker(ctx)
 	return httptest.NewServer(mux), server
+}
+
+func waitForWebhookStateIdle(t *testing.T, server *Server) {
+	t.Helper()
+	if !server.workerRunning.Load() {
+		processAdmissions.Lock()
+		for _, done := range processAdmissions.byStatePath[server.cfg.StatePath] {
+			close(done)
+		}
+		delete(processAdmissions.byStatePath, server.cfg.StatePath)
+		processAdmissions.Unlock()
+		return
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		processAdmissions.Lock()
+		pending := len(processAdmissions.byStatePath[server.cfg.StatePath])
+		processAdmissions.Unlock()
+		if pending == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("timed out waiting for webhook state writes to finish")
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
 }

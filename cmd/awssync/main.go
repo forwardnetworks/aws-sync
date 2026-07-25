@@ -960,10 +960,12 @@ func newServeWebhookCommand(v *viper.Viper) *cobra.Command {
 				Path:          flagString(cmd, v, "path"),
 				BasicUsername: flagString(cmd, v, "webhook-basic-username"),
 				BasicPassword: flagString(cmd, v, "webhook-basic-password"),
+				StatePath:     flagString(cmd, v, "webhook-state-file"),
 				App: app.Config{
 					Host:                       v.GetString("host"),
 					Username:                   v.GetString("username"),
 					Password:                   password,
+					NetworkID:                  flagString(cmd, v, "network-id"),
 					QueryID:                    flagString(cmd, v, "query-id"),
 					QuerySetupParam:            flagString(cmd, v, "query-setup-param"),
 					SetupIDs:                   flagStringSlice(cmd, v, "setup-id"),
@@ -996,13 +998,16 @@ func newServeWebhookCommand(v *viper.Viper) *cobra.Command {
 	}
 	cmd.Flags().String("listen", ":8080", "listen address for the webhook receiver")
 	cmd.Flags().String("path", "/forward/snapshot-ready", "HTTP path for webhook POST requests")
-	cmd.Flags().String("webhook-basic-username", "", "optional Basic Auth username required on incoming webhook requests")
-	cmd.Flags().String("webhook-basic-password", "", "optional Basic Auth password required on incoming webhook requests")
+	cmd.Flags().String("webhook-basic-username", "", "Basic Auth username required on incoming webhook requests when --apply is enabled")
+	cmd.Flags().String("webhook-basic-password", "", "Basic Auth password required on incoming webhook requests when --apply is enabled")
+	cmd.Flags().String("webhook-state-file", "", "durable dedupe and snapshot-watermark JSON file (defaults to the user config directory)")
+	bindNetworkFlag(v, cmd.Flags())
 	bindProcessingFlags(v, cmd.Flags())
 	mustBind(v, cmd.Flags(), "listen")
 	mustBind(v, cmd.Flags(), "path")
 	mustBind(v, cmd.Flags(), "webhook-basic-username")
 	mustBind(v, cmd.Flags(), "webhook-basic-password")
+	mustBind(v, cmd.Flags(), "webhook-state-file")
 	return cmd
 }
 
