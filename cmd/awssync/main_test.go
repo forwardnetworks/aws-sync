@@ -41,10 +41,10 @@ func TestRootCommandHonorsLocalSnapshotAndOutputFlags(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			seenNQEQuery = r.URL.RawQuery
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111","Cloud Account Name":"acct-a","Collected?":false}]}`))
+			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111111111111","Cloud Account Name":"acct-a","Collected?":false}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[{"name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111:role/ForwardRole","externalId":"Org:99","enabled":true}]}]`))
+			_, _ = w.Write([]byte(`[{"name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111111111111:role/ForwardRole","externalId":"Org:99","enabled":true}]}]`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -151,12 +151,12 @@ func TestSafeSyncRunsPreflightPreviewAndAdditiveApply(t *testing.T) {
 			_, _ = fmt.Fprintf(w, `{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}`, processedAt)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111","Cloud Account Name":"acct-a","Collected?":false}]}`))
+			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111111111111","Cloud Account Name":"acct-a","Collected?":false}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprintf(
 				w,
-				`[{"type":"AWS","name":"setup-a","regions":{"us-east-1":{"testInstant":123}},"assumeRoleInfos":[{"roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":%t}]}]`,
+				`[{"type":"AWS","name":"setup-a","regions":{"us-east-1":{"testInstant":123}},"assumeRoleInfos":[{"roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":%t}]}]`,
 				enabled,
 			)
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/networks/network-1/cloudAccounts/setup-a":
@@ -222,13 +222,13 @@ func TestSafeSyncHandlesMultipleSetups(t *testing.T) {
 			_, _ = fmt.Fprintf(w, `{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}`, processedAt)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			_, _ = w.Write([]byte(`{"items":[
-				{"Cloud Setup ID":"setup-a","Cloud Account ID":"111","Collected?":false},
-				{"Cloud Setup ID":"setup-b","Cloud Account ID":"222","Collected?":false}
+					{"Cloud Setup ID":"setup-a","Cloud Account ID":"111111111111","Collected?":false},
+					{"Cloud Setup ID":"setup-b","Cloud Account ID":"222222222222","Collected?":false}
 			]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			_, _ = w.Write([]byte(`[
-				{"type":"AWS","name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":false}]},
-				{"type":"AWS","name":"setup-b","assumeRoleInfos":[{"roleArn":"arn:aws:iam::222:role/ForwardRole","enabled":false}]}
+				{"type":"AWS","name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":false}]},
+				{"type":"AWS","name":"setup-b","assumeRoleInfos":[{"roleArn":"arn:aws:iam::222222222222:role/ForwardRole","enabled":false}]}
 			]`))
 		case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/api/networks/network-1/cloudAccounts/"):
 			setupID := strings.TrimPrefix(r.URL.Path, "/api/networks/network-1/cloudAccounts/")
@@ -277,9 +277,9 @@ func TestSafeSyncRequiresConfirmationOutsideAutomation(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
 			_, _ = fmt.Fprintf(w, `{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}`, processedAt)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
-			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111","Collected?":false}]}`))
+			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111111111111","Collected?":false}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
-			_, _ = w.Write([]byte(`[{"type":"AWS","name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":false}]}]`))
+			_, _ = w.Write([]byte(`[{"type":"AWS","name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":false}]}]`))
 		case r.Method == http.MethodPatch:
 			patched = true
 			_, _ = w.Write([]byte(`{}`))
@@ -319,9 +319,9 @@ func TestSafeSyncDoesNotPatchWhenNoChangesAreNeeded(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
 			_, _ = fmt.Fprintf(w, `{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}`, processedAt)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
-			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111","Collected?":true}]}`))
+			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111111111111","Collected?":true}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
-			_, _ = w.Write([]byte(`[{"type":"AWS","name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true}]}]`))
+			_, _ = w.Write([]byte(`[{"type":"AWS","name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true}]}]`))
 		case r.Method == http.MethodPatch:
 			patched = true
 			_, _ = w.Write([]byte(`{}`))
@@ -359,7 +359,7 @@ func TestSafeSyncStopsWhenPreflightIsNotReady(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
-			_, _ = w.Write([]byte(`[{"type":"AWS","name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true}]}]`))
+			_, _ = w.Write([]byte(`[{"type":"AWS","name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true}]}]`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
 			_, _ = w.Write([]byte(`{"id":"stale","state":"PROCESSED","processedAt":"2020-01-01T00:00:00Z"}`))
 		case r.Method == http.MethodPatch:

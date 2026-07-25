@@ -5,13 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 
 	"github.com/forwardnetworks/aws-sync/internal/api"
 )
-
-var awsAccountIDPattern = regexp.MustCompile(`^[0-9]{12}$`)
 
 type AWSAccountManifestEntry struct {
 	ID   string `json:"id"`
@@ -43,7 +40,7 @@ func LoadAWSAccountManifest(path string) ([]AWSOrganizationAccount, error) {
 	accounts := make([]AWSOrganizationAccount, 0, len(entries))
 	for index, entry := range entries {
 		accountID := strings.TrimSpace(entry.ID)
-		if !awsAccountIDPattern.MatchString(accountID) {
+		if _, err := NewAccountID(accountID); err != nil {
 			return nil, fmt.Errorf("accounts file entry %d has invalid AWS account ID %q; expected 12 digits", index+1, entry.ID)
 		}
 		if seen[accountID] {
@@ -73,6 +70,7 @@ func SyncAWSAccountManifest(ctx context.Context, cfg Config, accounts []AWSOrgan
 	if len(setupIDs) != 1 {
 		return nil, fmt.Errorf("account-manifest sync requires exactly one --setup-id")
 	}
+	setupID := setupIDs[0]
 	client, err := api.NewClient(cfg.Host, cfg.APIPrefix, cfg.Username, cfg.Password, cfg.Insecure, cfg.Timeout)
 	if err != nil {
 		return nil, err
@@ -89,14 +87,21 @@ func SyncAWSAccountManifest(ctx context.Context, cfg Config, accounts []AWSOrgan
 	if err != nil {
 		return nil, err
 	}
-	items := make([]map[string]any, 0, len(accounts))
-	for _, account := range accounts {
-		items = append(items, map[string]any{
-			"Cloud Setup ID":     setupIDs[0],
-			"Cloud Account ID":   account.ID,
-			"Cloud Account Name": account.Name,
-			"Collected?":         false,
-		})
+	discovered, err := adaptManifestAccountsToSetupRows(accounts, setupID)
+	if err != nil {
+		return nil, err
 	}
-	return runPlannedSync(ctx, cfg, client, items, cloudAccounts)
+	snapshot := &InventorySnapshot{
+		Source:             "account_manifest",
+		Completeness:       InventoryCompletenessComplete,
+		NetworkID:          networkID,
+		ObservedRowCount:   len(discovered),
+		DiscoveredAccounts: discovered,
+	}
+	if len(discovered) == 0 {
+		snapshot.SelectedSetupIDs = []SetupID{}
+	} else {
+		snapshot.SelectedSetupIDs = []SetupID{SetupID(setupID)}
+	}
+	return runPlannedSyncFromSnapshot(ctx, cfg, client, snapshot, cloudAccounts)
 }

@@ -17,21 +17,21 @@ import (
 
 func TestBuildPlanGroupsMultipleSetups(t *testing.T) {
 	items := []map[string]any{
-		{"Setup ID": "setup-a", "Cloud Account ID": "111", "Cloud Account Name": "acct-a"},
-		{"Setup ID": "setup-a", "Cloud Account ID": "111", "Cloud Account Name": "acct-a-dup"},
-		{"Setup ID": "setup-b", "Cloud Account ID": "222", "Cloud Account Name": "acct-b"},
+		{"Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Cloud Account Name": "acct-a"},
+		{"Setup ID": "setup-a", "Cloud Account ID": "333333333333", "Cloud Account Name": "acct-a-dup"},
+		{"Setup ID": "setup-b", "Cloud Account ID": "222222222222", "Cloud Account Name": "acct-b"},
 	}
 	cloudAccounts := []api.CloudAccount{
 		{
 			Name:            "setup-a",
 			ProxyServerID:   "proxy-1",
 			Regions:         map[string]api.RegionMeta{"us-east-1": {TestInstant: 123}},
-			AssumeRoleInfos: []api.AssumeRoleInfo{{RoleArn: "arn:aws:iam::111:role/ForwardRole", ExternalID: "Org:55", Enabled: true}},
+			AssumeRoleInfos: []api.AssumeRoleInfo{{RoleArn: "arn:aws:iam::111111111111:role/ForwardRole", ExternalID: "Org:55", Enabled: true}},
 		},
 		{
 			Name:            "setup-b",
 			Regions:         map[string]api.RegionMeta{"us-west-2": {TestInstant: 456}},
-			AssumeRoleInfos: []api.AssumeRoleInfo{{RoleArn: "arn:aws:iam::222:role/ForwardRole", Enabled: true}},
+			AssumeRoleInfos: []api.AssumeRoleInfo{{RoleArn: "arn:aws:iam::222222222222:role/ForwardRole", Enabled: true}},
 		},
 	}
 
@@ -42,8 +42,8 @@ func TestBuildPlanGroupsMultipleSetups(t *testing.T) {
 	if len(plan.Setups) != 2 {
 		t.Fatalf("expected 2 setups, got %d", len(plan.Setups))
 	}
-	if len(plan.Payloads["setup-a"].AssumeRoleInfos) != 1 {
-		t.Fatalf("expected deduped accounts for setup-a, got %#v", plan.Payloads["setup-a"].AssumeRoleInfos)
+	if len(plan.Payloads["setup-a"].AssumeRoleInfos) != 2 {
+		t.Fatalf("unexpected number of accounts in setup-a: %#v", plan.Payloads["setup-a"].AssumeRoleInfos)
 	}
 	if plan.Payloads["setup-a"].ProxyServerID != "proxy-1" {
 		t.Fatalf("unexpected proxy server id: %#v", plan.Payloads["setup-a"])
@@ -57,8 +57,24 @@ func TestBuildPlanGroupsMultipleSetups(t *testing.T) {
 	if !plan.Setups[0].ExternalIDConfigured {
 		t.Fatalf("expected setup-a to report external id configured: %#v", plan.Setups[0])
 	}
-	if len(plan.Setups[0].AddedAccounts) != 0 || len(plan.Setups[0].RemovedAccounts) != 0 {
-		t.Fatalf("expected no account diff: %#v", plan.Setups[0])
+	if len(plan.Setups[0].AddedAccounts) != 1 || len(plan.Setups[0].RemovedAccounts) != 0 || len(plan.Setups[0].UnchangedAccounts) != 1 {
+		t.Fatalf("unexpected account diff for setup-a: %#v", plan.Setups[0])
+	}
+}
+
+func TestBuildPlanRejectsDuplicateNQEAccountIDInSetup(t *testing.T) {
+	items := []map[string]any{
+		{"Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Cloud Account Name": "acct-a"},
+		{"Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Cloud Account Name": "acct-a-dup"},
+	}
+	cloudAccounts := []api.CloudAccount{{
+		Name:            "setup-a",
+		AssumeRoleInfos: []api.AssumeRoleInfo{{RoleArn: "arn:aws:iam::111111111111:role/ForwardRole", Enabled: true}},
+	}}
+
+	_, err := buildPlan(items, cloudAccounts, "custom-query", nil)
+	if err == nil || !strings.Contains(err.Error(), "NQE row 2 duplicates account 111111111111 in setup setup-a") {
+		t.Fatalf("expected duplicate error, got %v", err)
 	}
 }
 
@@ -287,11 +303,11 @@ func TestRunAWSOrganizationsRejectsExistingForwardSetup(t *testing.T) {
 }
 
 func TestBuildPlanPreservesRegionProxyMap(t *testing.T) {
-	items := []map[string]any{{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111", "Cloud Account Name": "acct-a"}}
+	items := []map[string]any{{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Cloud Account Name": "acct-a"}}
 	cloudAccounts := []api.CloudAccount{{
 		Name:                  "setup-a",
 		RegionToProxyServerID: map[string]string{"us-east-1": "proxy-east"},
-		AssumeRoleInfos:       []api.AssumeRoleInfo{{RoleArn: "arn:aws:iam::111:role/ForwardRole", Enabled: true}},
+		AssumeRoleInfos:       []api.AssumeRoleInfo{{RoleArn: "arn:aws:iam::111111111111:role/ForwardRole", Enabled: true}},
 	}}
 
 	plan, err := buildPlan(items, cloudAccounts, "", nil)
@@ -305,13 +321,13 @@ func TestBuildPlanPreservesRegionProxyMap(t *testing.T) {
 
 func TestBuildPlanSupportsRoleARNsWithoutExternalID(t *testing.T) {
 	items := []map[string]any{
-		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111", "Cloud Account Name": "kept"},
-		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "222", "Cloud Account Name": "added"},
+		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Cloud Account Name": "kept"},
+		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "222222222222", "Cloud Account Name": "added"},
 	}
 	cloudAccounts := []api.CloudAccount{{
 		Name: "setup-a",
 		AssumeRoleInfos: []api.AssumeRoleInfo{
-			{AccountID: "111", AccountName: "kept", RoleArn: "arn:aws:iam::111:role/ForwardRole", Enabled: true},
+			{AccountID: "111111111111", AccountName: "kept", RoleArn: "arn:aws:iam::111111111111:role/ForwardRole", Enabled: true},
 		},
 	}}
 
@@ -330,10 +346,10 @@ func TestBuildPlanSupportsRoleARNsWithoutExternalID(t *testing.T) {
 	if infos[0].ExternalID != "" || infos[1].ExternalID != "" {
 		t.Fatalf("external ID should not be added when absent from setup: %#v", infos)
 	}
-	if infos[1].RoleArn != "arn:aws:iam::222:role/ForwardRole" {
+	if infos[1].RoleArn != "arn:aws:iam::222222222222:role/ForwardRole" {
 		t.Fatalf("unexpected generated role ARN: %#v", infos[1])
 	}
-	if infos[1].AccountID != "222" || infos[1].AccountName != "added" || !infos[1].Enabled {
+	if infos[1].AccountID != "222222222222" || infos[1].AccountName != "added" || !infos[1].Enabled {
 		t.Fatalf("unexpected added account entry: %#v", infos[1])
 	}
 }
@@ -434,12 +450,12 @@ func TestRunBlocksGovCloudRemovalWithoutOrgEvidenceEvenWithBreakGlassFlags(t *te
 
 func TestBuildPlanFiltersRequestedSetupIDs(t *testing.T) {
 	items := []map[string]any{
-		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111", "Cloud Account Name": "acct-a"},
-		{"Cloud Setup ID": "setup-b", "Cloud Account ID": "222", "Cloud Account Name": "acct-b"},
+		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Cloud Account Name": "acct-a"},
+		{"Cloud Setup ID": "setup-b", "Cloud Account ID": "222222222222", "Cloud Account Name": "acct-b"},
 	}
 	cloudAccounts := []api.CloudAccount{
-		{Name: "setup-a", AssumeRoleInfos: []api.AssumeRoleInfo{{RoleArn: "arn:aws:iam::111:role/ForwardRole", Enabled: true}}},
-		{Name: "setup-b", AssumeRoleInfos: []api.AssumeRoleInfo{{RoleArn: "arn:aws:iam::222:role/ForwardRole", Enabled: true}}},
+		{Name: "setup-a", AssumeRoleInfos: []api.AssumeRoleInfo{{RoleArn: "arn:aws:iam::111111111111:role/ForwardRole", Enabled: true}}},
+		{Name: "setup-b", AssumeRoleInfos: []api.AssumeRoleInfo{{RoleArn: "arn:aws:iam::222222222222:role/ForwardRole", Enabled: true}}},
 	}
 
 	plan, err := buildPlan(items, cloudAccounts, "", []string{"setup-b"})
@@ -452,11 +468,11 @@ func TestBuildPlanFiltersRequestedSetupIDs(t *testing.T) {
 }
 
 func TestBuildPlanPreservesNonOrgExternalID(t *testing.T) {
-	items := []map[string]any{{"Setup ID": "setup-a", "Cloud Account ID": "111", "Cloud Account Name": "acct-a"}}
+	items := []map[string]any{{"Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Cloud Account Name": "acct-a"}}
 	cloudAccounts := []api.CloudAccount{{
 		Name: "setup-a",
 		AssumeRoleInfos: []api.AssumeRoleInfo{{
-			RoleArn:    "arn:aws:iam::111:role/ForwardRole",
+			RoleArn:    "arn:aws:iam::111111111111:role/ForwardRole",
 			ExternalID: "customer-managed-external-id",
 			Enabled:    true,
 		}},
@@ -564,12 +580,12 @@ func TestBuildPlanForConfigLoadsPerAccountExternalIDFile(t *testing.T) {
 
 func TestBuildPlanAllowsMultipleSetupsWithDefaultQueryWhenRowsHaveSetupIDs(t *testing.T) {
 	items := []map[string]any{
-		{"Setup ID": "setup-a", "Cloud Account ID": "111", "Cloud Account Name": "acct-a"},
-		{"Setup ID": "setup-b", "Cloud Account ID": "222", "Cloud Account Name": "acct-b"},
+		{"Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Cloud Account Name": "acct-a"},
+		{"Setup ID": "setup-b", "Cloud Account ID": "222222222222", "Cloud Account Name": "acct-b"},
 	}
 	cloudAccounts := []api.CloudAccount{
-		{Name: "setup-a", AssumeRoleInfos: []api.AssumeRoleInfo{{RoleArn: "arn:aws:iam::111:role/ForwardRole", Enabled: true}}},
-		{Name: "setup-b", AssumeRoleInfos: []api.AssumeRoleInfo{{RoleArn: "arn:aws:iam::222:role/ForwardRole", Enabled: true}}},
+		{Name: "setup-a", AssumeRoleInfos: []api.AssumeRoleInfo{{RoleArn: "arn:aws:iam::111111111111:role/ForwardRole", Enabled: true}}},
+		{Name: "setup-b", AssumeRoleInfos: []api.AssumeRoleInfo{{RoleArn: "arn:aws:iam::222222222222:role/ForwardRole", Enabled: true}}},
 	}
 
 	plan, err := buildPlan(items, cloudAccounts, DefaultQueryID, nil)
@@ -582,7 +598,7 @@ func TestBuildPlanAllowsMultipleSetupsWithDefaultQueryWhenRowsHaveSetupIDs(t *te
 }
 
 func TestBuildPlanRejectsMultipleSetupsWithoutSetupIDs(t *testing.T) {
-	items := []map[string]any{{"Cloud Account ID": "111", "Cloud Account Name": "acct-a"}}
+	items := []map[string]any{{"Cloud Account ID": "111111111111", "Cloud Account Name": "acct-a"}}
 	_, err := buildPlan(items, []api.CloudAccount{{Name: "setup-a"}, {Name: "setup-b"}}, DefaultQueryID, nil)
 	if err == nil || !strings.Contains(err.Error(), "no setup ID data") {
 		t.Fatalf("unexpected error: %v", err)
@@ -591,14 +607,14 @@ func TestBuildPlanRejectsMultipleSetupsWithoutSetupIDs(t *testing.T) {
 
 func TestBuildPlanReportsAccountDiff(t *testing.T) {
 	items := []map[string]any{
-		{"Setup ID": "setup-a", "Cloud Account ID": "111", "Cloud Account Name": "kept"},
-		{"Setup ID": "setup-a", "Cloud Account ID": "222", "Cloud Account Name": "added"},
+		{"Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Cloud Account Name": "kept"},
+		{"Setup ID": "setup-a", "Cloud Account ID": "222222222222", "Cloud Account Name": "added"},
 	}
 	cloudAccounts := []api.CloudAccount{{
 		Name: "setup-a",
 		AssumeRoleInfos: []api.AssumeRoleInfo{
-			{AccountID: "111", AccountName: "kept", RoleArn: "arn:aws:iam::111:role/ForwardRole", Enabled: true},
-			{AccountID: "333", AccountName: "removed", RoleArn: "arn:aws:iam::333:role/ForwardRole", Enabled: true},
+			{AccountID: "111111111111", AccountName: "kept", RoleArn: "arn:aws:iam::111111111111:role/ForwardRole", Enabled: true},
+			{AccountID: "333333333333", AccountName: "removed", RoleArn: "arn:aws:iam::333333333333:role/ForwardRole", Enabled: true},
 		},
 	}}
 
@@ -607,13 +623,13 @@ func TestBuildPlanReportsAccountDiff(t *testing.T) {
 		t.Fatalf("buildPlan() error = %v", err)
 	}
 	setup := plan.Setups[0]
-	if len(setup.AddedAccounts) != 1 || setup.AddedAccounts[0].AccountID != "222" {
+	if len(setup.AddedAccounts) != 1 || setup.AddedAccounts[0].AccountID != "222222222222" {
 		t.Fatalf("unexpected added accounts: %#v", setup.AddedAccounts)
 	}
-	if len(setup.RemovedAccounts) != 1 || setup.RemovedAccounts[0].AccountID != "333" {
+	if len(setup.RemovedAccounts) != 1 || setup.RemovedAccounts[0].AccountID != "333333333333" {
 		t.Fatalf("unexpected removed accounts: %#v", setup.RemovedAccounts)
 	}
-	if len(setup.UnchangedAccounts) != 1 || setup.UnchangedAccounts[0].AccountID != "111" {
+	if len(setup.UnchangedAccounts) != 1 || setup.UnchangedAccounts[0].AccountID != "111111111111" {
 		t.Fatalf("unexpected unchanged accounts: %#v", setup.UnchangedAccounts)
 	}
 	if !plan.HasRemovals() {
@@ -708,13 +724,13 @@ func TestBuildPlanForConfigIsAdditiveWhenNQEReturnsOnlyEnabledSubset(t *testing.
 
 func TestBuildPlanCountsOnlyNewUncollectedAccountsAsCandidates(t *testing.T) {
 	items := []map[string]any{
-		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111", "Collected?": true},
-		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "222", "Collected?": false},
-		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "333", "Collected?": false},
+		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Collected?": true},
+		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "222222222222", "Collected?": false},
+		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "333333333333", "Collected?": false},
 	}
 	current := []api.AssumeRoleInfo{
-		{AccountID: "111", RoleArn: "arn:aws:iam::111:role/ForwardRole", Enabled: true},
-		{AccountID: "222", RoleArn: "arn:aws:iam::222:role/ForwardRole", Enabled: false},
+		{AccountID: "111111111111", RoleArn: "arn:aws:iam::111111111111:role/ForwardRole", Enabled: true},
+		{AccountID: "222222222222", RoleArn: "arn:aws:iam::222222222222:role/ForwardRole", Enabled: false},
 	}
 	plan, err := buildPlan(items, []api.CloudAccount{{Name: "setup-a", AssumeRoleInfos: current}}, "", nil)
 	if err != nil {
@@ -722,30 +738,24 @@ func TestBuildPlanCountsOnlyNewUncollectedAccountsAsCandidates(t *testing.T) {
 	}
 	setup := plan.Setups[0]
 	if setup.DiscoveredCandidateCount != 1 {
-		t.Fatalf("expected only new account 333 to be a candidate, got %d", setup.DiscoveredCandidateCount)
+		t.Fatalf("expected only new account 333333333333 to be a candidate, got %d", setup.DiscoveredCandidateCount)
 	}
-	if len(setup.AddedAccounts) != 1 || setup.AddedAccounts[0].AccountID != "333" {
+	if len(setup.AddedAccounts) != 1 || setup.AddedAccounts[0].AccountID != "333333333333" {
 		t.Fatalf("unexpected added accounts: %#v", setup.AddedAccounts)
 	}
 }
 
-func TestBuildPlanIgnoresMalformedNQEAccountID(t *testing.T) {
+func TestBuildPlanRejectsMalformedNQEAccountID(t *testing.T) {
 	items := []map[string]any{
-		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111", "Collected?": true},
+		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Collected?": true},
 		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "setup-a", "Collected?": false},
 	}
-	plan, err := buildPlan(items, []api.CloudAccount{{
+	_, err := buildPlan(items, []api.CloudAccount{{
 		Name:            "setup-a",
-		AssumeRoleInfos: []api.AssumeRoleInfo{{AccountID: "111", RoleArn: "arn:aws:iam::111:role/ForwardRole", Enabled: true}},
+		AssumeRoleInfos: []api.AssumeRoleInfo{{AccountID: "111111111111", RoleArn: "arn:aws:iam::111111111111:role/ForwardRole", Enabled: true}},
 	}}, "", nil)
-	if err != nil {
-		t.Fatalf("buildPlan() error = %v", err)
-	}
-	if len(plan.IgnoredAccounts) != 1 || plan.IgnoredAccounts[0].AccountID != "setup-a" {
-		t.Fatalf("expected malformed placeholder to be reported, got %#v", plan.IgnoredAccounts)
-	}
-	if len(plan.Payloads["setup-a"].AssumeRoleInfos) != 1 {
-		t.Fatalf("malformed placeholder reached PATCH payload: %#v", plan.Payloads["setup-a"])
+	if err == nil || !strings.Contains(err.Error(), "invalid AWS account ID \"setup-a\"; expected exactly 12 digits") {
+		t.Fatalf("expected NQE ID validation error, got %v", err)
 	}
 }
 
@@ -760,10 +770,10 @@ func TestRunWritesPayloadAndPatchesWhenApplyEnabled(t *testing.T) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"items":[{"Setup ID":"setup-a","Cloud Account ID":"111","Cloud Account Name":"acct-a"}]}`))
+			_, _ = w.Write([]byte(`{"items":[{"Setup ID":"setup-a","Cloud Account ID":"111111111111","Cloud Account Name":"acct-a"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[{"name":"setup-a","regions":{"us-east-1":{"testInstant":123}},"assumeRoleInfos":[{"roleArn":"arn:aws:iam::111:role/ForwardRole","externalId":"Org:99","enabled":true}],"proxyServerId":"proxy-1"}]`))
+			_, _ = w.Write([]byte(`[{"name":"setup-a","regions":{"us-east-1":{"testInstant":123}},"assumeRoleInfos":[{"roleArn":"arn:aws:iam::111111111111:role/ForwardRole","externalId":"Org:99","enabled":true}],"proxyServerId":"proxy-1"}]`))
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/networks/network-1/cloudAccounts/setup-a":
 			patched = append(patched, r.URL.Path)
 			w.Header().Set("Content-Type", "application/json")
@@ -815,7 +825,7 @@ func TestRunWritesPayloadAndPatchesWhenApplyEnabled(t *testing.T) {
 	if err := json.Unmarshal(data, &payloads); err != nil {
 		t.Fatalf("decode output: %v", err)
 	}
-	if payloads["setup-a"].AssumeRoleInfos[0].RoleArn != "arn:aws:iam::111:role/ForwardRole" {
+	if payloads["setup-a"].AssumeRoleInfos[0].RoleArn != "arn:aws:iam::111111111111:role/ForwardRole" {
 		t.Fatalf("unexpected payload: %#v", payloads["setup-a"])
 	}
 	if payloads["setup-a"].ProxyServerID != "proxy-1" {
@@ -829,10 +839,10 @@ func TestRunBlocksApplyWhenReviewedPayloadChanges(t *testing.T) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"items":[{"Setup ID":"setup-a","Cloud Account ID":"111","Cloud Account Name":"acct-a"}]}`))
+			_, _ = w.Write([]byte(`{"items":[{"Setup ID":"setup-a","Cloud Account ID":"111111111111","Cloud Account Name":"acct-a"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[{"name":"setup-a","regions":{"us-east-1":{"testInstant":123}},"assumeRoleInfos":[{"roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true}]}]`))
+			_, _ = w.Write([]byte(`[{"name":"setup-a","regions":{"us-east-1":{"testInstant":123}},"assumeRoleInfos":[{"roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true}]}]`))
 		case r.Method == http.MethodPatch:
 			patched = true
 			_, _ = w.Write([]byte(`{}`))
@@ -872,10 +882,10 @@ func TestRunWritesManualPayloadWhenRequested(t *testing.T) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"items":[{"Setup ID":"setup-a","Cloud Account ID":"111","Cloud Account Name":"acct-a"}]}`))
+			_, _ = w.Write([]byte(`{"items":[{"Setup ID":"setup-a","Cloud Account ID":"111111111111","Cloud Account Name":"acct-a"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[{"name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111:role/ForwardRole","externalId":"Org:99","enabled":true}],"proxyServerId":"proxy-1"}]`))
+			_, _ = w.Write([]byte(`[{"name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111111111111:role/ForwardRole","externalId":"Org:99","enabled":true}],"proxyServerId":"proxy-1"}]`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -920,11 +930,11 @@ func TestRunWritesManualPayloadWhenRequested(t *testing.T) {
 	if len(accounts) != 1 {
 		t.Fatalf("expected 1 account in manual output, got %#v", accounts)
 	}
-	if accounts[0].RoleArn != "arn:aws:iam::111:role/ForwardRole" {
+	if accounts[0].RoleArn != "arn:aws:iam::111111111111:role/ForwardRole" {
 		t.Fatalf("unexpected manual role arn: %#v", accounts[0])
 	}
-	if accounts[0].AccountID != "111" {
-		t.Fatalf("expected account 111 in manual output, got %#v", accounts[0])
+	if accounts[0].AccountID != "111111111111" {
+		t.Fatalf("expected account 111111111111 in manual output, got %#v", accounts[0])
 	}
 }
 
@@ -939,10 +949,10 @@ func TestRunBlocksApplyWithRemovalsUnlessAllowed(t *testing.T) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"items":[{"Setup ID":"setup-a","Cloud Account ID":"111","Cloud Account Name":"acct-a"}]}`))
+			_, _ = w.Write([]byte(`{"items":[{"Setup ID":"setup-a","Cloud Account ID":"111111111111","Cloud Account Name":"acct-a"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[{"name":"setup-a","assumeRoleInfos":[{"accountId":"111","roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true},{"accountId":"222","roleArn":"arn:aws:iam::222:role/ForwardRole","enabled":true}]}]`))
+			_, _ = w.Write([]byte(`[{"name":"setup-a","assumeRoleInfos":[{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true},{"accountId":"222222222222","roleArn":"arn:aws:iam::222222222222:role/ForwardRole","enabled":true}]}]`))
 		case r.Method == http.MethodPatch:
 			patched = append(patched, r.URL.Path)
 			w.Header().Set("Content-Type", "application/json")
@@ -984,10 +994,10 @@ func TestRunAllowsApplyWithRemovalsWhenExplicitlyAllowed(t *testing.T) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"items":[{"Setup ID":"setup-a","Cloud Account ID":"111","Cloud Account Name":"acct-a"}]}`))
+			_, _ = w.Write([]byte(`{"items":[{"Setup ID":"setup-a","Cloud Account ID":"111111111111","Cloud Account Name":"acct-a"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[{"name":"setup-a","assumeRoleInfos":[{"accountId":"111","roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true},{"accountId":"222","roleArn":"arn:aws:iam::222:role/ForwardRole","enabled":true}]}]`))
+			_, _ = w.Write([]byte(`[{"name":"setup-a","assumeRoleInfos":[{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true},{"accountId":"222222222222","roleArn":"arn:aws:iam::222222222222:role/ForwardRole","enabled":true}]}]`))
 		case r.Method == http.MethodPatch:
 			patched = append(patched, r.URL.Path)
 			w.Header().Set("Content-Type", "application/json")
@@ -1037,10 +1047,10 @@ func TestRunBlocksApplyWithNoOrgEvidenceWhenNoCandidatesVisibleAndExplicitNoEvid
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"items":[{"Setup ID":"setup-a","Cloud Account ID":"111","Cloud Account Name":"acct-a","Collected?":true}]}`))
+			_, _ = w.Write([]byte(`{"items":[{"Setup ID":"setup-a","Cloud Account ID":"111111111111","Cloud Account Name":"acct-a","Collected?":true}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[{"name":"setup-a","assumeRoleInfos":[{"accountId":"111","roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true},{"accountId":"222","roleArn":"arn:aws:iam::222:role/ForwardRole","enabled":true}]}]`))
+			_, _ = w.Write([]byte(`[{"name":"setup-a","assumeRoleInfos":[{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true},{"accountId":"222222222222","roleArn":"arn:aws:iam::222222222222:role/ForwardRole","enabled":true}]}]`))
 		case r.Method == http.MethodPatch:
 			patched = append(patched, r.URL.Path)
 			w.Header().Set("Content-Type", "application/json")
@@ -1086,10 +1096,10 @@ func TestRunAllowsApplyWithNoOrgEvidenceWhenExplicitNoEvidenceFlagSet(t *testing
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"items":[{"Setup ID":"setup-a","Cloud Account ID":"111","Cloud Account Name":"acct-a","Collected?":true}]}`))
+			_, _ = w.Write([]byte(`{"items":[{"Setup ID":"setup-a","Cloud Account ID":"111111111111","Cloud Account Name":"acct-a","Collected?":true}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[{"name":"setup-a","assumeRoleInfos":[{"accountId":"111","roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true},{"accountId":"222","roleArn":"arn:aws:iam::222:role/ForwardRole","enabled":true}]}]`))
+			_, _ = w.Write([]byte(`[{"name":"setup-a","assumeRoleInfos":[{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true},{"accountId":"222222222222","roleArn":"arn:aws:iam::222222222222:role/ForwardRole","enabled":true}]}]`))
 		case r.Method == http.MethodPatch:
 			patched = append(patched, r.URL.Path)
 			w.Header().Set("Content-Type", "application/json")
@@ -1140,14 +1150,14 @@ func TestRunBlocksApplyWithNoOrgEvidenceInMultiSetup(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"items":[
-				{"Cloud Setup ID":"setup-a","Cloud Account ID":"111","Cloud Account Name":"acct-a","Collected?":false},
-				{"Cloud Setup ID":"setup-b","Cloud Account ID":"222","Cloud Account Name":"acct-b","Collected?":true}
+				{"Cloud Setup ID":"setup-a","Cloud Account ID":"111111111111","Cloud Account Name":"acct-a","Collected?":false},
+				{"Cloud Setup ID":"setup-b","Cloud Account ID":"222222222222","Cloud Account Name":"acct-b","Collected?":true}
 			]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[
-				{"name":"setup-a","assumeRoleInfos":[{"accountId":"111","roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true}]},
-				{"name":"setup-b","assumeRoleInfos":[{"accountId":"222","roleArn":"arn:aws:iam::222:role/ForwardRole","enabled":true},{"accountId":"333","roleArn":"arn:aws:iam::333:role/ForwardRole","enabled":true}]}
+				{"name":"setup-a","assumeRoleInfos":[{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true}]},
+				{"name":"setup-b","assumeRoleInfos":[{"accountId":"222222222222","roleArn":"arn:aws:iam::222222222222:role/ForwardRole","enabled":true},{"accountId":"333333333333","roleArn":"arn:aws:iam::333333333333:role/ForwardRole","enabled":true}]}
 			]`))
 		case r.Method == http.MethodPatch:
 			patched = append(patched, r.URL.Path)
@@ -1199,14 +1209,14 @@ func TestRunAllowsApplyWithNoOrgEvidenceWhenExplicitNoEvidenceFlagSetForMultiSet
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"items":[
-				{"Cloud Setup ID":"setup-a","Cloud Account ID":"111","Cloud Account Name":"acct-a","Collected?":false},
-				{"Cloud Setup ID":"setup-b","Cloud Account ID":"222","Cloud Account Name":"acct-b","Collected?":true}
+				{"Cloud Setup ID":"setup-a","Cloud Account ID":"111111111111","Cloud Account Name":"acct-a","Collected?":false},
+				{"Cloud Setup ID":"setup-b","Cloud Account ID":"222222222222","Cloud Account Name":"acct-b","Collected?":true}
 			]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[
-				{"name":"setup-a","assumeRoleInfos":[{"accountId":"111","roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true}]},
-				{"name":"setup-b","assumeRoleInfos":[{"accountId":"222","roleArn":"arn:aws:iam::222:role/ForwardRole","enabled":true},{"accountId":"333","roleArn":"arn:aws:iam::333:role/ForwardRole","enabled":true}]}
+				{"name":"setup-a","assumeRoleInfos":[{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true}]},
+				{"name":"setup-b","assumeRoleInfos":[{"accountId":"222222222222","roleArn":"arn:aws:iam::222222222222:role/ForwardRole","enabled":true},{"accountId":"333333333333","roleArn":"arn:aws:iam::333333333333:role/ForwardRole","enabled":true}]}
 			]`))
 		case r.Method == http.MethodPatch:
 			patched = append(patched, r.URL.Path)
@@ -1264,10 +1274,10 @@ func TestRunBlocksRemovalsWhenNoCandidatesVisible(t *testing.T) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111","Cloud Account Name":"acct-a","Collected?":true}]}`))
+			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111111111111","Cloud Account Name":"acct-a","Collected?":true}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[{"name":"setup-a","assumeRoleInfos":[{"accountId":"111","roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true},{"accountId":"222","roleArn":"arn:aws:iam::222:role/ForwardRole","enabled":true}]}]`))
+			_, _ = w.Write([]byte(`[{"name":"setup-a","assumeRoleInfos":[{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true},{"accountId":"222222222222","roleArn":"arn:aws:iam::222222222222:role/ForwardRole","enabled":true}]}]`))
 		case r.Method == http.MethodPatch:
 			patched = append(patched, r.URL.Path)
 			w.Header().Set("Content-Type", "application/json")
@@ -1313,10 +1323,10 @@ func TestRunUsesExplicitSnapshotIDForNQE(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			seenQuery = r.URL.RawQuery
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"items":[{"Setup ID":"setup-a","Cloud Account ID":"111","Cloud Account Name":"acct-a"}]}`))
+			_, _ = w.Write([]byte(`{"items":[{"Setup ID":"setup-a","Cloud Account ID":"111111111111","Cloud Account Name":"acct-a"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[{"name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true}]}]`))
+			_, _ = w.Write([]byte(`[{"name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true}]}]`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -1352,10 +1362,10 @@ func TestRunPinsLatestProcessedSnapshotForCLI(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			seenQuery = r.URL.RawQuery
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111","Collected?":true}]}`))
+			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111111111111","Collected?":true}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[{"name":"setup-a","assumeRoleInfos":[{"accountId":"111","roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true}]}]`))
+			_, _ = w.Write([]byte(`[{"name":"setup-a","assumeRoleInfos":[{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true}]}]`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -1413,10 +1423,10 @@ func TestRunRejectsStaleLatestProcessedSnapshot(t *testing.T) {
 }
 
 func TestRunFallsBackToSingleSetupWhenQueryLacksSetupID(t *testing.T) {
-	items := []map[string]any{{"Cloud Account ID": "111", "Cloud Account Name": "acct-a"}}
+	items := []map[string]any{{"Cloud Account ID": "111111111111", "Cloud Account Name": "acct-a"}}
 	cloudAccounts := []api.CloudAccount{{
 		Name:            "setup-only",
-		AssumeRoleInfos: []api.AssumeRoleInfo{{RoleArn: "arn:aws:iam::111:role/ForwardRole", Enabled: true}},
+		AssumeRoleInfos: []api.AssumeRoleInfo{{RoleArn: "arn:aws:iam::111111111111:role/ForwardRole", Enabled: true}},
 	}}
 	plan, err := buildPlan(items, cloudAccounts, DefaultQueryID+"-customized", nil)
 	if err != nil {

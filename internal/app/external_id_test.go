@@ -21,12 +21,12 @@ func TestChangeExternalIDSetsAndClearsWithoutNQE(t *testing.T) {
 			"us-east-1": {TestInstant: 123},
 		},
 		AssumeRoleInfos: []api.AssumeRoleInfo{{
-			AccountID:   "111",
+			AccountID:   "111111111111",
 			AccountName: "acct-a",
-			RoleArn:     "arn:aws:iam::111:role/ForwardRole",
+			RoleArn:     "arn:aws:iam::111111111111:role/ForwardRole",
 			Enabled:     true,
 		}, {
-			AccountID:   "222",
+			AccountID:   "222222222222",
 			AccountName: "failed-account",
 			ErrorMsg:    "role is not configured",
 			Enabled:     false,

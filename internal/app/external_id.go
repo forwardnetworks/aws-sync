@@ -143,7 +143,7 @@ func ChangeExternalID(ctx context.Context, cfg ExternalIDConfig) (*ExternalIDSum
 		mode = "selected"
 		for _, rawAccountID := range cfg.AccountIDs {
 			accountID := strings.TrimSpace(rawAccountID)
-			if !awsAccountIDPattern.MatchString(accountID) {
+			if _, err := NewAccountID(accountID); err != nil {
 				return nil, fmt.Errorf("invalid AWS account ID %q; expected 12 digits", rawAccountID)
 			}
 			if _, exists := selected[accountID]; exists {
