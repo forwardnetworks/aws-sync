@@ -76,6 +76,37 @@ func TestGuardAndApplyRequiresCompletenessForAbsenceBasedRemoval(t *testing.T) {
 	}
 }
 
+func TestGuardAndApplyRejectsNQEDerivedRemovalIntent(t *testing.T) {
+	intent := gatewayTestIntent(t, t.TempDir(), []gatewayTestSetup{{
+		setupID: "setup-a",
+		baseline: []api.AssumeRoleInfo{
+			gatewayAssumeRole("111111111111", true),
+			gatewayAssumeRole("222222222222", true),
+		},
+		target:  []api.AssumeRoleInfo{gatewayAssumeRole("111111111111", true)},
+		changes: ChangeSet{Remove: []AccountChange{{AccountID: AccountID("222222222222")}}},
+	}})
+	intent.state.snapshot.Source = "nqe"
+	digest, err := computeApplyIntentDigest(intent.state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent.state.digest = digest
+
+	_, err = GuardAndApply(context.Background(), nil, intent, ApplyAuthorization{
+		PlanDigest:                 intent.Digest(),
+		Approved:                   true,
+		AllowDestructive:           true,
+		MaxRemovals:                1,
+		MaxRemovalPercent:          100,
+		AllowNoCandidates:          true,
+		AllowUnattendedDestructive: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing CompleteInventory reconciliation for NQE observed inventory") {
+		t.Fatalf("GuardAndApply() error = %v; want NQE removal refusal", err)
+	}
+}
+
 func TestGuardAndApplyGovCloudRemovalUsesBaselinePartition(t *testing.T) {
 	govAccount := gatewayAssumeRole("111111111111", true)
 	govAccount.RoleArn = "arn:aws-us-gov:iam::111111111111:role/ForwardRole"

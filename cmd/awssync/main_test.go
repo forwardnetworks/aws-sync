@@ -29,6 +29,27 @@ func TestRootCommandIncludesBuildMetadataInVersion(t *testing.T) {
 	}
 }
 
+func TestNQECommandsRefusePruneMissingAtCLIBoundary(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "root", args: []string{"--prune-missing"}},
+		{name: "preflight", args: []string{"preflight", "--prune-missing"}},
+		{name: "webhook", args: []string{"serve-webhook", "--prune-missing"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := newRootCommand()
+			cmd.SetArgs(test.args)
+			if err := cmd.Execute(); err == nil || err.Error() != pruneMissingRefusal {
+				t.Fatalf("Execute() error = %v; want exactly %q", err, pruneMissingRefusal)
+			}
+		})
+	}
+}
+
 func TestRootCommandHonorsLocalSnapshotAndOutputFlags(t *testing.T) {
 	var seenNQEQuery string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

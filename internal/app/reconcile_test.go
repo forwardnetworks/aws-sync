@@ -159,28 +159,47 @@ func TestComputeDesiredCompletenessInvariantByPolicy(t *testing.T) {
 	}
 }
 
-func TestLegacyFlagsMapToTaggedPolicies(t *testing.T) {
-	instant := time.Unix(123, 0).UTC()
-	tests := []struct {
-		name          string
-		prune         bool
-		authoritative bool
-		allowNoOrg    bool
-		wantKind      ReconcilePolicyKind
-		wantEvidence  OrganizationEvidencePolicy
-	}{
-		{"default", false, false, false, Additive, RequireOrganizationEvidence},
-		{"prune", true, false, false, CompleteInventory, RequireOrganizationEvidence},
-		{"allow no org", false, false, true, Additive, AllowMissingOrganizationEvidence},
-		{"authoritative", false, true, false, CompleteInventory, ReviewedAuthoritativeInventory},
+func TestComputeDesiredRejectsCompleteInventoryForNQESource(t *testing.T) {
+	current := CurrentSetup{
+		SetupID:  SetupID("setup-a"),
+		Metadata: SetupMetadata{CloudType: "AWS"},
+		Accounts: []SetupAccount{
+			reconcileTestAccount(t, "111111111111", "keep", "ForwardRole", "", true),
+			reconcileTestAccount(t, "222222222222", "would-be-removed", "ForwardRole", "", true),
+		},
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			policy := ReconcilePolicyFromLegacyFlags(test.prune, test.authoritative, test.allowNoOrg, instant)
-			if policy.Kind != test.wantKind || policy.OrganizationEvidence != test.wantEvidence || !policy.PlanningInstant.Equal(instant) {
-				t.Fatalf("unexpected policy: %#v", policy)
-			}
-		})
+	snapshot := InventorySnapshot{
+		Source:       "nqe",
+		Completeness: InventoryCompletenessComplete,
+		DiscoveredAccounts: []DiscoveredAccount{{
+			SetupID: SetupID("setup-a"), AccountID: AccountID("111111111111"), AccountName: "keep",
+		}},
+	}
+	policy := NewAuthoritativeManifestReconcilePolicy(time.Unix(123, 0).UTC())
+
+	_, _, err := ComputeDesired(current, snapshot, policy)
+	if err == nil || !strings.Contains(err.Error(), "refusing CompleteInventory reconciliation for NQE observed inventory") {
+		t.Fatalf("ComputeDesired() error = %v; want NQE CompleteInventory refusal", err)
+	}
+}
+
+func TestReconcilePolicyConstructorsKeepNQEAdditiveAndManifestComplete(t *testing.T) {
+	instant := time.Unix(123, 0).UTC()
+
+	for _, allowNoOrg := range []bool{false, true} {
+		policy := NewNQEReconcilePolicy(allowNoOrg, instant)
+		wantEvidence := RequireOrganizationEvidence
+		if allowNoOrg {
+			wantEvidence = AllowMissingOrganizationEvidence
+		}
+		if policy.Kind != Additive || policy.OrganizationEvidence != wantEvidence || !policy.PlanningInstant.Equal(instant) {
+			t.Fatalf("unexpected NQE policy: %#v", policy)
+		}
+	}
+
+	manifest := NewAuthoritativeManifestReconcilePolicy(instant)
+	if manifest.Kind != CompleteInventory || manifest.OrganizationEvidence != ReviewedAuthoritativeInventory || !manifest.PlanningInstant.Equal(instant) {
+		t.Fatalf("unexpected manifest policy: %#v", manifest)
 	}
 }
 

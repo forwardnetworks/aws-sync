@@ -66,7 +66,6 @@ type Config struct {
 	MaxRemovalPercent          float64
 	AllowNoCandidates          bool
 	AllowNoOrgEvidence         bool
-	PruneMissing               bool
 	MaxSnapshotAge             time.Duration
 	ExternalIDFile             string
 	Source                     string
@@ -81,35 +80,37 @@ type Config struct {
 	AuthorizationActor         string
 }
 
-// ReconcilePolicyFromLegacyFlags is the CLI-boundary compatibility mapping for
-// the legacy reconciliation booleans.
-func ReconcilePolicyFromLegacyFlags(pruneMissing, authoritativeInput, allowNoOrgEvidence bool, planningInstant time.Time) ReconcilePolicy {
-	kind := Additive
-	if pruneMissing || authoritativeInput {
-		kind = CompleteInventory
-	}
+// NewNQEReconcilePolicy returns the only policy permitted for observed NQE
+// inventory. NQE absence is not an account-lifecycle signal.
+func NewNQEReconcilePolicy(allowNoOrgEvidence bool, planningInstant time.Time) ReconcilePolicy {
 	evidence := RequireOrganizationEvidence
 	if allowNoOrgEvidence {
 		evidence = AllowMissingOrganizationEvidence
 	}
-	if authoritativeInput {
-		evidence = ReviewedAuthoritativeInventory
-	}
 	return ReconcilePolicy{
-		Kind:                 kind,
+		Kind:                 Additive,
 		PlanningInstant:      planningInstant,
 		OrganizationEvidence: evidence,
 	}
 }
 
+// NewAuthoritativeManifestReconcilePolicy returns complete-inventory semantics
+// for an explicitly reviewed account manifest.
+func NewAuthoritativeManifestReconcilePolicy(planningInstant time.Time) ReconcilePolicy {
+	return ReconcilePolicy{
+		Kind:                 CompleteInventory,
+		PlanningInstant:      planningInstant,
+		OrganizationEvidence: ReviewedAuthoritativeInventory,
+	}
+}
+
 func prepareReconcileConfig(cfg Config, planningInstant time.Time) Config {
 	if cfg.Policy.Kind == "" {
-		cfg.Policy = ReconcilePolicyFromLegacyFlags(
-			cfg.PruneMissing,
-			cfg.AuthoritativeInput,
-			cfg.AllowNoOrgEvidence,
-			planningInstant,
-		)
+		if cfg.AuthoritativeInput {
+			cfg.Policy = NewAuthoritativeManifestReconcilePolicy(planningInstant)
+		} else {
+			cfg.Policy = NewNQEReconcilePolicy(cfg.AllowNoOrgEvidence, planningInstant)
+		}
 	} else {
 		if cfg.Policy.PlanningInstant.IsZero() {
 			cfg.Policy.PlanningInstant = planningInstant
@@ -1162,6 +1163,7 @@ func buildPlan(items []map[string]any, cloudAccounts []api.CloudAccount, queryID
 	if err != nil {
 		return nil, err
 	}
+	snapshot.Source = "test_complete_inventory"
 	_ = queryID
 	return buildPlanFromSnapshot(snapshot, cloudAccounts, requestedSetupIDs, buildPlanOptions{
 		Policy: ReconcilePolicy{
@@ -1184,6 +1186,7 @@ func buildPlanForConfig(cfg Config, items []map[string]any, cloudAccounts []api.
 	if err != nil {
 		return nil, err
 	}
+	snapshot.Source = "nqe"
 	return buildPlanFromSnapshot(snapshot, cloudAccounts, cfg.SetupIDs, planOptions)
 }
 
@@ -1216,6 +1219,7 @@ func buildPlanWithOptions(items []map[string]any, cloudAccounts []api.CloudAccou
 	if err != nil {
 		return nil, err
 	}
+	snapshot.Source = "test_complete_inventory"
 	convertedAssignments, err := adaptExternalIDAssignments(opts.ExternalIDByAccount)
 	if err != nil {
 		return nil, err

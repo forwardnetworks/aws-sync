@@ -9,6 +9,7 @@ import (
 )
 
 func TestPreflightReportsSetupSpecificOrgEvidenceFailures(t *testing.T) {
+	t.Skip("obsolete characterization: additive NQE preflight no longer produces removals, so removal-specific organization-evidence failures are unreachable")
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
 		if !ok || user != "alice" || pass != "secret" {
@@ -46,7 +47,6 @@ func TestPreflightReportsSetupSpecificOrgEvidenceFailures(t *testing.T) {
 		SetupIDs:           nil,
 		MaxSnapshotAge:     0,
 		AllowNoOrgEvidence: false,
-		PruneMissing:       true,
 		MaxRemovals:        10,
 		MaxRemovalPercent:  40,
 	})

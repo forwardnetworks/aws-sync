@@ -99,7 +99,7 @@ flowchart TD
     D -->|Yes| F[Forward Terraform provider]
     D -->|No or incomplete GovCloud inventory| G[Reviewed account manifest]
     B --> H[Preflight, preview, confirm, rollback, apply]
-    C --> I[Verify lifecycle outside Forward, then use explicit removal guards]
+    C --> I[Review a complete manifest, then use sync-accounts]
 ```
 
 Use `safe-sync` for ordinary account additions and unchecked accounts. The remaining commands are expert workflows:
@@ -108,7 +108,7 @@ Use `safe-sync` for ordinary account additions and unchecked accounts. The remai
 | --- | --- |
 | Routine existing-setup sync | `safe-sync` |
 | Scheduled or JSON automation | Standard `awssync` command |
-| Independently verified account removal | Standard command with the reviewed removal workflow |
+| Independently verified account removal | `sync-accounts` with a complete reviewed manifest |
 | New commercial AWS Organization | Forward Terraform provider; `discover-org` is the manual fallback |
 | No Organizations access | `onboard-accounts` or `sync-accounts` with a complete manifest |
 | GovCloud | [GovCloud workflow](docs/govcloud-workflow.md) |
@@ -131,23 +131,15 @@ Fix the reported condition and run the same command again. Do not add removal ov
 
 ## Account Removal Is a Separate Expert Workflow
 
-`safe-sync` has no removal switches. Removing an account requires an operator to confirm outside Forward that the AWS account was closed, retired, or removed from the intended Organization.
+`safe-sync` and the standard NQE workflow cannot remove accounts. NQE reports observed snapshot inventory, which combines successfully collected accounts with accounts visible through Organizations metadata; absence is not proof of deletion. The recognized `--prune-missing` flag now fails with an explanation instead of producing a plan.
 
-The standard NQE workflow requires all of the following before a removal can be applied:
-
-- `--prune-missing`
-- `--allow-removals`
-- a nonzero `--max-removals`
-- a nonzero `--max-removal-percent`
-- additional Organizations-evidence overrides when applicable
-
-Prefer `sync-accounts` with a complete authoritative manifest for lifecycle removals. Never remove an account only because its collection fails.
+Use `sync-accounts` with a complete, human-reviewed manifest for lifecycle removals. Applying a manifest removal still requires `--allow-removals`, nonzero `--max-removals` and `--max-removal-percent` ceilings, and the normal destructive-apply authorization. Never remove an account only because its collection fails.
 
 See [AWS account sync procedure](docs/aws-account-sync-procedure.md#apply-the-sync) for the reviewed removal commands and rollback procedure.
 
 ## Automation
 
-For scheduled additive-only operation, use the standard command without any prune or removal flags:
+For scheduled additive-only operation, use the standard command without removal flags:
 
 ```bash
 ./awssync-linux-amd64 \
@@ -178,6 +170,7 @@ Existing per-account External IDs are preserved during ordinary synchronization.
 ## Safety Guarantees
 
 - Routine NQE synchronization is additive; accounts missing from NQE remain configured.
+- NQE-derived plans cannot select `CompleteInventory` removal semantics; `--prune-missing` is retained only to return an actionable refusal.
 - `safe-sync` cannot remove accounts.
 - Human-readable output is the default; `--json` is for standard-command automation.
 - The latest processed snapshot is pinned before planning.

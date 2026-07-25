@@ -21,6 +21,9 @@ func ComputeDesired(current CurrentSetup, snapshot InventorySnapshot, policy Rec
 	default:
 		return DesiredSetup{}, ChangeSet{}, fmt.Errorf("invalid reconcile policy kind %q", policy.Kind)
 	}
+	if strings.EqualFold(strings.TrimSpace(snapshot.Source), "nqe") && policy.Kind == CompleteInventory {
+		return DesiredSetup{}, ChangeSet{}, nqeCompleteInventoryError()
+	}
 	if policy.Kind == CompleteInventory && !snapshot.Completeness.Proven() {
 		return DesiredSetup{}, ChangeSet{}, incompleteInventoryPolicyError(snapshot)
 	}
@@ -95,13 +98,17 @@ func ComputeDesired(current CurrentSetup, snapshot InventorySnapshot, policy Rec
 	return desired, changes, nil
 }
 
+func nqeCompleteInventoryError() error {
+	return fmt.Errorf("refusing CompleteInventory reconciliation for NQE observed inventory: absence cannot prove an account should be deleted; use sync-accounts with a reviewed manifest instead")
+}
+
 func incompleteInventoryPolicyError(snapshot InventorySnapshot) error {
 	reason := strings.TrimSpace(snapshot.CompletenessReason)
 	if reason == "" {
 		reason = "inventory completeness is unproven"
 	}
 	return fmt.Errorf(
-		"refusing absence-based removals because inventory completeness is unproven: %s; observed_count=%d PageLimit=%d. Fix the NQE query/data and rerun --prune-missing only after a proven complete inventory, or rerun without --prune-missing to add/re-enable only",
+		"refusing absence-based removals because inventory completeness is unproven: %s; observed_count=%d PageLimit=%d. Review and supply a complete authoritative manifest to sync-accounts; NQE absence cannot be used for removal",
 		reason,
 		snapshot.ObservedRowCount,
 		snapshot.PageLimit,

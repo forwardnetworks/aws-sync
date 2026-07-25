@@ -104,6 +104,7 @@ func TestP0FinalGetPatchRaceRejectsConcurrentEdit(t *testing.T) {
 }
 
 func TestP0IncompleteNonemptyNQEInventoryRequiresCompletenessProof(t *testing.T) {
+	t.Skip("obsolete Phase 0 premise: NQE-derived removal is retired; Phase 2a pagination completeness remains covered independently")
 	skipUntilP0ArchitectureFixed(t, "partial nonempty NQE inventory can become destructive intent — docs/ARCHITECTURE_REVIEW.md §2, Empty and truncated inventory")
 
 	tests := []struct {
@@ -190,7 +191,6 @@ func TestP0IncompleteNonemptyNQEInventoryRequiresCompletenessProof(t *testing.T)
 				Output:             filepath.Join(t.TempDir(), "payload.json"),
 				APIPrefix:          "/api",
 				Apply:              true,
-				PruneMissing:       true,
 				AllowRemovals:      true,
 				MaxRemovals:        10,
 				MaxRemovalPercent:  100,
@@ -218,7 +218,7 @@ func TestP0IncompleteNonemptyNQEInventoryRequiresCompletenessProof(t *testing.T)
 }
 
 func TestP0ShortFirstPageTruncationCannotBeDetectedClientSide(t *testing.T) {
-	t.Skip("a server can return a plausible short first page that omits real AWS accounts; the client has no independent expected count, so unattended absence-based pruning is prohibited by operating policy rather than detected in code")
+	t.Skip("obsolete Phase 0 premise: a plausible short NQE page still cannot prove completeness, but NQE absence-based pruning is now unreachable")
 }
 
 func TestP0PartialMultiSetupApplyReturnsDispositionAndResumesSafely(t *testing.T) {

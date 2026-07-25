@@ -106,6 +106,7 @@ func TestRunAWSAccountManifestRejectsPartitionRegionMismatch(t *testing.T) {
 
 func TestSyncAWSAccountManifestDryRunReportsRemovalAndApplyRequiresApproval(t *testing.T) {
 	patchCount := 0
+	var patchedPayload api.PatchPayload
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
@@ -114,6 +115,11 @@ func TestSyncAWSAccountManifestDryRunReportsRemovalAndApplyRequiresApproval(t *t
               {"accountId":"222222222222","accountName":"remove","roleArn":"arn:aws-us-gov:iam::222222222222:role/ForwardRole","enabled":true}
             ]}]`))
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/networks/network-1/cloudAccounts/gov-prod":
+			if err := json.NewDecoder(r.Body).Decode(&patchedPayload); err != nil {
+				t.Errorf("decode PATCH payload: %v", err)
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			patchCount++
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -167,5 +173,8 @@ func TestSyncAWSAccountManifestDryRunReportsRemovalAndApplyRequiresApproval(t *t
 	}
 	if patchCount != 1 {
 		t.Fatalf("approved apply patch count = %d, want 1", patchCount)
+	}
+	if len(patchedPayload.AssumeRoleInfos) != 1 || patchedPayload.AssumeRoleInfos[0].AccountID != "111111111111" {
+		t.Fatalf("approved manifest removal PATCH = %#v; want only reviewed account 111111111111", patchedPayload.AssumeRoleInfos)
 	}
 }

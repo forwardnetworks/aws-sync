@@ -31,6 +31,8 @@ var (
 	buildDate = "unknown"
 )
 
+const pruneMissingRefusal = "--prune-missing is no longer supported: the NQE result is observed inventory, not an account manifest, so an account's absence cannot prove it should be deleted; use sync-accounts with a reviewed manifest instead"
+
 func main() {
 	if err := newRootCommand().Execute(); err != nil {
 		emitError(os.Stderr, err)
@@ -57,6 +59,9 @@ func newRootCommand() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := refusePruneMissing(cmd, v); err != nil {
+				return err
+			}
 			password, err := resolvePassword(v, os.Stdin, os.Stderr)
 			if err != nil {
 				return err
@@ -74,12 +79,7 @@ func newRootCommand() *cobra.Command {
 			snapshotID := flagString(cmd, v, "snapshot-id")
 			expectedPlanDigest := ""
 			planningInstant := time.Now().UTC()
-			policy := app.ReconcilePolicyFromLegacyFlags(
-				flagBool(cmd, v, "prune-missing"),
-				false,
-				flagBool(cmd, v, "allow-no-org-evidence"),
-				planningInstant,
-			)
+			policy := app.NewNQEReconcilePolicy(flagBool(cmd, v, "allow-no-org-evidence"), planningInstant)
 			if apply && !yes && term.IsTerminal(int(os.Stdin.Fd())) {
 				preview := app.Config{
 					Host:               v.GetString("host"),
@@ -100,7 +100,6 @@ func newRootCommand() *cobra.Command {
 					MaxRemovalPercent:  flagFloat64(cmd, v, "max-removal-percent"),
 					AllowNoCandidates:  flagBool(cmd, v, "allow-no-candidates"),
 					AllowNoOrgEvidence: flagBool(cmd, v, "allow-no-org-evidence"),
-					PruneMissing:       flagBool(cmd, v, "prune-missing"),
 					MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
 					ExternalIDFile:     flagString(cmd, v, "external-id-file"),
 					Policy:             policy,
@@ -141,7 +140,6 @@ func newRootCommand() *cobra.Command {
 				MaxRemovalPercent:          flagFloat64(cmd, v, "max-removal-percent"),
 				AllowNoCandidates:          flagBool(cmd, v, "allow-no-candidates"),
 				AllowNoOrgEvidence:         flagBool(cmd, v, "allow-no-org-evidence"),
-				PruneMissing:               flagBool(cmd, v, "prune-missing"),
 				MaxSnapshotAge:             flagDuration(cmd, v, "max-snapshot-age"),
 				ExternalIDFile:             flagString(cmd, v, "external-id-file"),
 				Policy:                     policy,
@@ -224,12 +222,7 @@ func newSafeSyncCommand(v *viper.Viper) *cobra.Command {
 				Insecure:       v.GetBool("insecure"),
 				Timeout:        v.GetDuration("timeout"),
 				MaxSnapshotAge: maxSnapshotAge,
-				Policy: app.ReconcilePolicyFromLegacyFlags(
-					false,
-					false,
-					false,
-					planningInstant,
-				),
+				Policy:         app.NewNQEReconcilePolicy(false, planningInstant),
 			}
 			preflight, err := app.Preflight(cmd.Context(), base)
 			if err != nil {
@@ -397,12 +390,12 @@ func bindPreflightFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	flags.String("query-setup-param", "", "optional saved-query String parameter name to receive the single selected --setup-id")
 	flags.StringSlice("setup-id", nil, "optional Forward AWS setup ID to sync; repeatable")
 	flags.Bool("allow-no-org-evidence", false, "allow removals when no AWS Organizations evidence is visible in NQE")
-	flags.Bool("prune-missing", false, "plan removal of configured accounts missing from NQE; additive preservation is the default")
+	flags.Bool("prune-missing", false, "retired: NQE absence cannot prove deletion; use sync-accounts with a reviewed manifest")
 	flags.Int("max-removals", 0, "required nonzero aggregate account-removal ceiling when removals are planned")
 	flags.Float64("max-removal-percent", 0, "required nonzero per-setup removal-percentage ceiling when removals are planned")
 	flags.Duration("max-snapshot-age", 0, "fail if latest processed snapshot is older than this duration; 0 disables the check")
 	flags.String("external-id-file", "", "CSV file of explicit per-account External IDs for mixed-ID setups")
-	flags.Bool("allow-malformed-rows", false, "skip malformed NQE account rows; removals remain blocked because skipped rows make inventory incomplete")
+	flags.Bool("allow-malformed-rows", false, "skip and report malformed NQE account rows; the observed result is marked incomplete")
 	mustBind(v, flags, "snapshot-id")
 	mustBind(v, flags, "query-id")
 	mustBind(v, flags, "query-setup-param")
@@ -430,10 +423,10 @@ func bindProcessingFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	flags.Float64("max-removal-percent", 0, "required nonzero per-setup removal-percentage ceiling when removals are planned")
 	flags.Bool("allow-no-candidates", false, "allow removals when no uncollected candidate accounts are visible")
 	flags.Bool("allow-no-org-evidence", false, "allow removals when no AWS Organizations evidence is visible in NQE")
-	flags.Bool("prune-missing", false, "plan removal of configured accounts missing from NQE; additive preservation is the default")
+	flags.Bool("prune-missing", false, "retired: NQE absence cannot prove deletion; use sync-accounts with a reviewed manifest")
 	flags.Duration("max-snapshot-age", 0, "fail if latest processed snapshot is older than this duration; 0 disables the check")
 	flags.String("external-id-file", "", "CSV file of explicit per-account External IDs for mixed-ID setups")
-	flags.Bool("allow-malformed-rows", false, "skip malformed NQE account rows; removals remain blocked because skipped rows make inventory incomplete")
+	flags.Bool("allow-malformed-rows", false, "skip and report malformed NQE account rows; the observed result is marked incomplete")
 	mustBind(v, flags, "query-id")
 	mustBind(v, flags, "query-setup-param")
 	mustBind(v, flags, "setup-id")
@@ -460,6 +453,9 @@ func newPreflightCommand(v *viper.Viper) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := refusePruneMissing(cmd, v); err != nil {
+				return err
+			}
 			password, err := resolvePassword(v, os.Stdin, os.Stderr)
 			if err != nil {
 				return err
@@ -486,18 +482,12 @@ func newPreflightCommand(v *viper.Viper) *cobra.Command {
 				Insecure:           v.GetBool("insecure"),
 				Timeout:            v.GetDuration("timeout"),
 				AllowNoOrgEvidence: flagBool(cmd, v, "allow-no-org-evidence"),
-				PruneMissing:       flagBool(cmd, v, "prune-missing"),
 				MaxRemovals:        flagInt(cmd, v, "max-removals"),
 				MaxRemovalPercent:  flagFloat64(cmd, v, "max-removal-percent"),
 				MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
 				ExternalIDFile:     flagString(cmd, v, "external-id-file"),
 				AllowMalformedRows: flagBool(cmd, v, "allow-malformed-rows"),
-				Policy: app.ReconcilePolicyFromLegacyFlags(
-					flagBool(cmd, v, "prune-missing"),
-					false,
-					flagBool(cmd, v, "allow-no-org-evidence"),
-					planningInstant,
-				),
+				Policy:             app.NewNQEReconcilePolicy(flagBool(cmd, v, "allow-no-org-evidence"), planningInstant),
 			})
 			if err != nil {
 				return err
@@ -883,12 +873,7 @@ func newSyncAccountsCommand(v *viper.Viper) *cobra.Command {
 				ExternalIDFile:             flagString(cmd, v, "external-id-file"),
 				Unattended:                 yes,
 				AllowUnattendedDestructive: flagBool(cmd, v, "allow-unattended-destructive"),
-				Policy: app.ReconcilePolicyFromLegacyFlags(
-					false,
-					true,
-					false,
-					planningInstant,
-				),
+				Policy:                     app.NewAuthoritativeManifestReconcilePolicy(planningInstant),
 			}
 			if yes {
 				cfg.AuthorizationActor = "sync-accounts --yes"
@@ -942,6 +927,9 @@ func newServeWebhookCommand(v *viper.Viper) *cobra.Command {
 		SilenceErrors: true,
 		Short:         "Receive Forward SNAPSHOT_READY webhooks and run awssync for the exact snapshot",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := refusePruneMissing(cmd, v); err != nil {
+				return err
+			}
 			password, err := resolvePassword(v, os.Stdin, os.Stderr)
 			if err != nil {
 				return err
@@ -949,12 +937,7 @@ func newServeWebhookCommand(v *viper.Viper) *cobra.Command {
 			if flagBool(cmd, v, "apply") && !flagBool(cmd, v, "yes") {
 				return fmt.Errorf("serve-webhook with --apply requires --yes")
 			}
-			policy := app.ReconcilePolicyFromLegacyFlags(
-				flagBool(cmd, v, "prune-missing"),
-				false,
-				flagBool(cmd, v, "allow-no-org-evidence"),
-				time.Time{},
-			)
+			policy := app.NewNQEReconcilePolicy(flagBool(cmd, v, "allow-no-org-evidence"), time.Time{})
 			srv, err := webhook.New(webhook.Config{
 				Listen:        flagString(cmd, v, "listen"),
 				Path:          flagString(cmd, v, "path"),
@@ -980,7 +963,6 @@ func newServeWebhookCommand(v *viper.Viper) *cobra.Command {
 					MaxRemovalPercent:          flagFloat64(cmd, v, "max-removal-percent"),
 					AllowNoCandidates:          flagBool(cmd, v, "allow-no-candidates"),
 					AllowNoOrgEvidence:         flagBool(cmd, v, "allow-no-org-evidence"),
-					PruneMissing:               flagBool(cmd, v, "prune-missing"),
 					MaxSnapshotAge:             flagDuration(cmd, v, "max-snapshot-age"),
 					ExternalIDFile:             flagString(cmd, v, "external-id-file"),
 					AllowMalformedRows:         flagBool(cmd, v, "allow-malformed-rows"),
@@ -1307,6 +1289,13 @@ func flagBool(cmd *cobra.Command, v *viper.Viper, name string) bool {
 		return value
 	}
 	return v.GetBool(name)
+}
+
+func refusePruneMissing(cmd *cobra.Command, v *viper.Viper) error {
+	if flagBool(cmd, v, "prune-missing") {
+		return errors.New(pruneMissingRefusal)
+	}
+	return nil
 }
 
 func flagInt(cmd *cobra.Command, v *viper.Viper, name string) int {

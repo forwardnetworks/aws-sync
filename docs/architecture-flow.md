@@ -451,7 +451,7 @@ flowchart LR
 - Static-key collector secrets are only included in the create payload when explicitly supplied. Without the secret, the file contains a placeholder and is marked not POST-ready.
 - Removals require explicit `--allow-removals` flag; `awssync` will not silently
   remove accounts from a Forward setup.
-- NQE sync preserves configured accounts by default. NQE-driven removal additionally requires explicit `--prune-missing`; authoritative manifest sync is preferred for lifecycle removal.
+- NQE sync always preserves configured accounts absent from observed inventory. `--prune-missing` is retired and returns an actionable refusal; authoritative `sync-accounts` manifest reconciliation is the supported lifecycle-removal path.
 - Both nonzero `--max-removals` and `--max-removal-percent` ceilings are mandatory for any removal and are rechecked immediately before apply.
 - Existing disabled or failed `Collected? false` rows are not treated as AWS Organizations discovery candidates.
 - CLI NQE plans pin one processed snapshot, and every apply writes a full pre-change rollback payload before the first PATCH.

@@ -69,7 +69,7 @@ func RunAWSAccountManifest(ctx context.Context, cfg AWSOrganizationConfig, accou
 func SyncAWSAccountManifest(ctx context.Context, cfg Config, accounts []AWSOrganizationAccount) (*Summary, error) {
 	cfg.AuthoritativeInput = true
 	if cfg.Policy.Kind == "" {
-		cfg.Policy = ReconcilePolicyFromLegacyFlags(false, true, cfg.AllowNoOrgEvidence, time.Now().UTC())
+		cfg.Policy = NewAuthoritativeManifestReconcilePolicy(time.Now().UTC())
 	} else {
 		cfg.Policy.Kind = CompleteInventory
 		cfg.Policy.OrganizationEvidence = ReviewedAuthoritativeInventory

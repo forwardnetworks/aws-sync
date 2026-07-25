@@ -10,7 +10,7 @@ Forward collects AWS by using configured credentials to read AWS network metadat
 
 For many AWS accounts in the same AWS Organization, there are two separate requirements:
 
-1. Forward must be able to discover the AWS account inventory from AWS Organizations.
+1. Forward should be able to discover AWS accounts from AWS Organizations for additive onboarding, while operators must understand that the snapshot exposes observed inventory rather than a complete configured-account manifest.
 2. Forward must be able to assume a collection role in every account that should be collected.
 
 `awssync` automates the Forward-side account list update for existing setups. It also has a separate `discover-org` onboarding mode for new setups that Forward has not collected yet. Neither mode creates IAM roles in AWS or grants Forward access to new accounts by itself. New accounts become collectable only after the expected IAM role exists in those accounts and trusts Forward.
@@ -29,7 +29,8 @@ See the one-page [Routine AWS Safe Sync](routine-safe-sync.md) handoff. Use the 
 
 Important separation:
 
-- Use the default NQE sync path for an existing Forward AWS setup. That path uses Forward's collected data and can PATCH the setup after review.
+- Use the default NQE sync path for additive updates to an existing Forward AWS setup. It can add or re-enable observed accounts but cannot remove an account because it is absent.
+- Use `sync-accounts` with a complete reviewed manifest for existing-setup lifecycle removals.
 - Use `discover-org` only for initial onboarding. It calls AWS Organizations directly, writes files, and can POST a new Forward setup, but it does not PATCH an existing setup.
 
 ## AWS Terms
@@ -78,9 +79,9 @@ Complete these checks before running `awssync --apply`.
 
 In Forward, confirm the AWS setup includes the management account or the delegated discovery account.
 
-This matters because account inventory comes from AWS Organizations. If Forward only collects a member account that cannot list the Organization, the script will not have the complete account list to sync.
+This matters for discovering additions, but it does not make NQE authoritative. NQE combines accounts that collected successfully with accounts visible through Organizations metadata, and collection or authorization failures can leave either set partial.
 
-Expected result: the latest processed Forward snapshot includes the AWS setup and shows AWS account inventory from the Organization.
+Expected result: the latest processed Forward snapshot includes the AWS setup and shows the accounts Forward observed. Do not use missing rows as deletion evidence.
 
 ### 2. Confirm AWS Organizations Permissions
 
@@ -118,7 +119,7 @@ Expected result: Forward setup/connectivity testing succeeds for the account and
 
 ### 5. Confirm the Platform Query Scope
 
-`awssync` gets discovered AWS account rows from Forward NQE.
+`awssync` gets observed AWS account rows from Forward NQE for additive synchronization.
 
 The tool defaults to an inline Forward NQE source query for AWS account discovery. That inline query returns `Cloud Setup ID` from `cloudAccount.cloudSetupId`, which is required when one network has multiple AWS setups. When exactly one `--setup-id` is selected, the inline query is parameterized with that setup ID so Forward can scope the query before returning rows. `--query-id` is optional and should only be used when support intentionally overrides that query.
 
@@ -229,7 +230,7 @@ AWS_PROFILE=org-readonly ./bin/awssync discover-org \
 
 If `--credential-mode static-keys` is used without `AWSSYNC_COLLECTOR_SECRET_ACCESS_KEY` or `--collector-secret-access-key`, the create payload is still written, but it contains a placeholder password and `create_payload_ready` is `false`. That file is useful for review but should not be POSTed until the secret is supplied.
 
-Do not use `discover-org` for a setup that already exists. Use the NQE sync path below so Forward's collected data, regions, proxy settings, and stored credentials remain the source of truth.
+Do not use `discover-org` for a setup that already exists. Use the additive NQE sync path below so the existing Forward regions, proxy settings, and stored credentials are preserved; use `sync-accounts` when a reviewed manifest authorizes membership removal.
 
 ### Optional Terraform Bootstrap
 
@@ -366,7 +367,7 @@ Then review `aws_sync_payload.json`. Confirm:
 - External ID matches the existing setup. Use the separate `external-id` command below when intentionally adding, replacing, or clearing it.
 - Regions and proxy settings match the existing Forward setup.
 - The PATCH payload does not include access keys or secrets; those stored credentials remain unchanged in Forward.
-- Removed accounts are expected. If removals are not expected, stop and inspect the Forward snapshot and NQE query before applying.
+- `removed_accounts` is empty. Standard NQE planning is additive; use `sync-accounts` with a reviewed manifest when removal is intended.
 
 If `--manual-output` is used, also confirm that manual payload file by opening it and verifying:
 
@@ -536,21 +537,18 @@ The clear payload omits `externalId` from every `assumeRoleInfos` entry, which s
 
 ```bash
 ./bin/awssync preflight \
-  --max-snapshot-age 24h \
-  --max-removals 10 \
-  --max-removal-percent 5
+  --max-snapshot-age 24h
 ```
 
-Expected result: `ready` is `true`, `nqe_aws_accounts` passes, `patch_plan` passes, and `account_removals` either passes or is understood and approved.
+Expected result: `ready` is `true`, `nqe_aws_accounts` passes, `patch_plan` passes, and `account_removals` passes because the NQE plan is additive.
 
-If `management_account_discovery` fails, the snapshot did not show any genuinely new uncollected AWS account candidates. An already configured row with `Collected? false` does not satisfy this check; it may simply be disabled or failing collection. Do not apply account removals in that state unless AWS Organizations discovery has been independently verified and `--allow-no-candidates` is intentional.
+If `management_account_discovery` fails, the snapshot did not show any genuinely new uncollected AWS account candidates. An already configured row with `Collected? false` does not satisfy this check; it may simply be disabled or failing collection. Treat this as an addition/discovery diagnostic, never as removal authorization.
 
-`aws_organizations_evidence` reports if the plan has either candidate visibility or OU ID visibility for each selected setup. In multi-setup runs, the check lists the setup IDs that lack this signal. Treat both as supporting evidence only. The safer destructive-sync guard is:
+`aws_organizations_evidence` reports if the observed rows include candidate visibility or OU ID visibility for each selected setup. In multi-setup runs, the check lists setup IDs that lack this signal. Treat both as supporting evidence only:
 
-- NQE absence cannot produce removals unless `--prune-missing` is explicit; `account_removals` then also requires `--allow-removals`.
-- `removal_blast_radius` confirms the aggregate count and per-setup percentage remain within the operator-supplied ceilings.
-- `management_account_discovery` fails: add `--allow-no-candidates` only after confirming discovery is complete.
-- `aws_organizations_evidence` fails: add `--allow-no-org-evidence` only after independent verification that Forward has complete AWS Organizations visibility for that setup.
+- NQE absence never produces removals.
+- `--prune-missing` is recognized only to return an actionable refusal.
+- Manifest removals use `sync-accounts` and retain removal authorization and blast-radius ceilings.
 
 ## Apply the Sync
 
@@ -573,29 +571,25 @@ The remaining commands in this section are the standard and expert workflow. For
 
 Expected result: the command prints `patched_setup_count` greater than zero and each patched setup shows `patched: true`.
 
-NQE sync is additive by default: configured accounts missing from NQE remain in the payload. This is intentional because disabled accounts, failed accounts, and incomplete snapshots may be absent from NQE.
+NQE sync is always additive: configured accounts missing from NQE remain in the payload. This is required because disabled accounts, failed accounts, authorization failures, accounts in another Organization, and transient errors may all be absent from NQE.
 
-To make NQE absence eligible for removal, add `--prune-missing`. Prefer `sync-accounts` with a complete authoritative manifest for actual account-lifecycle removals. If an explicit prune plan contains removals, `--apply` also fails unless `--allow-removals` is included. Use both flags only after reviewing `removed_accounts`.
+`--prune-missing` no longer creates a plan. It fails with: `--prune-missing is no longer supported: the NQE result is observed inventory, not an account manifest, so an account's absence cannot prove it should be deleted; use sync-accounts with a reviewed manifest instead`.
 
-For an approved removal, also set both blast-radius ceilings. `--max-removals` applies to the total across every selected setup, while `--max-removal-percent` applies independently to each setup's current configured-account count:
+For an approved removal, create a complete reviewed manifest for exactly one setup, dry-run `sync-accounts`, and inspect every `removed_accounts` entry. Then apply with both blast-radius ceilings. `--max-removals` limits the count and `--max-removal-percent` limits the percentage of that setup's current configured accounts:
 
 ```bash
-./bin/awssync \
-  --max-snapshot-age 24h \
-  --output aws_sync_payload.json \
+./bin/awssync sync-accounts \
+  --setup-id AWS-PROD \
+  --accounts-file reviewed-accounts.json \
+  --output aws_manifest_plan.json \
   --apply \
   --yes \
-  --prune-missing \
   --allow-removals \
   --max-removals 10 \
   --max-removal-percent 5
 ```
 
-Choose both nonzero limits from the reviewed plan, leaving enough room only for the approved account IDs. A removal is blocked if either option is omitted or either ceiling is exceeded. The same flags are enforced by `sync-accounts`, `apply-plan`, and webhook-driven apply runs.
-
-If an explicit prune includes account removals and no new uncollected candidate accounts are visible, `--apply` also requires `--allow-no-candidates`. Use that flag only after confirming the management or delegated discovery account is collected and AWS Organizations discovery is working.
-
-If an explicit prune includes account removals and the same setup has neither candidate rows nor OU rows visible, `--apply` also requires `--allow-no-org-evidence`. Use that flag only after an independent validation that the setup is collecting from the expected AWS Organization.
+Choose both nonzero limits from the reviewed plan, leaving enough room only for the approved account IDs. A removal is blocked if `--allow-removals` or either ceiling is omitted, or if either ceiling is exceeded. `sync-accounts` continues to route through the same `ComputeDesired` and `GuardAndApply` safety path.
 
 To apply the exact reviewed payload file later without recomputing the plan:
 
@@ -619,7 +613,7 @@ To recompute and apply for two selected setups after reviewing the expected chan
   --yes
 ```
 
-For NQE pruning, add `--prune-missing` and `--allow-removals` only when the reviewed plan contains expected removals.
+NQE multi-setup runs remain additive. Run `sync-accounts` separately for each setup whose reviewed manifest authorizes removals.
 
 ## Validate After Apply
 
@@ -651,7 +645,7 @@ The client retries transient `429`, `502`, `503`, and `504` failures only for id
 
 Run `awssync` on a schedule or after AWS account lifecycle events.
 
-The recommended automation policy is additive NQE sync without `--prune-missing`. Routine additions and re-enablement can proceed while NQE absence never deletes an account. Use an authoritative manifest for reviewed lifecycle removals. If NQE pruning is exceptionally required, an operator must verify the account lifecycle in AWS, review `removed_accounts`, and apply with `--prune-missing`, explicit removal approval, and narrow `--max-removals` and `--max-removal-percent` ceilings.
+The automation policy is additive NQE sync. Routine additions and re-enablement can proceed while NQE absence never deletes an account. Lifecycle-removal automation must consume an independently reviewed authoritative manifest through `sync-accounts`, with explicit removal approval and narrow `--max-removals` and `--max-removal-percent` ceilings.
 
 Recommended sequence:
 

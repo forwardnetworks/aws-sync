@@ -2,10 +2,20 @@
 
 ### Breaking changes
 
-Read this section before upgrading. Both changes fail closed, so an automated
+Read this section before upgrading. These changes fail closed, so an automated
 deployment that does not act on them will stop working rather than degrade.
 
-**1. `serve-webhook --apply` now requires authentication and an explicit network.**
+**1. NQE-based account removal has been removed.**
+
+`--prune-missing` remains a recognized option so existing automation receives
+an actionable error, but it always refuses before credentials, NQE, planning,
+or PATCH work. NQE is observed snapshot inventory, not an authoritative account
+manifest, so an absent row cannot prove an account should be deleted. Replace
+NQE prune workflows with `sync-accounts` and a complete human-reviewed manifest.
+Manifest removals still require `--allow-removals` and both nonzero removal
+ceilings.
+
+**2. `serve-webhook --apply` now requires authentication and an explicit network.**
 
 The server previously accepted unauthenticated requests when no webhook
 credentials were configured, and let an event select any network or setup. It
@@ -27,14 +37,13 @@ The server also persists dedupe and snapshot-ordering state to
 `$UserConfigDir/awssync/webhook-state.json`. Ensure the service user can write
 that directory, or set `--webhook-state-file`.
 
-**2. Destructive applies in unattended contexts now require an explicit flag.**
+**3. Destructive applies in unattended contexts now require an explicit flag.**
 
 Forward's API exposes no compare-and-swap token, so a concurrent edit in the UI
 cannot be detected before a full-list PATCH overwrites it. Removals and disables
 requested without a human present now require `--allow-unattended-destructive`:
 
 ```bash
-awssync --apply --yes --prune-missing --allow-unattended-destructive ...
 awssync sync-accounts --apply --yes --allow-unattended-destructive ...
 awssync apply-plan --allow-unattended-destructive ...   # when removing/disabling
 awssync serve-webhook --apply --yes --allow-unattended-destructive ...
@@ -47,7 +56,7 @@ being additive-only. Non-destructive applies are unaffected.
 
 ### Safety changes
 
-- Account removal is refused when the NQE inventory cannot be proven complete. A result that is an exact multiple of the page limit, a repeated page, or a non-advancing cursor is treated as possibly truncated, because that is exactly when truncation is invisible. Adds and re-enables are unaffected.
+- NQE reconciliation is unconditionally additive. Pagination completeness checks remain to diagnose truncated observed data, but completeness no longer authorizes absence-based deletion.
 - A malformed account ID now fails the plan instead of being silently skipped, since skipping rows is how a partial inventory becomes a deletion. Use `--allow-malformed-rows` to skip and report them; doing so marks the inventory incomplete and therefore blocks removals.
 - Setting an account to `enabled: false` is now classified as destructive. It consumes the same authorization and removal ceilings as deletion, closing a path where `apply-plan` could disable every account in a setup without tripping any removal guard.
 - All account-list writes go through one guarded apply path, enforced by a test that fails if any other caller appears.
@@ -73,12 +82,12 @@ runs on setups that people also edit by hand.
 - The README is now novice-first, with the routine workflow, count definitions, expected output, common stop conditions, and a short decision diagram before expert features.
 - A one-page routine operator handoff is available at `docs/routine-safe-sync.md`.
 - NQE reconciliation is additive by default: configured accounts missing from the current NQE result remain in the setup, while discovered disabled accounts are re-enabled.
-- NQE-based deletion now requires `--prune-missing`, `--allow-removals`, and both nonzero `--max-removals` and `--max-removal-percent` bounds.
+- NQE-based deletion is retired; `--prune-missing` returns an actionable refusal and reviewed manifest removal remains available through `sync-accounts`.
 - Every apply writes a complete pre-change `.rollback.json` payload and verifies that the selected setup state has not changed before the first PATCH.
 - CLI runs pin the latest processed snapshot so planning and apply use one immutable NQE inventory.
 - Invalid NQE account-ID placeholders are ignored and reported instead of becoming AWS accounts.
 - Human-readable output is now the default; use `--json` or `--format json` for automation.
-- Regression coverage includes 0, 1, 10, half, and all-enabled account states; additive and explicit-prune paths; multi-setup isolation; concurrent setup changes; rollback; and snapshot pinning.
+- Regression coverage includes 0, 1, 10, half, and all-enabled account states; additive NQE and authoritative-manifest paths; multi-setup isolation; concurrent setup changes; rollback; and snapshot pinning.
 - Per-account External ID selection and CSV workflows from v2.3.0 remain supported.
 - Release assets remain available for Linux and macOS on amd64 and arm64 with SHA-256 checksums and GitHub build-provenance attestations.
 

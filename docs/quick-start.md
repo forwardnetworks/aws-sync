@@ -10,7 +10,7 @@ For routine updates of an existing Forward AWS setup, start with [`safe-sync`](r
 
 The rest of this guide covers the standard and expert commands for automation, onboarding, External IDs, GovCloud, and independently reviewed account removals.
 
-Use the standard `awssync` command to update an existing Forward AWS setup when AWS Organization accounts are added or removed and Forward's collected NQE data is the source of truth.
+Use the standard `awssync` command for additive updates to an existing Forward AWS setup. Forward's NQE rows are observed snapshot inventory, not a source of truth for configured membership; removals use `sync-accounts` with a reviewed manifest.
 
 For new AWS Organizations onboarding, prefer the Forward Terraform provider as the native IaC workflow. It supports Forward assume-role, static-key, and collector instance-profile credential models. Use `awssync discover-org` only when Forward has not onboarded that AWS Organization yet and you need manual JSON files, a break-glass create payload, or a static-key workflow that should stay outside Terraform state.
 
@@ -21,7 +21,7 @@ For AWS GovCloud, use the dedicated [AWS GovCloud Account Workflow](govcloud-wor
 - Forward must collect the AWS management account or a delegated account that can list AWS Organizations accounts.
 - Each AWS account that Forward should collect must have the same Forward IAM role name.
 - Forward IAM role and IAM user/access-key multi-account setups are supported.
-- Run a dry plan first. Do not apply removals until the account list is reviewed.
+- Run a dry plan first. Use a complete reviewed manifest for removals.
 
 Grant AWS Organizations read permissions only to the management or delegated discovery account used for inventory. Do not grant organization-wide permissions to every member role. Member accounts need the Forward collection policy and trust policy for `sts:AssumeRole`.
 
@@ -54,11 +54,7 @@ Expected result: `ready` is `true`.
 
 If `management_account_discovery` fails, confirm Forward is collecting the AWS management or delegated discovery account.
 
-`nqe_org_unit_row_count` is helpful supporting evidence when it is nonzero, but it can be zero for valid AWS Organizations where accounts sit directly under the root. Do not use OU IDs as the only safety signal for removals.
-
-If both `nqe_candidate_row_count` and `nqe_org_unit_row_count` are zero and removals are planned, review `--allow-no-org-evidence` before applying.
-
-In multi-setup runs, `--allow-no-org-evidence` is required only for setup IDs that are missing both signals; preflight output shows the setup IDs in the failing check message.
+`nqe_org_unit_row_count` and `nqe_candidate_row_count` are useful discovery diagnostics, but neither proves the NQE result is a complete account manifest. Missing accounts remain configured regardless of these counts.
 
 ## Create a Dry Plan
 
@@ -180,25 +176,30 @@ terraform -chdir=examples/terraform/forward-collection-role-stackset apply
 ./bin/awssync --max-snapshot-age 24h --output aws_sync_payload.json --apply --yes
 ```
 
-If removals are expected:
+The standard command is additive: NQE absence never produces removal. If an account must be removed, prepare a complete reviewed manifest and dry-run the one affected setup:
 
 ```bash
-./bin/awssync \
-  --max-snapshot-age 24h \
-  --output aws_sync_payload.json \
+./bin/awssync sync-accounts \
+  --setup-id AWS-PROD \
+  --accounts-file reviewed-accounts.json \
+  --output aws_manifest_plan.json
+```
+
+After reviewing every added and removed ID, apply with narrow removal ceilings:
+
+```bash
+./bin/awssync sync-accounts \
+  --setup-id AWS-PROD \
+  --accounts-file reviewed-accounts.json \
+  --output aws_manifest_plan.json \
   --apply \
   --yes \
-  --prune-missing \
   --allow-removals \
   --max-removals 10 \
   --max-removal-percent 5
 ```
 
-NQE sync is additive by default. `--prune-missing` is required before an account absent from NQE can become a removal; prefer a complete authoritative manifest for lifecycle removals. Both limits are mandatory for any removal. `--max-removals` is the aggregate ceiling across selected setups. `--max-removal-percent` is evaluated separately for each setup against its current configured-account count. Preflight accepts the same limits and reports `removal_blast_radius` before anything is patched.
-
-If removals are expected and no uncollected candidate accounts are visible, also add `--allow-no-candidates` only after confirming AWS Organizations discovery is working.
-
-If removals are expected and there is no candidate signal and no OU signal for a setup, also add `--allow-no-org-evidence` only after independent verification that Forward’s discovery account is still collecting a complete AWS Organization account list.
+`--prune-missing` is still recognized but always refuses: NQE is observed inventory, not an account manifest, so absence cannot prove deletion. Both limits remain mandatory for manifest removals. `--max-removals` is the aggregate ceiling and `--max-removal-percent` is evaluated against the setup's current configured-account count.
 
 ## Multiple AWS Setups
 
@@ -234,11 +235,11 @@ Recompute and apply after reviewing the expected changes:
   --yes
 ```
 
-For one setup, pass a single `--setup-id AWS_SETUP_ID`. Repeat `--setup-id` for other setup combinations. Add `--prune-missing` and `--allow-removals` only after reviewing and confirming every proposed NQE-based removal.
+For one setup, pass a single `--setup-id AWS_SETUP_ID`. Repeat `--setup-id` for additive NQE synchronization of other setup combinations. Removal is a separate, one-setup-at-a-time `sync-accounts` manifest workflow.
 
 When exactly one setup is selected, the default inline NQE query is parameterized by that setup ID to reduce returned rows. Multiple setup IDs are still separated by `Cloud Setup ID` in the NQE result.
 
-For automation, omit `--prune-missing` and `--allow-removals`. Normal additions and re-enablement can proceed, while accounts absent from NQE remain configured.
+Normal additions and re-enablement can proceed in automation, while accounts absent from NQE remain configured. Automate manifest removals only when the manifest itself has an independent human review and approval process.
 
 Human-readable output is the default. Add `--json` for scripts. Every apply writes `<output>.rollback.json` before the first PATCH; use that file with `apply-plan --plan` to restore the exact prior setup state.
 

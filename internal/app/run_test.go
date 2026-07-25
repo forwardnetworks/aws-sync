@@ -403,6 +403,7 @@ func TestBuildPlanRejectsMixedOrMismatchedAWSPartitions(t *testing.T) {
 }
 
 func TestRunBlocksGovCloudRemovalWithoutOrgEvidenceEvenWithBreakGlassFlags(t *testing.T) {
+	t.Skip("obsolete characterization: NQE-derived removal is retired before GovCloud evidence overrides are evaluated; manifest removal coverage remains in account_manifest_test.go")
 	patched := false
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -433,7 +434,6 @@ func TestRunBlocksGovCloudRemovalWithoutOrgEvidenceEvenWithBreakGlassFlags(t *te
 		APIPrefix:          "/api",
 		Insecure:           true,
 		Apply:              true,
-		PruneMissing:       true,
 		AllowRemovals:      true,
 		MaxRemovals:        1,
 		MaxRemovalPercent:  50,
@@ -713,16 +713,13 @@ func TestBuildPlanForConfigIsAdditiveWhenNQEReturnsOnlyEnabledSubset(t *testing.
 		t.Fatalf("unexpected additive plan: removed=%d reenabled=%d", len(setup.RemovedAccounts), len(setup.ReenabledAccounts))
 	}
 
-	pruned, err := buildPlanForConfig(Config{PruneMissing: true}, items, cloudAccounts)
-	if err != nil {
-		t.Fatalf("buildPlanForConfig(prune) error = %v", err)
-	}
-	if len(pruned.Setups[0].RemovedAccounts) != accountCount-10 {
-		t.Fatalf("explicit prune should expose missing accounts as removals, got %d", len(pruned.Setups[0].RemovedAccounts))
+	_, err = buildPlanForConfig(Config{Policy: NewAuthoritativeManifestReconcilePolicy(time.Unix(1, 0).UTC())}, items, cloudAccounts)
+	if err == nil || !strings.Contains(err.Error(), "refusing CompleteInventory reconciliation for NQE observed inventory") {
+		t.Fatalf("NQE CompleteInventory error = %v; want observed-inventory refusal", err)
 	}
 }
 
-func TestBuildPlanAllowMalformedRowsWithPruneMissingFailsClosed(t *testing.T) {
+func TestBuildPlanNQECompleteInventoryRefusedEvenWhenMalformedRowsAllowed(t *testing.T) {
 	items := []map[string]any{
 		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Cloud Account Name": "acct-a"},
 		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "bad-row", "Cloud Account Name": "bad"},
@@ -737,22 +734,21 @@ func TestBuildPlanAllowMalformedRowsWithPruneMissingFailsClosed(t *testing.T) {
 
 	_, err := buildPlanForConfig(Config{
 		AllowMalformedRows: true,
-		PruneMissing:       true,
+		Policy:             NewAuthoritativeManifestReconcilePolicy(time.Unix(1, 0).UTC()),
 	}, items, cloudAccounts)
 	if err == nil ||
-		!strings.Contains(err.Error(), "inventory completeness is unproven") ||
-		!strings.Contains(err.Error(), "observed_count=2 PageLimit=1000") {
-		t.Fatalf("expected incomplete-inventory prune refusal, got %v", err)
+		!strings.Contains(err.Error(), "refusing CompleteInventory reconciliation for NQE observed inventory") {
+		t.Fatalf("expected NQE observed-inventory refusal, got %v", err)
 	}
 }
 
-func TestBuildPlanPruneMissingRequiresProvenCompleteInventory(t *testing.T) {
+func TestBuildPlanCompleteManifestRequiresProvenCompleteness(t *testing.T) {
 	snapshot := &InventorySnapshot{
-		Source:             "nqe",
+		Source:             "account_manifest",
 		ObservedRowCount:   1000,
 		PageLimit:          1000,
 		Completeness:       InventoryCompletenessLikelyIncomplete,
-		CompletenessReason: "NQE result count is an exact multiple of PageLimit, so truncation cannot be ruled out",
+		CompletenessReason: "reviewed manifest completeness is unproven",
 		DiscoveredAccounts: []DiscoveredAccount{{
 			SetupID:     SetupID("setup-a"),
 			AccountID:   AccountID("111111111111"),
@@ -767,9 +763,11 @@ func TestBuildPlanPruneMissingRequiresProvenCompleteInventory(t *testing.T) {
 		},
 	}}
 
-	_, err := buildPlanFromSnapshot(snapshot, cloudAccounts, nil, buildPlanOptions{})
+	_, err := buildPlanFromSnapshot(snapshot, cloudAccounts, nil, buildPlanOptions{
+		Policy: NewAuthoritativeManifestReconcilePolicy(time.Unix(1, 0).UTC()),
+	})
 	if err == nil ||
-		!strings.Contains(err.Error(), "NQE result count is an exact multiple of PageLimit") ||
+		!strings.Contains(err.Error(), "reviewed manifest completeness is unproven") ||
 		!strings.Contains(err.Error(), "observed_count=1000 PageLimit=1000") {
 		t.Fatalf("expected incomplete-inventory prune refusal, got %v", err)
 	}
@@ -847,16 +845,15 @@ func TestRunWritesPayloadAndPatchesWhenApplyEnabled(t *testing.T) {
 
 	output := filepath.Join(t.TempDir(), "payload.json")
 	summary, err := Run(context.Background(), Config{
-		Host:         server.URL,
-		Username:     "alice",
-		Password:     "secret",
-		NetworkID:    "network-1",
-		QueryID:      "custom-query",
-		Output:       output,
-		APIPrefix:    "/api",
-		Insecure:     true,
-		Apply:        true,
-		PruneMissing: true,
+		Host:      server.URL,
+		Username:  "alice",
+		Password:  "secret",
+		NetworkID: "network-1",
+		QueryID:   "custom-query",
+		Output:    output,
+		APIPrefix: "/api",
+		Insecure:  true,
+		Apply:     true,
 	})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -1000,6 +997,7 @@ func TestRunWritesManualPayloadWhenRequested(t *testing.T) {
 }
 
 func TestRunBlocksApplyWithRemovalsUnlessAllowed(t *testing.T) {
+	t.Skip("obsolete characterization: NQE-derived removal is retired; removal authorization is covered through sync-accounts and apply-plan")
 	var patched []string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
@@ -1025,16 +1023,15 @@ func TestRunBlocksApplyWithRemovalsUnlessAllowed(t *testing.T) {
 	defer server.Close()
 
 	_, err := Run(context.Background(), Config{
-		Host:         server.URL,
-		Username:     "alice",
-		Password:     "secret",
-		NetworkID:    "network-1",
-		QueryID:      "custom-query",
-		Output:       filepath.Join(t.TempDir(), "payload.json"),
-		APIPrefix:    "/api",
-		Insecure:     true,
-		Apply:        true,
-		PruneMissing: true,
+		Host:      server.URL,
+		Username:  "alice",
+		Password:  "secret",
+		NetworkID: "network-1",
+		QueryID:   "custom-query",
+		Output:    filepath.Join(t.TempDir(), "payload.json"),
+		APIPrefix: "/api",
+		Insecure:  true,
+		Apply:     true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "--allow-removals") {
 		t.Fatalf("unexpected error: %v", err)
@@ -1045,6 +1042,7 @@ func TestRunBlocksApplyWithRemovalsUnlessAllowed(t *testing.T) {
 }
 
 func TestRunAllowsApplyWithRemovalsWhenExplicitlyAllowed(t *testing.T) {
+	t.Skip("obsolete characterization: removal flags can no longer authorize NQE-derived deletion; sync-accounts owns reviewed manifest removals")
 	var patched []string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
@@ -1079,7 +1077,6 @@ func TestRunAllowsApplyWithRemovalsWhenExplicitlyAllowed(t *testing.T) {
 		APIPrefix:          "/api",
 		Insecure:           true,
 		Apply:              true,
-		PruneMissing:       true,
 		AllowRemovals:      true,
 		MaxRemovals:        1,
 		MaxRemovalPercent:  100,
@@ -1098,6 +1095,7 @@ func TestRunAllowsApplyWithRemovalsWhenExplicitlyAllowed(t *testing.T) {
 }
 
 func TestRunBlocksApplyWithNoOrgEvidenceWhenNoCandidatesVisibleAndExplicitNoEvidenceFlagMissing(t *testing.T) {
+	t.Skip("obsolete characterization: NQE-derived removal is retired before organization-evidence overrides are evaluated")
 	var patched []string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
@@ -1132,7 +1130,6 @@ func TestRunBlocksApplyWithNoOrgEvidenceWhenNoCandidatesVisibleAndExplicitNoEvid
 		APIPrefix:         "/api",
 		Insecure:          true,
 		Apply:             true,
-		PruneMissing:      true,
 		AllowRemovals:     true,
 		MaxRemovals:       1,
 		MaxRemovalPercent: 100,
@@ -1147,6 +1144,7 @@ func TestRunBlocksApplyWithNoOrgEvidenceWhenNoCandidatesVisibleAndExplicitNoEvid
 }
 
 func TestRunAllowsApplyWithNoOrgEvidenceWhenExplicitNoEvidenceFlagSet(t *testing.T) {
+	t.Skip("obsolete characterization: organization-evidence overrides can no longer authorize NQE-derived removal")
 	var patched []string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
@@ -1181,7 +1179,6 @@ func TestRunAllowsApplyWithNoOrgEvidenceWhenExplicitNoEvidenceFlagSet(t *testing
 		APIPrefix:          "/api",
 		Insecure:           true,
 		Apply:              true,
-		PruneMissing:       true,
 		AllowRemovals:      true,
 		MaxRemovals:        1,
 		MaxRemovalPercent:  100,
@@ -1200,6 +1197,7 @@ func TestRunAllowsApplyWithNoOrgEvidenceWhenExplicitNoEvidenceFlagSet(t *testing
 }
 
 func TestRunBlocksApplyWithNoOrgEvidenceInMultiSetup(t *testing.T) {
+	t.Skip("obsolete characterization: multi-setup NQE-derived removal is retired before organization-evidence checks")
 	var patched []string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
@@ -1240,7 +1238,6 @@ func TestRunBlocksApplyWithNoOrgEvidenceInMultiSetup(t *testing.T) {
 		APIPrefix:          "/api",
 		Insecure:           true,
 		Apply:              true,
-		PruneMissing:       true,
 		AllowRemovals:      true,
 		MaxRemovals:        1,
 		MaxRemovalPercent:  100,
@@ -1259,6 +1256,7 @@ func TestRunBlocksApplyWithNoOrgEvidenceInMultiSetup(t *testing.T) {
 }
 
 func TestRunAllowsApplyWithNoOrgEvidenceWhenExplicitNoEvidenceFlagSetForMultiSetup(t *testing.T) {
+	t.Skip("obsolete characterization: organization-evidence overrides can no longer authorize multi-setup NQE removal")
 	var patched []string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
@@ -1299,7 +1297,6 @@ func TestRunAllowsApplyWithNoOrgEvidenceWhenExplicitNoEvidenceFlagSetForMultiSet
 		APIPrefix:          "/api",
 		Insecure:           true,
 		Apply:              true,
-		PruneMissing:       true,
 		AllowRemovals:      true,
 		MaxRemovals:        1,
 		MaxRemovalPercent:  100,
@@ -1325,6 +1322,7 @@ func TestRunAllowsApplyWithNoOrgEvidenceWhenExplicitNoEvidenceFlagSetForMultiSet
 }
 
 func TestRunBlocksRemovalsWhenNoCandidatesVisible(t *testing.T) {
+	t.Skip("obsolete characterization: NQE-derived removal is retired before candidate-evidence overrides are evaluated")
 	var patched []string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
@@ -1359,7 +1357,6 @@ func TestRunBlocksRemovalsWhenNoCandidatesVisible(t *testing.T) {
 		APIPrefix:         "/api",
 		Insecure:          true,
 		Apply:             true,
-		PruneMissing:      true,
 		AllowRemovals:     true,
 		MaxRemovals:       1,
 		MaxRemovalPercent: 100,

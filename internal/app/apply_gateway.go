@@ -415,6 +415,9 @@ func validateApplyAuthorization(state *applyIntentState, authorization ApplyAuth
 	if !authorization.AllowDestructive {
 		return fmt.Errorf("planned account removals or disables require --allow-removals")
 	}
+	if totalRemoved > 0 && strings.EqualFold(strings.TrimSpace(state.snapshot.Source), "nqe") {
+		return nqeCompleteInventoryError()
+	}
 	if totalRemoved > 0 && state.policy.Kind == CompleteInventory && !state.snapshot.Completeness.Proven() {
 		return incompleteInventoryPolicyError(state.snapshot)
 	}
