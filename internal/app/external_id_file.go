@@ -65,13 +65,16 @@ func loadExternalIDAssignments(path, defaultSetupID string) (externalIDAssignmen
 			setupID = record[0]
 			offset = 1
 		}
+		if _, err := NewSetupID(setupID); err != nil {
+			return nil, fmt.Errorf("external ID file row %d has invalid setup_id %q: %w", row, setupID, err)
+		}
 		accountID := record[offset]
 		action := strings.ToLower(record[offset+1])
 		externalID := record[offset+2]
 		if setupID == "" {
 			return nil, fmt.Errorf("external ID file row %d has an empty setup_id", row)
 		}
-		if !awsAccountIDPattern.MatchString(accountID) {
+		if _, err := NewAccountID(accountID); err != nil {
 			return nil, fmt.Errorf("external ID file row %d has invalid AWS account ID %q; expected 12 digits", row, accountID)
 		}
 		switch action {

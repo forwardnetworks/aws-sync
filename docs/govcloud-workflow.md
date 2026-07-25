@@ -4,10 +4,10 @@ Use this workflow for AWS GovCloud (US) accounts, including customers that canno
 
 AWS Organizations is available in GovCloud, but a GovCloud organization is independent from a commercial AWS organization. Its Organizations control plane is in `us-gov-west-1`. Forward's regular AWS collection pipeline can query Organizations using the GovCloud setup credentials and primary region.
 
-There are two supported inventory paths:
+There are two supported synchronization paths:
 
-1. **GovCloud Organizations + Forward NQE** is preferred when the customer can grant read access to the GovCloud organization.
-2. **Reviewed account manifest** is the fallback for standalone accounts or customers that cannot grant Organizations access.
+1. **GovCloud Organizations + Forward NQE** can add and re-enable observed accounts when the customer grants read access to the GovCloud organization. It never removes accounts.
+2. **Reviewed account manifest** is the authoritative path for lifecycle removals and the fallback for standalone accounts or customers that cannot grant Organizations access.
 
 Do not treat a successfully collected GovCloud region as proof that Organizations discovery succeeded. Resource collection and organization inventory are separate checks.
 
@@ -41,26 +41,23 @@ Configure at least `us-gov-west-1` in the Forward AWS setup. Run a Forward conne
   --network-id NETWORK_ID \
   --setup-id GOVCLOUD_SETUP \
   --max-snapshot-age 24h \
-  --max-removals 5 \
-  --max-removal-percent 5 \
   --format human
 ```
 
-Preflight must confirm all of the following before any removal:
+Preflight should confirm all of the following before additive synchronization:
 
 - the setup's role ARNs consistently use `arn:aws-us-gov`;
 - the configured collection regions are GovCloud regions;
 - the current snapshot returns AWS accounts for the selected setup;
-- Forward NQE exposes positive Organizations evidence, such as uncollected candidate accounts or Organizational Unit IDs;
-- every proposed removed account ID has been reviewed.
+- Forward NQE exposes the expected observed accounts and, when available, Organizations metadata such as Organizational Unit IDs.
 
-An account directly under the organization root may have no OU ID. A missing OU ID alone does not prove failure, but a removal plan with neither candidate accounts nor OU evidence is unsafe. GovCloud removals from the NQE path are blocked in that state and cannot be forced with the generic no-evidence flags.
+An account directly under the organization root may have no OU ID. More importantly, NQE is observed inventory rather than a configured-account manifest: authorization failures, collection failures, organization scope, and transient errors can all make an account absent. NQE absence therefore never produces a GovCloud removal.
 
-If preflight is ready and the plan has no removals, generate the payload normally. If it proposes removals, review the exact IDs printed by the human report and the JSON payload before applying.
+If preflight is ready, generate and review the additive payload normally. For any lifecycle removal, switch to Path B.
 
 ## Path B: Manual Account Manifest
 
-Use this path when the customer has standalone GovCloud accounts, Organizations is unavailable by policy, or Forward cannot see the GovCloud organization.
+Use this path for every lifecycle removal, and when the customer has standalone GovCloud accounts, Organizations is unavailable by policy, or Forward cannot see the GovCloud organization.
 
 Create a reviewed JSON file containing the complete authoritative account inventory:
 
@@ -138,14 +135,15 @@ If removals are intentional, the apply is blocked unless the operator also suppl
   --allow-removals \
   --max-removals 5 \
   --max-removal-percent 5 \
+  --allow-unattended-destructive \
   --yes
 ```
 
-Set the ceilings to the reviewed change, not to the full account population. `--max-removals` limits the total removals in the run, and `--max-removal-percent` prevents a single setup from losing more than the approved percentage. Exceeding either value blocks before PATCH.
+Set the ceilings to the reviewed change, not to the full account population. `--max-removals` limits the total removals in the run, and `--max-removal-percent` prevents a single setup from losing more than the approved percentage. Exceeding either value blocks before PATCH. `--allow-unattended-destructive` is also required here because `--yes` skips the human confirmation and Forward provides no atomic compare-and-swap token. For a human-attended removal, omit both `--yes` and `--allow-unattended-destructive` and type `apply` after reviewing the preview.
 
 After any update, run a Forward connectivity test for representative accounts, run a new snapshot, and inspect per-account collection errors.
 
-Do not use `apply-plan` to bypass these source checks. `apply-plan` reloads the current Forward setup before patching and refuses GovCloud account removals; rerun the NQE or manifest workflow that produced the inventory instead.
+Do not use `apply-plan` to bypass these source checks. `apply-plan` reloads the current Forward setup before patching and refuses GovCloud account removals; rerun `sync-accounts` with the reviewed manifest instead.
 
 ## When This Is a Forward Product Issue
 

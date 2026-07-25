@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -59,6 +60,73 @@ func TestQueryAWSAccountsPagesResults(t *testing.T) {
 	}
 	if len(seenOffsets) != 2 || seenOffsets[0] != 0 || seenOffsets[1] != PageLimit {
 		t.Fatalf("unexpected offsets: %#v", seenOffsets)
+	}
+}
+
+func TestQueryAWSAccountsMarksExactPageLimitMultipleUnproven(t *testing.T) {
+	var seenOffsets []int
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req QueryRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		seenOffsets = append(seenOffsets, req.QueryOptions.Offset)
+		w.Header().Set("Content-Type", "application/json")
+		if req.QueryOptions.Offset == 0 {
+			items := make([]map[string]any, PageLimit)
+			for i := range items {
+				items[i] = map[string]any{"Cloud Account ID": "111111111111"}
+			}
+			_ = json.NewEncoder(w).Encode(NQEResponse{Items: items})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(NQEResponse{})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "/api", "alice", "secret", true, time.Second)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	result, err := client.QueryAWSAccountsWithMetadata(context.Background(), "network-1", "", "", "query-1", nil, nil)
+	if err != nil {
+		t.Fatalf("QueryAWSAccountsWithMetadata() error = %v", err)
+	}
+	if !result.CompletenessUnproven || !strings.Contains(result.CompletenessReason, "exact multiple of PageLimit") {
+		t.Fatalf("expected exact-multiple completeness warning, got %#v", result)
+	}
+	if result.ObservedRowCount != PageLimit || result.PageLimit != PageLimit {
+		t.Fatalf("unexpected counts: %#v", result)
+	}
+	if len(seenOffsets) != 2 || seenOffsets[0] != 0 || seenOffsets[1] != PageLimit {
+		t.Fatalf("unexpected offsets: %#v", seenOffsets)
+	}
+}
+
+func TestQueryAWSAccountsMarksRepeatedPageUnproven(t *testing.T) {
+	items := make([]map[string]any, PageLimit)
+	for i := range items {
+		items[i] = map[string]any{"Cloud Account ID": "111111111111"}
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(NQEResponse{Items: items})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "/api", "alice", "secret", true, time.Second)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	result, err := client.QueryAWSAccountsWithMetadata(context.Background(), "network-1", "", "", "query-1", nil, nil)
+	if err != nil {
+		t.Fatalf("QueryAWSAccountsWithMetadata() error = %v", err)
+	}
+	if !result.CompletenessUnproven || !strings.Contains(result.CompletenessReason, "repeated page") {
+		t.Fatalf("expected repeated-page completeness warning, got %#v", result)
+	}
+	if result.ObservedRowCount != PageLimit {
+		t.Fatalf("expected only first page to be counted, got %#v", result)
 	}
 }
 

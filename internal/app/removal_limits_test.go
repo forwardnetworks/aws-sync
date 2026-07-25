@@ -44,8 +44,8 @@ func TestPatchPlanRemovalStatsUseCurrentConfiguredCounts(t *testing.T) {
 	plan := &patchPlan{Setups: []plannedSetup{
 		{
 			SetupID:         "setup-a",
-			CurrentAccounts: []accountRow{{AccountID: "111"}, {AccountID: "222"}},
-			RemovedAccounts: []accountRow{{AccountID: "222"}},
+			CurrentAccounts: []accountRow{{AccountID: "111111111111"}, {AccountID: "222222222222"}},
+			RemovedAccounts: []accountRow{{AccountID: "222222222222"}},
 		},
 	}}
 	stats := plan.removalStats()

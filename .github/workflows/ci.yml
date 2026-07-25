@@ -25,14 +25,45 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Check formatting
-        run: make fmt-check
+      - name: Check Go formatting
+        shell: bash
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [[ -n "${unformatted}" ]]; then
+            echo "The following Go files are not gofmt-formatted:" >&2
+            printf '%s\n' "${unformatted}" >&2
+            exit 1
+          fi
       - name: Vet
-        run: make vet
+        run: go vet ./...
+      - name: Guard phase 0 failure-test switches
+        shell: bash
+        run: |
+          guards=(
+            "internal/api/architecture_failure_test.go:runP0APIFailureTests"
+            "internal/app/architecture_failure_test.go:runP0ArchitectureFailureTests"
+            "internal/webhook/architecture_failure_test.go:runP0WebhookFailureTests"
+          )
+
+          status=0
+          for entry in "${guards[@]}"; do
+            file="${entry%%:*}"
+            guard="${entry#*:}"
+            expected="^[[:space:]]*const[[:space:]]+${guard}([[:space:]]+bool)?[[:space:]]*=[[:space:]]*false[[:space:]]*(//.*)?$"
+            if ! grep -Eq "${expected}" "${file}"; then
+              actual="$(grep -En "^[[:space:]]*const[[:space:]]+${guard}([[:space:]]+bool)?[[:space:]]*=" "${file}" || true)"
+              printf '::error file=%s::%s must remain false; found: %s\n' \
+                "${file}" "${guard}" "${actual:-<missing>}"
+              status=1
+            fi
+          done
+          exit "${status}"
       - name: Test
         run: make test
-      - name: Race detector
-        run: make race
+      - name: Race detector (full suite)
+        run: go test -race ./...
+      - name: Race detector (webhook, 10 runs)
+        run: go test -race ./internal/webhook/ -count=10
       - name: Vulnerability scan
         run: make vuln
       - name: Build

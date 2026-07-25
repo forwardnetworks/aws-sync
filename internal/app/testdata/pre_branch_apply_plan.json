@@ -1,0 +1,27 @@
+{
+  "setup-a": {
+    "type": "AWS",
+    "name": "setup-a",
+    "regions": {
+      "us-east-1": 123
+    },
+    "regionToProxyServerId": {},
+    "proxyServerId": "proxy-1",
+    "assumeRoleInfos": [
+      {
+        "accountId": "111111111111",
+        "accountName": "account-one",
+        "roleArn": "arn:aws:iam::111111111111:role/ForwardRole",
+        "externalId": "old-external-id",
+        "enabled": true
+      },
+      {
+        "accountId": "222222222222",
+        "accountName": "222222222222",
+        "roleArn": "arn:aws:iam::222222222222:role/ForwardRole",
+        "externalId": "remove-me",
+        "enabled": true
+      }
+    ]
+  }
+}

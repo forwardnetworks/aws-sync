@@ -1,5 +1,7 @@
 # AWS Account Sync CLI Quick Start
 
+If this replaces an earlier release, read [Upgrading `awssync`](upgrading.md) before changing an existing job or webhook service.
+
 For routine updates of an existing Forward AWS setup, start with [`safe-sync`](routine-safe-sync.md). It performs preflight, previews the changes, refuses removals, prompts once, and writes rollback data:
 
 ```bash
@@ -10,7 +12,7 @@ For routine updates of an existing Forward AWS setup, start with [`safe-sync`](r
 
 The rest of this guide covers the standard and expert commands for automation, onboarding, External IDs, GovCloud, and independently reviewed account removals.
 
-Use the standard `awssync` command to update an existing Forward AWS setup when AWS Organization accounts are added or removed and Forward's collected NQE data is the source of truth.
+Use the standard `awssync` command for additive updates to an existing Forward AWS setup. Forward's NQE rows are observed snapshot inventory, not a source of truth for configured membership; removals use `sync-accounts` with a reviewed manifest.
 
 For new AWS Organizations onboarding, prefer the Forward Terraform provider as the native IaC workflow. It supports Forward assume-role, static-key, and collector instance-profile credential models. Use `awssync discover-org` only when Forward has not onboarded that AWS Organization yet and you need manual JSON files, a break-glass create payload, or a static-key workflow that should stay outside Terraform state.
 
@@ -21,7 +23,7 @@ For AWS GovCloud, use the dedicated [AWS GovCloud Account Workflow](govcloud-wor
 - Forward must collect the AWS management account or a delegated account that can list AWS Organizations accounts.
 - Each AWS account that Forward should collect must have the same Forward IAM role name.
 - Forward IAM role and IAM user/access-key multi-account setups are supported.
-- Run a dry plan first. Do not apply removals until the account list is reviewed.
+- Run a dry plan first. Use a complete reviewed manifest for removals.
 
 Grant AWS Organizations read permissions only to the management or delegated discovery account used for inventory. Do not grant organization-wide permissions to every member role. Member accounts need the Forward collection policy and trust policy for `sts:AssumeRole`.
 
@@ -54,11 +56,7 @@ Expected result: `ready` is `true`.
 
 If `management_account_discovery` fails, confirm Forward is collecting the AWS management or delegated discovery account.
 
-`nqe_org_unit_row_count` is helpful supporting evidence when it is nonzero, but it can be zero for valid AWS Organizations where accounts sit directly under the root. Do not use OU IDs as the only safety signal for removals.
-
-If both `nqe_candidate_row_count` and `nqe_org_unit_row_count` are zero and removals are planned, review `--allow-no-org-evidence` before applying.
-
-In multi-setup runs, `--allow-no-org-evidence` is required only for setup IDs that are missing both signals; preflight output shows the setup IDs in the failing check message.
+`nqe_org_unit_row_count` and `nqe_candidate_row_count` are useful discovery diagnostics, but neither proves the NQE result is a complete account manifest. Missing accounts remain configured regardless of these counts.
 
 ## Create a Dry Plan
 
@@ -81,9 +79,11 @@ If you need a manual fallback format for UI drag-and-drop, also review `aws_sync
 - each value is the list of `assumeRoleInfos` planned for that setup
 - you can paste a single setup block into the Forward UI or use it as a reference before apply
 
-Stop if removed accounts are unexpected.
+`removed_accounts` must be empty in a standard NQE plan. Stop without applying if it is not.
 
-Generated payload, manual, and applied-audit files are atomically replaced with owner-only `0600` permissions. They can still contain sensitive credential material in static-key onboarding workflows, so store and dispose of them according to the customer's credential policy.
+NQE account IDs must contain exactly 12 digits. Malformed rows fail the run by default. `--allow-malformed-rows` is an additive-only escape hatch: it skips and reports those rows, marks the observation incomplete, and cannot authorize removals.
+
+Generated payload, rollback, result-journal, manual, and applied-audit files are atomically replaced with owner-only `0600` permissions. They can still contain sensitive credential material in static-key onboarding workflows, so store and dispose of them according to the customer's credential policy.
 
 ## Add an External ID to an Existing IAM User Setup
 
@@ -127,7 +127,7 @@ AWS-PROD,333333333333,clear,
 
 Duplicate, malformed, or unknown accounts fail before PATCH. Normal sync preserves mixed per-account values. If a mixed-ID setup gains a new account, pass the same `--external-id-file` to `preflight` and the normal dry-run/apply so the new account has an explicit value.
 
-Scoped rollback uses the same `--account-id`: dry-run and apply `--clear` if the original value was null, or `--value PREVIOUS_VALUE` if it was non-null. Record the old non-null value before the test; the summary reports its configured state but does not save it as an automatic rollback value. Relax the selected account's AWS trust-policy condition before changing Forward back. All unselected accounts remain unchanged.
+Every External ID apply writes the pre-change account list and PATCHable setup fields to `<output>.rollback.json` and maintains `<output>.result.json`. The rollback is a PATCH payload, not a full setup backup: it does not capture `collect`, `connectionTimeoutSeconds`, `requestTimeoutSeconds`, `numVirtualizedDevices`, or `useForwardAccountToAssumeRole`. Forward leaves those absent top-level fields unchanged when the rollback is applied. For a narrowly scoped manual revert, use the same `--account-id`: dry-run and apply `--clear` if the original value was null, or `--value PREVIOUS_VALUE` if it was non-null. The summary does not print the old value, so take it from the protected rollback payload if needed. Relax the selected account's AWS trust-policy condition before changing Forward back. All unselected accounts remain unchanged.
 
 Rollback order matters: first relax or remove the mandatory `sts:ExternalId` condition from the target-role trust policies and confirm a representative role can still be assumed. Then replace `--value VALUE` with `--clear`, review the dry run, apply it, and test collection again. Clearing Forward first while AWS still requires the External ID will interrupt collection.
 
@@ -180,25 +180,31 @@ terraform -chdir=examples/terraform/forward-collection-role-stackset apply
 ./bin/awssync --max-snapshot-age 24h --output aws_sync_payload.json --apply --yes
 ```
 
-If removals are expected:
+The standard command is additive: NQE absence never produces removal. If an account must be removed, prepare a complete reviewed manifest and dry-run the one affected setup:
 
 ```bash
-./bin/awssync \
-  --max-snapshot-age 24h \
-  --output aws_sync_payload.json \
-  --apply \
-  --yes \
-  --prune-missing \
-  --allow-removals \
-  --max-removals 10 \
-  --max-removal-percent 5
+./bin/awssync sync-accounts \
+  --setup-id AWS-PROD \
+  --accounts-file reviewed-accounts.json \
+  --output aws_manifest_plan.json
 ```
 
-NQE sync is additive by default. `--prune-missing` is required before an account absent from NQE can become a removal; prefer a complete authoritative manifest for lifecycle removals. Both limits are mandatory for any removal. `--max-removals` is the aggregate ceiling across selected setups. `--max-removal-percent` is evaluated separately for each setup against its current configured-account count. Preflight accepts the same limits and reports `removal_blast_radius` before anything is patched.
+After reviewing every added and removed ID, apply with narrow removal ceilings:
 
-If removals are expected and no uncollected candidate accounts are visible, also add `--allow-no-candidates` only after confirming AWS Organizations discovery is working.
+```bash
+./bin/awssync sync-accounts \
+  --setup-id AWS-PROD \
+  --accounts-file reviewed-accounts.json \
+  --output aws_manifest_plan.json \
+  --apply \
+  --yes \
+  --allow-removals \
+  --max-removals 10 \
+  --max-removal-percent 5 \
+  --allow-unattended-destructive
+```
 
-If removals are expected and there is no candidate signal and no OU signal for a setup, also add `--allow-no-org-evidence` only after independent verification that Forward’s discovery account is still collecting a complete AWS Organization account list.
+`--prune-missing` is still recognized but always refuses: NQE is observed inventory, not an account manifest, so absence cannot prove deletion. Both limits remain mandatory for manifest removals. `--max-removals` is the aggregate ceiling and `--max-removal-percent` is evaluated against the setup's current configured-account count. The last flag is required because `--yes` makes this a destructive unattended apply; omit both `--yes` and `--allow-unattended-destructive` to use the interactive confirmation instead.
 
 ## Multiple AWS Setups
 
@@ -234,13 +240,13 @@ Recompute and apply after reviewing the expected changes:
   --yes
 ```
 
-For one setup, pass a single `--setup-id AWS_SETUP_ID`. Repeat `--setup-id` for other setup combinations. Add `--prune-missing` and `--allow-removals` only after reviewing and confirming every proposed NQE-based removal.
+For one setup, pass a single `--setup-id AWS_SETUP_ID`. Repeat `--setup-id` for additive NQE synchronization of other setup combinations. Removal is a separate, one-setup-at-a-time `sync-accounts` manifest workflow.
 
 When exactly one setup is selected, the default inline NQE query is parameterized by that setup ID to reduce returned rows. Multiple setup IDs are still separated by `Cloud Setup ID` in the NQE result.
 
-For automation, omit `--prune-missing` and `--allow-removals`. Normal additions and re-enablement can proceed, while accounts absent from NQE remain configured.
+Normal additions and re-enablement can proceed in automation, while accounts absent from NQE remain configured. Automate manifest removals only when the manifest itself has an independent human review and approval process.
 
-Human-readable output is the default. Add `--json` for scripts. Every apply writes `<output>.rollback.json` before the first PATCH; use that file with `apply-plan --plan` to restore the exact prior setup state.
+Human-readable output is the default. Add `--json` for scripts. Every apply writes `<output>.rollback.json` before the first PATCH and updates `<output>.result.json` as each setup is applied, conflicted, or failed. Inspect the journal and current Forward state before recovering a partial run. A rollback that removes or disables accounts needs the normal removal limits and `--allow-unattended-destructive`; follow [Apply recovery](aws-account-sync-procedure.md#apply-recovery).
 
 An existing NQE row with `Collected? false` is not proof that AWS Organizations discovered a new account. It commonly represents an account that is configured but disabled or failing collection. Only uncollected IDs not already present in the setup count as discovery candidates.
 
@@ -262,14 +268,28 @@ Forward API reads, NQE queries, and full-state PATCH operations use bounded retr
 For event-driven sync, run the receiver:
 
 ```bash
-./bin/awssync serve-webhook --listen 0.0.0.0:8080 --webhook-basic-username awssync --webhook-basic-password RECEIVER_SECRET --apply --yes
+./bin/awssync serve-webhook \
+  --network-id NETWORK_ID \
+  --listen 0.0.0.0:8080 \
+  --webhook-basic-username awssync \
+  --webhook-basic-password RECEIVER_SECRET \
+  --webhook-state-file /var/lib/awssync/webhook-state.json \
+  --apply \
+  --yes
 ```
 
 Then configure Forward:
 
 ```bash
-./bin/awssync configure-webhook --webhook-url https://awssync.example.com/forward/snapshot-ready --webhook-basic-username awssync --webhook-basic-password RECEIVER_SECRET --test-webhook
+./bin/awssync configure-webhook \
+  --network-id NETWORK_ID \
+  --webhook-url https://awssync.example.com/forward/snapshot-ready \
+  --webhook-basic-username awssync \
+  --webhook-basic-password RECEIVER_SECRET \
+  --test-webhook
 ```
+
+The applying receiver will not start without the network and both Basic Auth values. Forward must send the same username and password. Retain the state file across restarts; after five failed attempts an event remains in `dead_letter_events` until an operator corrects the cause and redelivers or discards it.
 
 For setup-scoped webhook sync, add `--setup-id SETUP_ID`. Repeat it for more than one setup, or add `--webhook-per-setup` to create one Forward webhook per setup.
 

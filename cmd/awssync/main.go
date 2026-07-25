@@ -31,6 +31,8 @@ var (
 	buildDate = "unknown"
 )
 
+const pruneMissingRefusal = "--prune-missing is no longer supported: the NQE result is observed inventory, not an account manifest, so an account's absence cannot prove it should be deleted; use sync-accounts with a reviewed manifest instead"
+
 func main() {
 	if err := newRootCommand().Execute(); err != nil {
 		emitError(os.Stderr, err)
@@ -57,6 +59,9 @@ func newRootCommand() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := refusePruneMissing(cmd, v); err != nil {
+				return err
+			}
 			password, err := resolvePassword(v, os.Stdin, os.Stderr)
 			if err != nil {
 				return err
@@ -72,6 +77,9 @@ func newRootCommand() *cobra.Command {
 			apply := flagBool(cmd, v, "apply")
 			yes := flagBool(cmd, v, "yes")
 			snapshotID := flagString(cmd, v, "snapshot-id")
+			expectedPlanDigest := ""
+			planningInstant := time.Now().UTC()
+			policy := app.NewNQEReconcilePolicy(flagBool(cmd, v, "allow-no-org-evidence"), planningInstant)
 			if apply && !yes && term.IsTerminal(int(os.Stdin.Fd())) {
 				preview := app.Config{
 					Host:               v.GetString("host"),
@@ -92,10 +100,11 @@ func newRootCommand() *cobra.Command {
 					MaxRemovalPercent:  flagFloat64(cmd, v, "max-removal-percent"),
 					AllowNoCandidates:  flagBool(cmd, v, "allow-no-candidates"),
 					AllowNoOrgEvidence: flagBool(cmd, v, "allow-no-org-evidence"),
-					PruneMissing:       flagBool(cmd, v, "prune-missing"),
 					MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
 					ExternalIDFile:     flagString(cmd, v, "external-id-file"),
+					Policy:             policy,
 					PinSnapshot:        true,
+					AllowMalformedRows: flagBool(cmd, v, "allow-malformed-rows"),
 				}
 				previewSummary, err := app.Run(cmd.Context(), preview)
 				if err != nil {
@@ -105,35 +114,46 @@ func newRootCommand() *cobra.Command {
 					return err
 				}
 				snapshotID = previewSummary.SnapshotID
+				expectedPlanDigest = previewSummary.PlanDigest
 			} else {
 				if err := confirmApply(apply, yes, os.Stdin, os.Stderr); err != nil {
 					return err
 				}
 			}
 			cfg := app.Config{
-				Host:               v.GetString("host"),
-				Username:           v.GetString("username"),
-				Password:           password,
-				NetworkID:          networkID,
-				SnapshotID:         snapshotID,
-				QueryID:            flagString(cmd, v, "query-id"),
-				QuerySetupParam:    flagString(cmd, v, "query-setup-param"),
-				SetupIDs:           setupIDs,
-				Output:             flagString(cmd, v, "output"),
-				ManualOutput:       flagString(cmd, v, "manual-output"),
-				APIPrefix:          v.GetString("api-prefix"),
-				Insecure:           v.GetBool("insecure"),
-				Timeout:            v.GetDuration("timeout"),
-				Apply:              apply,
-				AllowRemovals:      flagBool(cmd, v, "allow-removals"),
-				MaxRemovals:        flagInt(cmd, v, "max-removals"),
-				MaxRemovalPercent:  flagFloat64(cmd, v, "max-removal-percent"),
-				AllowNoCandidates:  flagBool(cmd, v, "allow-no-candidates"),
-				AllowNoOrgEvidence: flagBool(cmd, v, "allow-no-org-evidence"),
-				PruneMissing:       flagBool(cmd, v, "prune-missing"),
-				MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
-				ExternalIDFile:     flagString(cmd, v, "external-id-file"),
-				PinSnapshot:        true,
+				Host:                       v.GetString("host"),
+				Username:                   v.GetString("username"),
+				Password:                   password,
+				NetworkID:                  networkID,
+				SnapshotID:                 snapshotID,
+				QueryID:                    flagString(cmd, v, "query-id"),
+				QuerySetupParam:            flagString(cmd, v, "query-setup-param"),
+				SetupIDs:                   setupIDs,
+				Output:                     flagString(cmd, v, "output"),
+				ManualOutput:               flagString(cmd, v, "manual-output"),
+				APIPrefix:                  v.GetString("api-prefix"),
+				Insecure:                   v.GetBool("insecure"),
+				Timeout:                    v.GetDuration("timeout"),
+				Apply:                      apply,
+				AllowRemovals:              flagBool(cmd, v, "allow-removals"),
+				MaxRemovals:                flagInt(cmd, v, "max-removals"),
+				MaxRemovalPercent:          flagFloat64(cmd, v, "max-removal-percent"),
+				AllowNoCandidates:          flagBool(cmd, v, "allow-no-candidates"),
+				AllowNoOrgEvidence:         flagBool(cmd, v, "allow-no-org-evidence"),
+				MaxSnapshotAge:             flagDuration(cmd, v, "max-snapshot-age"),
+				ExternalIDFile:             flagString(cmd, v, "external-id-file"),
+				Policy:                     policy,
+				PinSnapshot:                true,
+				ExpectedPlanDigest:         expectedPlanDigest,
+				AllowMalformedRows:         flagBool(cmd, v, "allow-malformed-rows"),
+				Unattended:                 yes,
+				AllowUnattendedDestructive: flagBool(cmd, v, "allow-unattended-destructive"),
+				AuthorizationActor: func() string {
+					if yes {
+						return "CLI --yes"
+					}
+					return "CLI interactive confirmation"
+				}(),
 			}
 			summary, err := app.Run(cmd.Context(), cfg)
 			if err != nil {
@@ -191,6 +211,7 @@ func newSafeSyncCommand(v *viper.Viper) *cobra.Command {
 				return err
 			}
 			const maxSnapshotAge = 24 * time.Hour
+			planningInstant := time.Now().UTC()
 			base := app.Config{
 				Host:           v.GetString("host"),
 				Username:       v.GetString("username"),
@@ -201,6 +222,7 @@ func newSafeSyncCommand(v *viper.Viper) *cobra.Command {
 				Insecure:       v.GetBool("insecure"),
 				Timeout:        v.GetDuration("timeout"),
 				MaxSnapshotAge: maxSnapshotAge,
+				Policy:         app.NewNQEReconcilePolicy(false, planningInstant),
 			}
 			preflight, err := app.Preflight(cmd.Context(), base)
 			if err != nil {
@@ -237,6 +259,13 @@ func newSafeSyncCommand(v *viper.Viper) *cobra.Command {
 			base.Apply = true
 			base.Output = preview.Output
 			base.ExpectedPayloadSHA256 = preview.PayloadSHA256
+			base.ExpectedPlanDigest = preview.PlanDigest
+			base.Unattended = flagBool(cmd, v, "yes")
+			if base.Unattended {
+				base.AuthorizationActor = "safe-sync --yes"
+			} else {
+				base.AuthorizationActor = "safe-sync interactive confirmation"
+			}
 			result, err := app.Run(cmd.Context(), base)
 			if err != nil {
 				return err
@@ -279,9 +308,6 @@ func newExternalIDCommand(v *viper.Viper) *cobra.Command {
 			externalIDFile, _ := cmd.Flags().GetString("external-id-file")
 			apply, _ := cmd.Flags().GetBool("apply")
 			yes, _ := cmd.Flags().GetBool("yes")
-			if err := confirmApply(apply, yes, os.Stdin, os.Stderr); err != nil {
-				return err
-			}
 			output, _ := cmd.Flags().GetString("output")
 			summary, err := app.ChangeExternalID(cmd.Context(), app.ExternalIDConfig{
 				Host:           v.GetString("host"),
@@ -298,6 +324,17 @@ func newExternalIDCommand(v *viper.Viper) *cobra.Command {
 				Insecure:       v.GetBool("insecure"),
 				Timeout:        v.GetDuration("timeout"),
 				Apply:          apply,
+				Unattended:     yes,
+				AuthorizationActor: func() string {
+					if yes {
+						return "CLI external-id --yes"
+					}
+					return "CLI external-id interactive confirmation"
+				}(),
+				ConfirmApply: func(planDigest string) error {
+					fmt.Fprintf(os.Stderr, "External ID apply intent SHA-256: %s\n", planDigest)
+					return confirmApply(true, yes, os.Stdin, os.Stderr)
+				},
 			})
 			if err != nil {
 				return err
@@ -353,11 +390,12 @@ func bindPreflightFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	flags.String("query-setup-param", "", "optional saved-query String parameter name to receive the single selected --setup-id")
 	flags.StringSlice("setup-id", nil, "optional Forward AWS setup ID to sync; repeatable")
 	flags.Bool("allow-no-org-evidence", false, "allow removals when no AWS Organizations evidence is visible in NQE")
-	flags.Bool("prune-missing", false, "plan removal of configured accounts missing from NQE; additive preservation is the default")
+	flags.Bool("prune-missing", false, "retired: NQE absence cannot prove deletion; use sync-accounts with a reviewed manifest")
 	flags.Int("max-removals", 0, "required nonzero aggregate account-removal ceiling when removals are planned")
 	flags.Float64("max-removal-percent", 0, "required nonzero per-setup removal-percentage ceiling when removals are planned")
 	flags.Duration("max-snapshot-age", 0, "fail if latest processed snapshot is older than this duration; 0 disables the check")
 	flags.String("external-id-file", "", "CSV file of explicit per-account External IDs for mixed-ID setups")
+	flags.Bool("allow-malformed-rows", false, "skip and report malformed NQE account rows; the observed result is marked incomplete")
 	mustBind(v, flags, "snapshot-id")
 	mustBind(v, flags, "query-id")
 	mustBind(v, flags, "query-setup-param")
@@ -368,6 +406,7 @@ func bindPreflightFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	mustBind(v, flags, "max-removal-percent")
 	mustBind(v, flags, "max-snapshot-age")
 	mustBind(v, flags, "external-id-file")
+	mustBind(v, flags, "allow-malformed-rows")
 }
 
 func bindProcessingFlags(v *viper.Viper, flags *pflag.FlagSet) {
@@ -378,14 +417,16 @@ func bindProcessingFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	flags.String("manual-output", "", "optional JSON path for manual platform drag-and-drop payloads")
 	flags.Bool("apply", false, "PATCH the generated setup payloads back into Forward")
 	flags.Bool("yes", false, "skip apply confirmation prompt")
+	flags.Bool("allow-unattended-destructive", false, "allow --yes, webhook, or CI applies to remove or disable accounts despite the lack of atomic compare-and-swap")
 	flags.Bool("allow-removals", false, "allow planned account removals during apply")
 	flags.Int("max-removals", 0, "required nonzero aggregate account-removal ceiling when removals are planned")
 	flags.Float64("max-removal-percent", 0, "required nonzero per-setup removal-percentage ceiling when removals are planned")
 	flags.Bool("allow-no-candidates", false, "allow removals when no uncollected candidate accounts are visible")
 	flags.Bool("allow-no-org-evidence", false, "allow removals when no AWS Organizations evidence is visible in NQE")
-	flags.Bool("prune-missing", false, "plan removal of configured accounts missing from NQE; additive preservation is the default")
+	flags.Bool("prune-missing", false, "retired: NQE absence cannot prove deletion; use sync-accounts with a reviewed manifest")
 	flags.Duration("max-snapshot-age", 0, "fail if latest processed snapshot is older than this duration; 0 disables the check")
 	flags.String("external-id-file", "", "CSV file of explicit per-account External IDs for mixed-ID setups")
+	flags.Bool("allow-malformed-rows", false, "skip and report malformed NQE account rows; the observed result is marked incomplete")
 	mustBind(v, flags, "query-id")
 	mustBind(v, flags, "query-setup-param")
 	mustBind(v, flags, "setup-id")
@@ -393,6 +434,7 @@ func bindProcessingFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	mustBind(v, flags, "manual-output")
 	mustBind(v, flags, "apply")
 	mustBind(v, flags, "yes")
+	mustBind(v, flags, "allow-unattended-destructive")
 	mustBind(v, flags, "allow-removals")
 	mustBind(v, flags, "max-removals")
 	mustBind(v, flags, "max-removal-percent")
@@ -401,6 +443,7 @@ func bindProcessingFlags(v *viper.Viper, flags *pflag.FlagSet) {
 	mustBind(v, flags, "prune-missing")
 	mustBind(v, flags, "max-snapshot-age")
 	mustBind(v, flags, "external-id-file")
+	mustBind(v, flags, "allow-malformed-rows")
 }
 
 func newPreflightCommand(v *viper.Viper) *cobra.Command {
@@ -410,6 +453,9 @@ func newPreflightCommand(v *viper.Viper) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := refusePruneMissing(cmd, v); err != nil {
+				return err
+			}
 			password, err := resolvePassword(v, os.Stdin, os.Stderr)
 			if err != nil {
 				return err
@@ -422,6 +468,7 @@ func newPreflightCommand(v *viper.Viper) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			planningInstant := time.Now().UTC()
 			summary, err := app.Preflight(cmd.Context(), app.Config{
 				Host:               v.GetString("host"),
 				Username:           v.GetString("username"),
@@ -435,11 +482,12 @@ func newPreflightCommand(v *viper.Viper) *cobra.Command {
 				Insecure:           v.GetBool("insecure"),
 				Timeout:            v.GetDuration("timeout"),
 				AllowNoOrgEvidence: flagBool(cmd, v, "allow-no-org-evidence"),
-				PruneMissing:       flagBool(cmd, v, "prune-missing"),
 				MaxRemovals:        flagInt(cmd, v, "max-removals"),
 				MaxRemovalPercent:  flagFloat64(cmd, v, "max-removal-percent"),
 				MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
 				ExternalIDFile:     flagString(cmd, v, "external-id-file"),
+				AllowMalformedRows: flagBool(cmd, v, "allow-malformed-rows"),
+				Policy:             app.NewNQEReconcilePolicy(flagBool(cmd, v, "allow-no-org-evidence"), planningInstant),
 			})
 			if err != nil {
 				return err
@@ -504,17 +552,19 @@ func newApplyPlanCommand(v *viper.Viper) *cobra.Command {
 				return err
 			}
 			summary, err := app.ApplyPlan(cmd.Context(), app.ApplyPlanConfig{
-				Host:              v.GetString("host"),
-				Username:          v.GetString("username"),
-				Password:          password,
-				NetworkID:         networkID,
-				PlanPath:          flagString(cmd, v, "plan"),
-				APIPrefix:         v.GetString("api-prefix"),
-				Insecure:          v.GetBool("insecure"),
-				Timeout:           v.GetDuration("timeout"),
-				AllowRemovals:     flagBool(cmd, v, "allow-removals"),
-				MaxRemovals:       flagInt(cmd, v, "max-removals"),
-				MaxRemovalPercent: flagFloat64(cmd, v, "max-removal-percent"),
+				Host:                       v.GetString("host"),
+				Username:                   v.GetString("username"),
+				Password:                   password,
+				NetworkID:                  networkID,
+				PlanPath:                   flagString(cmd, v, "plan"),
+				APIPrefix:                  v.GetString("api-prefix"),
+				Insecure:                   v.GetBool("insecure"),
+				Timeout:                    v.GetDuration("timeout"),
+				AllowRemovals:              flagBool(cmd, v, "allow-removals"),
+				MaxRemovals:                flagInt(cmd, v, "max-removals"),
+				MaxRemovalPercent:          flagFloat64(cmd, v, "max-removal-percent"),
+				AllowUnattendedDestructive: flagBool(cmd, v, "allow-unattended-destructive"),
+				AuthorizationActor:         "CLI apply-plan --yes",
 			})
 			if err != nil {
 				return err
@@ -525,14 +575,16 @@ func newApplyPlanCommand(v *viper.Viper) *cobra.Command {
 	bindNetworkFlag(v, cmd.Flags())
 	cmd.Flags().String("plan", "aws_sync_payload.json", "reviewed payload file to apply")
 	cmd.Flags().Bool("yes", false, "confirm applying the reviewed payload file")
-	cmd.Flags().Bool("allow-removals", false, "allow reviewed commercial-partition account removals; GovCloud removals must use their source workflow")
-	cmd.Flags().Int("max-removals", 0, "required nonzero aggregate account-removal ceiling when removals are planned")
-	cmd.Flags().Float64("max-removal-percent", 0, "required nonzero per-setup removal-percentage ceiling when removals are planned")
+	cmd.Flags().Bool("allow-removals", false, "allow reviewed commercial-partition account removals or disables; GovCloud destructive changes must use their source workflow")
+	cmd.Flags().Int("max-removals", 0, "required nonzero aggregate removal-or-disable ceiling when destructive changes are planned")
+	cmd.Flags().Float64("max-removal-percent", 0, "required nonzero per-setup removal-or-disable percentage ceiling when destructive changes are planned")
+	cmd.Flags().Bool("allow-unattended-destructive", false, "allow apply-plan --yes to remove or disable accounts despite the lack of atomic compare-and-swap")
 	mustBind(v, cmd.Flags(), "plan")
 	mustBind(v, cmd.Flags(), "yes")
 	mustBind(v, cmd.Flags(), "allow-removals")
 	mustBind(v, cmd.Flags(), "max-removals")
 	mustBind(v, cmd.Flags(), "max-removal-percent")
+	mustBind(v, cmd.Flags(), "allow-unattended-destructive")
 	return cmd
 }
 
@@ -801,26 +853,49 @@ func newSyncAccountsCommand(v *viper.Viper) *cobra.Command {
 				return err
 			}
 			apply := flagBool(cmd, v, "apply")
-			if err := confirmApply(apply, flagBool(cmd, v, "yes"), os.Stdin, os.Stderr); err != nil {
+			yes := flagBool(cmd, v, "yes")
+			planningInstant := time.Now().UTC()
+			cfg := app.Config{
+				Host:                       v.GetString("host"),
+				Username:                   v.GetString("username"),
+				Password:                   password,
+				NetworkID:                  networkID,
+				SetupIDs:                   setupIDs,
+				Output:                     flagString(cmd, v, "output"),
+				ManualOutput:               flagString(cmd, v, "manual-output"),
+				APIPrefix:                  v.GetString("api-prefix"),
+				Insecure:                   v.GetBool("insecure"),
+				Timeout:                    v.GetDuration("timeout"),
+				Apply:                      apply,
+				AllowRemovals:              flagBool(cmd, v, "allow-removals"),
+				MaxRemovals:                flagInt(cmd, v, "max-removals"),
+				MaxRemovalPercent:          flagFloat64(cmd, v, "max-removal-percent"),
+				ExternalIDFile:             flagString(cmd, v, "external-id-file"),
+				Unattended:                 yes,
+				AllowUnattendedDestructive: flagBool(cmd, v, "allow-unattended-destructive"),
+				Policy:                     app.NewAuthoritativeManifestReconcilePolicy(planningInstant),
+			}
+			if yes {
+				cfg.AuthorizationActor = "sync-accounts --yes"
+			} else {
+				cfg.AuthorizationActor = "sync-accounts interactive confirmation"
+			}
+			if apply && !yes && term.IsTerminal(int(os.Stdin.Fd())) {
+				previewConfig := cfg
+				previewConfig.Apply = false
+				preview, err := app.SyncAWSAccountManifest(cmd.Context(), previewConfig, accounts)
+				if err != nil {
+					return err
+				}
+				if err := confirmApplyFromSummary(preview, os.Stdin, os.Stderr); err != nil {
+					return err
+				}
+				cfg.Output = preview.Output
+				cfg.ExpectedPlanDigest = preview.PlanDigest
+			} else if err := confirmApply(apply, yes, os.Stdin, os.Stderr); err != nil {
 				return err
 			}
-			summary, err := app.SyncAWSAccountManifest(cmd.Context(), app.Config{
-				Host:              v.GetString("host"),
-				Username:          v.GetString("username"),
-				Password:          password,
-				NetworkID:         networkID,
-				SetupIDs:          setupIDs,
-				Output:            flagString(cmd, v, "output"),
-				ManualOutput:      flagString(cmd, v, "manual-output"),
-				APIPrefix:         v.GetString("api-prefix"),
-				Insecure:          v.GetBool("insecure"),
-				Timeout:           v.GetDuration("timeout"),
-				Apply:             apply,
-				AllowRemovals:     flagBool(cmd, v, "allow-removals"),
-				MaxRemovals:       flagInt(cmd, v, "max-removals"),
-				MaxRemovalPercent: flagFloat64(cmd, v, "max-removal-percent"),
-				ExternalIDFile:    flagString(cmd, v, "external-id-file"),
-			}, accounts)
+			summary, err := app.SyncAWSAccountManifest(cmd.Context(), cfg, accounts)
 			if err != nil {
 				return err
 			}
@@ -834,11 +909,12 @@ func newSyncAccountsCommand(v *viper.Viper) *cobra.Command {
 	cmd.Flags().String("manual-output", "", "optional UI-friendly account JSON output path")
 	cmd.Flags().Bool("apply", false, "PATCH the generated setup payload into Forward")
 	cmd.Flags().Bool("yes", false, "skip apply confirmation prompt")
+	cmd.Flags().Bool("allow-unattended-destructive", false, "allow --yes or CI applies to remove or disable accounts despite the lack of atomic compare-and-swap")
 	cmd.Flags().Bool("allow-removals", false, "allow reviewed manifest entries to remove accounts from the setup")
 	cmd.Flags().Int("max-removals", 0, "required nonzero aggregate account-removal ceiling when removals are planned")
 	cmd.Flags().Float64("max-removal-percent", 0, "required nonzero removal-percentage ceiling when removals are planned")
 	cmd.Flags().String("external-id-file", "", "CSV file of explicit per-account External IDs")
-	for _, name := range []string{"accounts-file", "setup-id", "output", "manual-output", "apply", "yes", "allow-removals", "max-removals", "max-removal-percent", "external-id-file"} {
+	for _, name := range []string{"accounts-file", "setup-id", "output", "manual-output", "apply", "yes", "allow-unattended-destructive", "allow-removals", "max-removals", "max-removal-percent", "external-id-file"} {
 		mustBind(v, cmd.Flags(), name)
 	}
 	return cmd
@@ -851,6 +927,9 @@ func newServeWebhookCommand(v *viper.Viper) *cobra.Command {
 		SilenceErrors: true,
 		Short:         "Receive Forward SNAPSHOT_READY webhooks and run awssync for the exact snapshot",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := refusePruneMissing(cmd, v); err != nil {
+				return err
+			}
 			password, err := resolvePassword(v, os.Stdin, os.Stderr)
 			if err != nil {
 				return err
@@ -858,32 +937,39 @@ func newServeWebhookCommand(v *viper.Viper) *cobra.Command {
 			if flagBool(cmd, v, "apply") && !flagBool(cmd, v, "yes") {
 				return fmt.Errorf("serve-webhook with --apply requires --yes")
 			}
+			policy := app.NewNQEReconcilePolicy(flagBool(cmd, v, "allow-no-org-evidence"), time.Time{})
 			srv, err := webhook.New(webhook.Config{
 				Listen:        flagString(cmd, v, "listen"),
 				Path:          flagString(cmd, v, "path"),
 				BasicUsername: flagString(cmd, v, "webhook-basic-username"),
 				BasicPassword: flagString(cmd, v, "webhook-basic-password"),
+				StatePath:     flagString(cmd, v, "webhook-state-file"),
 				App: app.Config{
-					Host:               v.GetString("host"),
-					Username:           v.GetString("username"),
-					Password:           password,
-					QueryID:            flagString(cmd, v, "query-id"),
-					QuerySetupParam:    flagString(cmd, v, "query-setup-param"),
-					SetupIDs:           flagStringSlice(cmd, v, "setup-id"),
-					Output:             flagString(cmd, v, "output"),
-					ManualOutput:       flagString(cmd, v, "manual-output"),
-					APIPrefix:          v.GetString("api-prefix"),
-					Insecure:           v.GetBool("insecure"),
-					Timeout:            v.GetDuration("timeout"),
-					Apply:              flagBool(cmd, v, "apply"),
-					AllowRemovals:      flagBool(cmd, v, "allow-removals"),
-					MaxRemovals:        flagInt(cmd, v, "max-removals"),
-					MaxRemovalPercent:  flagFloat64(cmd, v, "max-removal-percent"),
-					AllowNoCandidates:  flagBool(cmd, v, "allow-no-candidates"),
-					AllowNoOrgEvidence: flagBool(cmd, v, "allow-no-org-evidence"),
-					PruneMissing:       flagBool(cmd, v, "prune-missing"),
-					MaxSnapshotAge:     flagDuration(cmd, v, "max-snapshot-age"),
-					ExternalIDFile:     flagString(cmd, v, "external-id-file"),
+					Host:                       v.GetString("host"),
+					Username:                   v.GetString("username"),
+					Password:                   password,
+					NetworkID:                  flagString(cmd, v, "network-id"),
+					QueryID:                    flagString(cmd, v, "query-id"),
+					QuerySetupParam:            flagString(cmd, v, "query-setup-param"),
+					SetupIDs:                   flagStringSlice(cmd, v, "setup-id"),
+					Output:                     flagString(cmd, v, "output"),
+					ManualOutput:               flagString(cmd, v, "manual-output"),
+					APIPrefix:                  v.GetString("api-prefix"),
+					Insecure:                   v.GetBool("insecure"),
+					Timeout:                    v.GetDuration("timeout"),
+					Apply:                      flagBool(cmd, v, "apply"),
+					AllowRemovals:              flagBool(cmd, v, "allow-removals"),
+					MaxRemovals:                flagInt(cmd, v, "max-removals"),
+					MaxRemovalPercent:          flagFloat64(cmd, v, "max-removal-percent"),
+					AllowNoCandidates:          flagBool(cmd, v, "allow-no-candidates"),
+					AllowNoOrgEvidence:         flagBool(cmd, v, "allow-no-org-evidence"),
+					MaxSnapshotAge:             flagDuration(cmd, v, "max-snapshot-age"),
+					ExternalIDFile:             flagString(cmd, v, "external-id-file"),
+					AllowMalformedRows:         flagBool(cmd, v, "allow-malformed-rows"),
+					Policy:                     policy,
+					Unattended:                 true,
+					AllowUnattendedDestructive: flagBool(cmd, v, "allow-unattended-destructive"),
+					AuthorizationActor:         "webhook",
 				},
 			})
 			if err != nil {
@@ -894,13 +980,16 @@ func newServeWebhookCommand(v *viper.Viper) *cobra.Command {
 	}
 	cmd.Flags().String("listen", ":8080", "listen address for the webhook receiver")
 	cmd.Flags().String("path", "/forward/snapshot-ready", "HTTP path for webhook POST requests")
-	cmd.Flags().String("webhook-basic-username", "", "optional Basic Auth username required on incoming webhook requests")
-	cmd.Flags().String("webhook-basic-password", "", "optional Basic Auth password required on incoming webhook requests")
+	cmd.Flags().String("webhook-basic-username", "", "Basic Auth username required on incoming webhook requests when --apply is enabled")
+	cmd.Flags().String("webhook-basic-password", "", "Basic Auth password required on incoming webhook requests when --apply is enabled")
+	cmd.Flags().String("webhook-state-file", "", "durable pending, dead-letter, dedupe, and snapshot-watermark JSON file (defaults to the user config directory)")
+	bindNetworkFlag(v, cmd.Flags())
 	bindProcessingFlags(v, cmd.Flags())
 	mustBind(v, cmd.Flags(), "listen")
 	mustBind(v, cmd.Flags(), "path")
 	mustBind(v, cmd.Flags(), "webhook-basic-username")
 	mustBind(v, cmd.Flags(), "webhook-basic-password")
+	mustBind(v, cmd.Flags(), "webhook-state-file")
 	return cmd
 }
 
@@ -1202,6 +1291,13 @@ func flagBool(cmd *cobra.Command, v *viper.Viper, name string) bool {
 	return v.GetBool(name)
 }
 
+func refusePruneMissing(cmd *cobra.Command, v *viper.Viper) error {
+	if flagBool(cmd, v, "prune-missing") {
+		return errors.New(pruneMissingRefusal)
+	}
+	return nil
+}
+
 func flagInt(cmd *cobra.Command, v *viper.Viper, name string) int {
 	if flag := cmd.Flags().Lookup(name); flag != nil && flag.Changed {
 		value, _ := cmd.Flags().GetInt(name)
@@ -1319,6 +1415,9 @@ func emitResult(cmd *cobra.Command, v *viper.Viper, value any) error {
 func emitStatusHuman(result *monitor.StatusResult) error {
 	fmt.Fprintln(os.Stdout, "Snapshot status")
 	fmt.Fprintf(os.Stdout, "  network: %s\n", result.NetworkID)
+	fmt.Fprintf(os.Stdout, "  observation atomic: %t\n", result.ObservationAtomic)
+	fmt.Fprintf(os.Stdout, "  latest/list consistent: %t\n", result.LatestListConsistent)
+	fmt.Fprintf(os.Stdout, "  observation warning: %s\n", result.ObservationWarning)
 	if result.LatestProcessedSnapshot != nil {
 		fmt.Fprintf(os.Stdout, "  latest processed: %s\n", result.LatestProcessedSnapshot.ID)
 	}
@@ -1346,8 +1445,13 @@ func emitApplyPlanHuman(summary *app.ApplyPlanSummary) error {
 	fmt.Fprintf(os.Stdout, "  network:   %s\n", summary.NetworkID)
 	fmt.Fprintf(os.Stdout, "  plan:      %s\n", summary.PlanPath)
 	fmt.Fprintf(os.Stdout, "  patched:   %d (%s)\n", summary.PatchedSetupCount, strings.Join(summary.PatchedSetups, ", "))
-	fmt.Fprintf(os.Stdout, "  rollback:  %s\n", summary.RollbackOutput)
-	fmt.Fprintf(os.Stdout, "  rollback sha256: %s\n", summary.RollbackSHA256)
+	if summary.RollbackOutput != "" {
+		fmt.Fprintf(os.Stdout, "  rollback:  %s\n", summary.RollbackOutput)
+		fmt.Fprintf(os.Stdout, "  rollback sha256: %s\n", summary.RollbackSHA256)
+	}
+	if summary.ResultJournalOutput != "" {
+		fmt.Fprintf(os.Stdout, "  journal:   %s\n", summary.ResultJournalOutput)
+	}
 	return nil
 }
 
@@ -1365,6 +1469,13 @@ func emitExternalIDHuman(summary *app.ExternalIDSummary) error {
 	fmt.Fprintf(os.Stdout, "  patched:    %t\n", summary.Patched)
 	fmt.Fprintf(os.Stdout, "  output:     %s\n", summary.Output)
 	fmt.Fprintf(os.Stdout, "  sha256:     %s\n", summary.PayloadSHA256)
+	if summary.RollbackOutput != "" {
+		fmt.Fprintf(os.Stdout, "  rollback:   %s\n", summary.RollbackOutput)
+		fmt.Fprintf(os.Stdout, "  rollback sha256: %s\n", summary.RollbackSHA256)
+	}
+	if summary.ResultJournalOutput != "" {
+		fmt.Fprintf(os.Stdout, "  journal:    %s\n", summary.ResultJournalOutput)
+	}
 	return nil
 }
 
@@ -1448,26 +1559,48 @@ func emitSummaryHuman(summary *app.Summary) error {
 	}
 	if summary.IgnoredNQEItemCount > 0 {
 		fmt.Fprintf(os.Stdout, "  ignored:   %d invalid NQE account row(s)\n", summary.IgnoredNQEItemCount)
+		for _, row := range summary.SkippedNQERows {
+			setup := row.SetupID
+			if setup == "" {
+				setup = "<missing>"
+			}
+			accountID := row.AccountID
+			if accountID == "" {
+				accountID = "<missing>"
+			}
+			fmt.Fprintf(os.Stdout, "    row %d setup=%s account_id=%s: %s\n", row.Row, setup, accountID, row.Reason)
+		}
 	}
 	fmt.Fprintf(os.Stdout, "  planned:   %d\n", summary.PlannedSetupCount)
 	fmt.Fprintf(os.Stdout, "  patched:   %d\n", summary.PatchedSetupCount)
+	if summary.ResultJournalOutput != "" {
+		fmt.Fprintf(os.Stdout, "  journal:   %s\n", summary.ResultJournalOutput)
+	}
 	if summary.RemovalBlocked {
-		fmt.Fprintln(os.Stdout, "\nApply blocked. Add --allow-removals, --allow-no-candidates, and --allow-no-org-evidence as needed.")
+		if summary.RemovalBlockReason != "" {
+			fmt.Fprintf(os.Stdout, "\nApply would be blocked: %s\n", summary.RemovalBlockReason)
+		} else {
+			fmt.Fprintln(os.Stdout, "\nApply blocked.")
+		}
+		fmt.Fprintln(os.Stdout, "For destructive apply, add --allow-removals, --max-removals, --max-removal-percent, and --allow-unattended-destructive as needed.")
 	}
 	fmt.Fprintln(os.Stdout, "\nSetups:")
-	addedTotal, reenabledTotal, removedTotal := 0, 0, 0
+	addedTotal, reenabledTotal, disabledTotal, removedTotal := 0, 0, 0, 0
 	for _, setup := range summary.PlannedSetups {
 		addedTotal += len(setup.AddedAccounts)
 		reenabledTotal += len(setup.ReenabledAccounts)
+		disabledTotal += len(setup.DisabledAccounts)
 		removedTotal += len(setup.RemovedAccounts)
 		fmt.Fprintf(
 			os.Stdout,
-			"  - %s: add=%d reenable=%d remove=%d unchanged=%d\n",
+			"  - %s: add=%d reenable=%d disable=%d remove=%d unchanged=%d status=%s\n",
 			setup.SetupID,
 			len(setup.AddedAccounts),
 			len(setup.ReenabledAccounts),
+			len(setup.DisabledAccounts),
 			len(setup.RemovedAccounts),
 			setup.UnchangedAccountCount,
+			setup.ApplyStatus,
 		)
 		if len(setup.AddedAccounts) > 0 {
 			fmt.Fprintf(os.Stdout, "    added:   %s\n", accountSummaryIDs(setup.AddedAccounts))
@@ -1475,10 +1608,13 @@ func emitSummaryHuman(summary *app.Summary) error {
 		if len(setup.RemovedAccounts) > 0 {
 			fmt.Fprintf(os.Stdout, "    removed: %s\n", accountSummaryIDs(setup.RemovedAccounts))
 		}
+		if len(setup.DisabledAccounts) > 0 {
+			fmt.Fprintf(os.Stdout, "    disabled: %s\n", accountSummaryIDs(setup.DisabledAccounts))
+		}
 		fmt.Fprintf(os.Stdout, "    %s\n", setup.OrganizationDiscoveryMessage)
 	}
 	fmt.Fprintln(os.Stdout, "\nSummary:")
-	fmt.Fprintf(os.Stdout, "  total added=%d, total reenabled=%d, total removed=%d\n", addedTotal, reenabledTotal, removedTotal)
+	fmt.Fprintf(os.Stdout, "  total added=%d, total reenabled=%d, total disabled=%d, total removed=%d\n", addedTotal, reenabledTotal, disabledTotal, removedTotal)
 	return nil
 }
 
@@ -1508,7 +1644,15 @@ func summaryChangeCounts(summary *app.Summary) (int, int, int) {
 
 func summaryRemovalCount(summary *app.Summary) int {
 	_, _, removed := summaryChangeCounts(summary)
-	return removed
+	return removed + summaryDisableCount(summary)
+}
+
+func summaryDisableCount(summary *app.Summary) int {
+	disabled := 0
+	for _, setup := range summary.PlannedSetups {
+		disabled += len(setup.DisabledAccounts)
+	}
+	return disabled
 }
 
 func emitSafeSyncPreview(summary *app.Summary) {
@@ -1635,14 +1779,15 @@ func confirmPost(post, yes bool, setupID string, stdin *os.File, stderr io.Write
 }
 
 func confirmApplyFromSummary(summary *app.Summary, stdin *os.File, stderr io.Writer) error {
-	addedTotal, removedTotal := 0, 0
+	addedTotal, disabledTotal, removedTotal := 0, 0, 0
 	for _, setup := range summary.PlannedSetups {
 		addedTotal += len(setup.AddedAccounts)
+		disabledTotal += len(setup.DisabledAccounts)
 		removedTotal += len(setup.RemovedAccounts)
 	}
-	fmt.Fprintf(stderr, "Planned changes: add=%d remove=%d.\n", addedTotal, removedTotal)
-	if removedTotal > 0 {
-		fmt.Fprintln(stderr, "Warning: removes are included. Review setup output carefully.")
+	fmt.Fprintf(stderr, "Planned changes: add=%d disable=%d remove=%d.\n", addedTotal, disabledTotal, removedTotal)
+	if disabledTotal+removedTotal > 0 {
+		fmt.Fprintln(stderr, "Warning: destructive changes are included. Review setup output carefully.")
 	}
 	fmt.Fprint(stderr, "Type 'apply' to continue: ")
 	var response string

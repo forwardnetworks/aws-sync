@@ -61,9 +61,10 @@ A successful run prints:
 
 - the number of patched setups;
 - the rollback file path;
-- the rollback SHA-256.
+- the rollback SHA-256;
+- the result-journal path.
 
-Keep the rollback file until the next successful collection confirms the expected account state.
+Keep the rollback and result-journal files until the next successful collection confirms the expected account state. If the command fails after apply begins, inspect the journal and current Forward setup before retrying; see [Apply recovery](aws-account-sync-procedure.md#apply-recovery).
 
 If no changes were needed, the command instead confirms that no PATCH was sent;
 there is no rollback file because Forward was not changed.
@@ -82,4 +83,4 @@ A collection failure does not mean an account should be removed. Repair IAM, rol
 
 ## Account Removal
 
-Routine operators should not remove accounts with this tool. Escalate a removal to an operator who can independently verify the AWS account lifecycle and follow the reviewed removal procedure in [AWS account sync procedure](aws-account-sync-procedure.md#apply-the-sync).
+Routine operators should not remove accounts with this tool. Escalate a removal to an operator who can independently verify the AWS account lifecycle and follow the [reviewed manifest removal procedure](aws-account-sync-procedure.md#reviewed-manifest-removal).

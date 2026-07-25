@@ -46,33 +46,87 @@ const (
 )
 
 type Config struct {
-	Host                  string
-	Username              string
-	Password              string
-	NetworkID             string
-	SnapshotID            string
-	Query                 string
-	QueryID               string
-	QuerySetupParam       string
-	SetupIDs              []string
-	Output                string
-	ManualOutput          string
-	APIPrefix             string
-	Insecure              bool
-	Timeout               time.Duration
-	Apply                 bool
-	AllowRemovals         bool
-	MaxRemovals           int
-	MaxRemovalPercent     float64
-	AllowNoCandidates     bool
-	AllowNoOrgEvidence    bool
-	PruneMissing          bool
-	MaxSnapshotAge        time.Duration
-	ExternalIDFile        string
-	Source                string
-	AuthoritativeInput    bool
-	PinSnapshot           bool
-	ExpectedPayloadSHA256 string
+	Host                       string
+	Username                   string
+	Password                   string
+	NetworkID                  string
+	SnapshotID                 string
+	Query                      string
+	QueryID                    string
+	QuerySetupParam            string
+	SetupIDs                   []string
+	Output                     string
+	ManualOutput               string
+	APIPrefix                  string
+	Insecure                   bool
+	Timeout                    time.Duration
+	Apply                      bool
+	AllowRemovals              bool
+	MaxRemovals                int
+	MaxRemovalPercent          float64
+	AllowNoCandidates          bool
+	AllowNoOrgEvidence         bool
+	MaxSnapshotAge             time.Duration
+	ExternalIDFile             string
+	Source                     string
+	AuthoritativeInput         bool
+	Policy                     ReconcilePolicy
+	PinSnapshot                bool
+	ExpectedPayloadSHA256      string
+	ExpectedPlanDigest         string
+	AllowMalformedRows         bool
+	Unattended                 bool
+	AllowUnattendedDestructive bool
+	AuthorizationActor         string
+}
+
+// NewNQEReconcilePolicy returns the only policy permitted for observed NQE
+// inventory. NQE absence is not an account-lifecycle signal.
+func NewNQEReconcilePolicy(allowNoOrgEvidence bool, planningInstant time.Time) ReconcilePolicy {
+	evidence := RequireOrganizationEvidence
+	if allowNoOrgEvidence {
+		evidence = AllowMissingOrganizationEvidence
+	}
+	return ReconcilePolicy{
+		Kind:                 Additive,
+		PlanningInstant:      planningInstant,
+		OrganizationEvidence: evidence,
+	}
+}
+
+// NewAuthoritativeManifestReconcilePolicy returns complete-inventory semantics
+// for an explicitly reviewed account manifest.
+func NewAuthoritativeManifestReconcilePolicy(planningInstant time.Time) ReconcilePolicy {
+	return ReconcilePolicy{
+		Kind:                 CompleteInventory,
+		PlanningInstant:      planningInstant,
+		OrganizationEvidence: ReviewedAuthoritativeInventory,
+	}
+}
+
+func prepareReconcileConfig(cfg Config, planningInstant time.Time) Config {
+	if cfg.Policy.Kind == "" {
+		if cfg.AuthoritativeInput {
+			cfg.Policy = NewAuthoritativeManifestReconcilePolicy(planningInstant)
+		} else {
+			cfg.Policy = NewNQEReconcilePolicy(cfg.AllowNoOrgEvidence, planningInstant)
+		}
+	} else {
+		if cfg.Policy.PlanningInstant.IsZero() {
+			cfg.Policy.PlanningInstant = planningInstant
+		}
+		if cfg.Policy.OrganizationEvidence == "" {
+			cfg.Policy.OrganizationEvidence = RequireOrganizationEvidence
+			if cfg.AuthoritativeInput {
+				cfg.Policy.OrganizationEvidence = ReviewedAuthoritativeInventory
+			} else if cfg.AllowNoOrgEvidence {
+				cfg.Policy.OrganizationEvidence = AllowMissingOrganizationEvidence
+			}
+		} else if cfg.AllowNoOrgEvidence && cfg.Policy.OrganizationEvidence == RequireOrganizationEvidence {
+			cfg.Policy.OrganizationEvidence = AllowMissingOrganizationEvidence
+		}
+	}
+	return cfg
 }
 
 type Summary struct {
@@ -102,10 +156,14 @@ type Summary struct {
 	ManualPayloads      map[string][]api.AssumeRoleInfo `json:"manual_payloads,omitempty"`
 	RollbackOutput      string                          `json:"rollback_output,omitempty"`
 	RollbackSHA256      string                          `json:"rollback_sha256,omitempty"`
+	PlanDigest          string                          `json:"plan_digest,omitempty"`
+	ResultJournalOutput string                          `json:"result_journal_output,omitempty"`
+	ApplyJournal        *ApplyJournal                   `json:"apply_journal,omitempty"`
 	Apply               bool                            `json:"apply"`
 	FetchedItemCount    int                             `json:"fetched_item_count"`
 	IgnoredNQEItemCount int                             `json:"ignored_nqe_item_count,omitempty"`
 	IgnoredNQEAccounts  []AccountSummary                `json:"ignored_nqe_accounts,omitempty"`
+	SkippedNQERows      []MalformedNQERowSummary        `json:"skipped_nqe_rows,omitempty"`
 	PlannedSetupCount   int                             `json:"planned_setup_count"`
 	PatchedSetupCount   int                             `json:"patched_setup_count"`
 	SkippedSetupCount   int                             `json:"skipped_setup_count"`
@@ -113,6 +171,7 @@ type Summary struct {
 	SkippedSetups       []SkipSummary                   `json:"skipped_setups,omitempty"`
 	CandidateCheck      []CandidateCheck                `json:"candidate_check,omitempty"`
 	RemovalBlocked      bool                            `json:"removal_blocked,omitempty"`
+	RemovalBlockReason  string                          `json:"removal_block_reason,omitempty"`
 }
 
 type CandidateCheck struct {
@@ -147,8 +206,11 @@ type SetupSummary struct {
 	AddedAccounts                []AccountSummary  `json:"added_accounts,omitempty"`
 	RemovedAccounts              []AccountSummary  `json:"removed_accounts,omitempty"`
 	ReenabledAccounts            []AccountSummary  `json:"reenabled_accounts,omitempty"`
+	DisabledAccounts             []AccountSummary  `json:"disabled_accounts,omitempty"`
 	UnchangedAccountCount        int               `json:"unchanged_account_count"`
 	Patched                      bool              `json:"patched"`
+	ApplyStatus                  ApplyStatus       `json:"apply_status"`
+	ApplyError                   string            `json:"apply_error,omitempty"`
 }
 
 type AccountSummary struct {
@@ -213,6 +275,7 @@ type AWSOrganizationConfig struct {
 }
 
 func Run(ctx context.Context, cfg Config) (*Summary, error) {
+	cfg = prepareReconcileConfig(cfg, time.Now().UTC())
 	if err := validateRemovalLimitValues(cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
 		return nil, err
 	}
@@ -236,7 +299,7 @@ func Run(ctx context.Context, cfg Config) (*Summary, error) {
 		return nil, err
 	}
 	query, queryID, parameters := queryInputs(cfg)
-	items, err := client.QueryAWSAccounts(ctx, cfg.NetworkID, cfg.SnapshotID, query, queryID, parameters, cfg.SetupIDs)
+	queryResult, err := client.QueryAWSAccountsWithMetadata(ctx, cfg.NetworkID, cfg.SnapshotID, query, queryID, parameters, cfg.SetupIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -244,7 +307,14 @@ func Run(ctx context.Context, cfg Config) (*Summary, error) {
 	if err != nil {
 		return nil, err
 	}
-	return runPlannedSync(ctx, cfg, client, items, cloudAccounts)
+	snapshot, err := parseNQESnapshotFromMapsWithOptions(queryResult.Items, nqeParseOptionsFromQueryResult(queryResult, cfg.AllowMalformedRows))
+	if err != nil {
+		return nil, err
+	}
+	snapshot.Source = "nqe"
+	snapshot.NetworkID = cfg.NetworkID
+	snapshot.SnapshotID = cfg.SnapshotID
+	return runPlannedSyncFromSnapshot(ctx, cfg, client, snapshot, cloudAccounts)
 }
 
 func runPlannedSync(
@@ -254,7 +324,32 @@ func runPlannedSync(
 	items []map[string]any,
 	cloudAccounts []api.CloudAccount,
 ) (*Summary, error) {
-	plan, err := buildPlanForConfig(cfg, items, cloudAccounts)
+	cfg = prepareReconcileConfig(cfg, time.Now().UTC())
+	snapshot, err := parseNQESnapshotFromMapsWithOptions(items, parseNQESnapshotOptions{
+		AllowMalformedRows: cfg.AllowMalformedRows,
+		Completeness:       InventoryCompletenessComplete,
+	})
+	if err != nil {
+		return nil, err
+	}
+	snapshot.Source = "nqe"
+	snapshot.NetworkID = cfg.NetworkID
+	snapshot.SnapshotID = cfg.SnapshotID
+	return runPlannedSyncFromSnapshot(ctx, cfg, client, snapshot, cloudAccounts)
+}
+
+func runPlannedSyncFromSnapshot(
+	ctx context.Context,
+	cfg Config,
+	client *api.Client,
+	snapshot *InventorySnapshot,
+	cloudAccounts []api.CloudAccount,
+) (*Summary, error) {
+	planOptions, err := buildPlanOptionsFromConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := buildPlanFromSnapshot(snapshot, cloudAccounts, cfg.SetupIDs, planOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -292,6 +387,10 @@ func runPlannedSync(
 		}
 		manualPayloadsForSummary = manualPayloads
 	}
+	intent, err := newApplyIntent(cfg, snapshot, cloudAccounts, plan, outputPath)
+	if err != nil {
+		return nil, err
+	}
 
 	summary := buildSummary(
 		cfg,
@@ -300,77 +399,46 @@ func runPlannedSync(
 		manualOutputPath,
 		manualPayloadSHA256,
 		manualPayloadsForSummary,
-		len(items),
+		snapshot.ObservedRowCount,
 		plan,
 		0,
 	)
-	if cfg.Apply && plan.HasRemovals() && !cfg.AllowRemovals {
-		summary.RemovalBlocked = true
-		return summary, fmt.Errorf("planned account removals require --allow-removals")
-	}
-	if cfg.Apply {
-		if err := requireRemovalBounds(plan.removalStats(), cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
+	summary.PlanDigest = intent.Digest()
+	if !cfg.Apply {
+		if blockErr := unattendedDestructiveApplyError(intent.state, cfg.Unattended, cfg.AllowUnattendedDestructive); blockErr != nil {
 			summary.RemovalBlocked = true
-			return summary, err
+			summary.RemovalBlockReason = blockErr.Error()
 		}
-		if err := validateRemovalStats(plan.removalStats(), cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
-			summary.RemovalBlocked = true
-			return summary, err
-		}
+		return summary, nil
 	}
-	if cfg.Apply && !cfg.AuthoritativeInput && plan.HasCandidateRemovalRisk() && !cfg.AllowNoCandidates {
-		summary.RemovalBlocked = true
-		return summary, fmt.Errorf("planned removals with no uncollected candidate accounts visible require --allow-no-candidates")
+	approvedDigest := intent.Digest()
+	if strings.TrimSpace(cfg.ExpectedPlanDigest) != "" {
+		approvedDigest = strings.TrimSpace(cfg.ExpectedPlanDigest)
 	}
-	if cfg.Apply && !cfg.AuthoritativeInput && plan.HasGovCloudRemovalsWithoutOrganizationEvidence() {
-		summary.RemovalBlocked = true
-		return summary, fmt.Errorf("GovCloud account removals require positive AWS Organizations evidence; use sync-accounts with an authoritative reviewed manifest when Organizations is unavailable")
-	}
-	if cfg.Apply && !cfg.AuthoritativeInput && plan.HasNoOrganizationEvidenceForRemovals() && !cfg.AllowNoOrgEvidence {
-		missingSetups := strings.Join(plan.setupsWithoutOrganizationEvidenceForRemovals(), ", ")
-		summary.RemovalBlocked = true
-		return summary, fmt.Errorf("planned removals with no AWS Organizations evidence in NQE for setup(s): %s require --allow-no-org-evidence", missingSetups)
-	}
-
-	rollbackOutputPath := ""
-	rollbackSHA256 := ""
-	if cfg.Apply {
-		rollbackPayloads, err := buildRollbackPayloads(cloudAccounts, selectedSetupIDs(plan.Setups))
-		if err != nil {
-			return summary, err
-		}
-		rollbackOutputPath = rollbackPath(outputPath)
-		rollbackSHA256, err = writeAuditPayloads(rollbackOutputPath, rollbackPayloads)
-		if err != nil {
-			return summary, fmt.Errorf("write pre-apply rollback payload: %w", err)
-		}
-		summary.RollbackOutput = rollbackOutputPath
-		summary.RollbackSHA256 = rollbackSHA256
-		if err := verifyCloudAccountsUnchanged(ctx, client, cfg.NetworkID, selectedSetupIDs(plan.Setups), rollbackPayloads); err != nil {
-			return summary, err
-		}
-		if _, err := writeAuditPayloads(auditPath(outputPath), plan.Payloads); err != nil {
-			return nil, err
+	actor := strings.TrimSpace(cfg.AuthorizationActor)
+	if actor == "" {
+		if cfg.Unattended {
+			actor = "unattended app caller"
+		} else {
+			actor = "attended app caller"
 		}
 	}
-	patchedCount, err := applyPlan(ctx, cfg, client, plan)
-	if err != nil {
-		return nil, err
+	applyResult, applyErr := GuardAndApply(ctx, client, intent, ApplyAuthorization{
+		PlanDigest:                 approvedDigest,
+		Actor:                      actor,
+		Approved:                   true,
+		AllowDestructive:           cfg.AllowRemovals,
+		MaxRemovals:                cfg.MaxRemovals,
+		MaxRemovalPercent:          cfg.MaxRemovalPercent,
+		AllowNoCandidates:          cfg.AllowNoCandidates,
+		Unattended:                 cfg.Unattended,
+		AllowUnattendedDestructive: cfg.AllowUnattendedDestructive,
+	})
+	applyResultToSummary(summary, applyResult)
+	if applyErr != nil && applyResult.JournalOutput != "" {
+		return summary, fmt.Errorf("%w; apply result journal: %s", applyErr, applyResult.JournalOutput)
 	}
-	result := buildSummary(
-		cfg,
-		outputPath,
-		payloadSHA256,
-		manualOutputPath,
-		manualPayloadSHA256,
-		manualPayloadsForSummary,
-		len(items),
-		plan,
-		patchedCount,
-	)
-	result.RollbackOutput = rollbackOutputPath
-	result.RollbackSHA256 = rollbackSHA256
-	return result, nil
+	return summary, applyErr
 }
 
 func RunAWSOrganizations(ctx context.Context, cfg AWSOrganizationConfig, source AWSOrganizationSource) (*Summary, error) {
@@ -752,24 +820,42 @@ func defaultManualOutputPath() string {
 }
 
 func validateSnapshotFreshness(ctx context.Context, client *api.Client, cfg Config) error {
-	if cfg.MaxSnapshotAge <= 0 || strings.TrimSpace(cfg.SnapshotID) != "" {
+	if cfg.MaxSnapshotAge <= 0 {
 		return nil
+	}
+	explicitSnapshotID := strings.TrimSpace(cfg.SnapshotID)
+	if explicitSnapshotID != "" {
+		snapshots, err := client.ListSnapshots(ctx, cfg.NetworkID)
+		if err != nil {
+			return fmt.Errorf("check explicit snapshot freshness: %w", err)
+		}
+		for _, snapshot := range snapshots {
+			if strings.TrimSpace(snapshot.ID) != explicitSnapshotID {
+				continue
+			}
+			return validateSnapshotAge(snapshot, cfg.MaxSnapshotAge, "explicit")
+		}
+		return fmt.Errorf("check explicit snapshot freshness: snapshot %s was not found in network %s", explicitSnapshotID, cfg.NetworkID)
 	}
 	latest, err := client.LatestProcessedSnapshot(ctx, cfg.NetworkID)
 	if err != nil {
 		return fmt.Errorf("check latest processed snapshot freshness: %w", err)
 	}
-	snapshotTime, err := snapshotTimestamp(*latest)
+	return validateSnapshotAge(*latest, cfg.MaxSnapshotAge, "latest processed")
+}
+
+func validateSnapshotAge(snapshot api.SnapshotInfo, maxAge time.Duration, description string) error {
+	age, err := checkedSnapshotAge(snapshot, description)
 	if err != nil {
-		return fmt.Errorf("check latest processed snapshot freshness: %w", err)
+		return err
 	}
-	age := time.Since(snapshotTime)
-	if age > cfg.MaxSnapshotAge {
+	if age > maxAge {
 		return fmt.Errorf(
-			"latest processed snapshot %s is stale: age %s exceeds max %s; pass --snapshot-id or increase --max-snapshot-age",
-			latest.ID,
+			"%s snapshot %s is stale: age %s exceeds max %s",
+			description,
+			snapshot.ID,
 			age.Round(time.Second),
-			cfg.MaxSnapshotAge,
+			maxAge,
 		)
 	}
 	return nil
@@ -781,11 +867,10 @@ func pinLatestProcessedSnapshot(ctx context.Context, client *api.Client, cfg *Co
 		return fmt.Errorf("pin latest processed snapshot: %w", err)
 	}
 	if cfg.MaxSnapshotAge > 0 {
-		snapshotTime, err := snapshotTimestamp(*latest)
+		age, err := checkedSnapshotAge(*latest, "latest processed")
 		if err != nil {
-			return fmt.Errorf("check latest processed snapshot freshness: %w", err)
+			return err
 		}
-		age := time.Since(snapshotTime)
 		if age > cfg.MaxSnapshotAge {
 			return fmt.Errorf(
 				"latest processed snapshot %s is stale: age %s exceeds max %s; pass --snapshot-id or increase --max-snapshot-age",
@@ -797,6 +882,36 @@ func pinLatestProcessedSnapshot(ctx context.Context, client *api.Client, cfg *Co
 	}
 	cfg.SnapshotID = latest.ID
 	return nil
+}
+
+// snapshotClockSkewTolerance is how far ahead of the local clock a snapshot
+// timestamp may be before it is treated as bad data rather than clock drift.
+// Forward and this host are different machines, so small skew is expected and
+// must not fail a run; anything beyond this indicates a real problem.
+const snapshotClockSkewTolerance = 5 * time.Minute
+
+func checkedSnapshotAge(snapshot api.SnapshotInfo, description string) (time.Duration, error) {
+	snapshotTime, err := snapshotTimestamp(snapshot)
+	if err != nil {
+		return 0, fmt.Errorf("check %s snapshot freshness: %w", description, err)
+	}
+	age := time.Since(snapshotTime)
+	if age < -snapshotClockSkewTolerance {
+		return 0, fmt.Errorf(
+			"%s snapshot %s has invalid future timestamp %s (%s ahead of the local clock, tolerance %s)",
+			description,
+			snapshot.ID,
+			snapshotTime.Format(time.RFC3339),
+			(-age).Round(time.Second),
+			snapshotClockSkewTolerance,
+		)
+	}
+	if age < 0 {
+		// Within tolerance: ordinary NTP drift between this host and Forward.
+		// Treat as freshly processed rather than failing the run.
+		age = 0
+	}
+	return age, nil
 }
 
 func snapshotTimestamp(snapshot api.SnapshotInfo) (time.Time, error) {
@@ -848,20 +963,6 @@ func queryInputs(cfg Config) (string, string, map[string]any) {
 	return query, "", nil
 }
 
-func applyPlan(ctx context.Context, cfg Config, client *api.Client, plan *patchPlan) (int, error) {
-	if !cfg.Apply {
-		return 0, nil
-	}
-	patchedCount := 0
-	for _, setup := range plan.Setups {
-		if err := client.PatchCloudAccount(ctx, cfg.NetworkID, setup.SetupID, setup.Payload); err != nil {
-			return patchedCount, fmt.Errorf("patch setup %s: %w", setup.SetupID, err)
-		}
-		patchedCount++
-	}
-	return patchedCount, nil
-}
-
 func buildSummary(
 	cfg Config,
 	outputPath string,
@@ -882,10 +983,10 @@ func buildSummary(
 		sort.Strings(regions)
 		discoverySignal := organizationDiscoveryStatus(setup.DiscoveredCandidateCount, setup.DiscoveredOrgUnitRowCount)
 		discoveryMessage := organizationDiscoveryMessage(setup.DiscoveredCandidateCount, setup.DiscoveredOrgUnitRowCount)
-		if cfg.AuthoritativeInput {
+		if cfg.Policy.OrganizationEvidence == ReviewedAuthoritativeInventory {
 			discoverySignal = "account_manifest"
 			discoveryMessage = "Account inventory came from the explicitly reviewed manifest; AWS Organizations was not queried"
-		} else if !cfg.PruneMissing {
+		} else if cfg.Policy.Kind == Additive {
 			discoveryMessage += "; additive mode preserves currently configured accounts that are absent from NQE"
 		}
 		setupSummaries = append(setupSummaries, SetupSummary{
@@ -908,8 +1009,9 @@ func buildSummary(
 			AddedAccounts:                accountSummaries(setup.AddedAccounts),
 			RemovedAccounts:              accountSummaries(setup.RemovedAccounts),
 			ReenabledAccounts:            accountSummaries(setup.ReenabledAccounts),
+			DisabledAccounts:             accountSummaries(setup.DisabledAccounts),
 			UnchangedAccountCount:        len(setup.UnchangedAccounts),
-			Patched:                      cfg.Apply,
+			ApplyStatus:                  ApplyStatusPlanned,
 		})
 	}
 
@@ -932,12 +1034,36 @@ func buildSummary(
 		FetchedItemCount:    fetchedItemCount,
 		IgnoredNQEItemCount: len(plan.IgnoredAccounts),
 		IgnoredNQEAccounts:  plan.IgnoredAccounts,
+		SkippedNQERows:      plan.SkippedRows,
 		PlannedSetupCount:   len(plan.Setups),
 		PatchedSetupCount:   patchedCount,
 		SkippedSetupCount:   len(plan.Skips),
 		PlannedSetups:       setupSummaries,
 		SkippedSetups:       plan.Skips,
 		CandidateCheck:      plan.CandidateChecks,
+	}
+}
+
+func applyResultToSummary(summary *Summary, result ApplyResult) {
+	summary.PatchedSetupCount = result.PatchedCount
+	summary.RollbackOutput = result.RollbackOutput
+	summary.RollbackSHA256 = result.RollbackSHA256
+	summary.ResultJournalOutput = result.JournalOutput
+	summary.RemovalBlocked = result.Blocked
+	journal := result.Journal
+	summary.ApplyJournal = &journal
+	entries := make(map[string]ApplyJournalEntry, len(result.Journal.Setups))
+	for _, entry := range result.Journal.Setups {
+		entries[entry.SetupID] = entry
+	}
+	for index := range summary.PlannedSetups {
+		entry, ok := entries[summary.PlannedSetups[index].SetupID]
+		if !ok {
+			continue
+		}
+		summary.PlannedSetups[index].ApplyStatus = entry.Status
+		summary.PlannedSetups[index].ApplyError = entry.Error
+		summary.PlannedSetups[index].Patched = entry.Status == ApplyStatusApplied
 	}
 }
 
@@ -958,6 +1084,7 @@ type patchPlan struct {
 	Skips           []SkipSummary
 	CandidateChecks []CandidateCheck
 	IgnoredAccounts []AccountSummary
+	SkippedRows     []MalformedNQERowSummary
 }
 
 type plannedSetup struct {
@@ -968,9 +1095,11 @@ type plannedSetup struct {
 	ExternalIDConsistent      bool
 	ProxyServerID             string
 	Payload                   api.PatchPayload
+	ChangeSet                 ChangeSet
 	AddedAccounts             []accountRow
 	RemovedAccounts           []accountRow
 	ReenabledAccounts         []accountRow
+	DisabledAccounts          []accountRow
 	UnchangedAccounts         []accountRow
 	CurrentAccounts           []accountRow
 	DiscoveredAccounts        []accountRow
@@ -1053,14 +1182,48 @@ type buildPlanOptions struct {
 	RoleNameBySetup     map[string]string
 	ExternalIDBySetup   map[string]string
 	ExternalIDByAccount externalIDAssignments
+	Policy              ReconcilePolicy
 	PreserveMissing     bool
 }
 
+// buildPlan is a test-only helper. It asserts a proven-complete inventory so
+// fixtures can exercise removal paths directly; production callers must derive
+// completeness from real pagination metadata via buildPlanForConfig.
 func buildPlan(items []map[string]any, cloudAccounts []api.CloudAccount, queryID string, requestedSetupIDs []string) (*patchPlan, error) {
-	return buildPlanWithOptions(items, cloudAccounts, queryID, requestedSetupIDs, buildPlanOptions{})
+	snapshot, err := parseNQESnapshotFromMapsWithOptions(items, parseNQESnapshotOptions{
+		Completeness: InventoryCompletenessComplete,
+	})
+	if err != nil {
+		return nil, err
+	}
+	snapshot.Source = "test_complete_inventory"
+	_ = queryID
+	return buildPlanFromSnapshot(snapshot, cloudAccounts, requestedSetupIDs, buildPlanOptions{
+		Policy: ReconcilePolicy{
+			Kind:            CompleteInventory,
+			PlanningInstant: time.Unix(1, 0).UTC(),
+		},
+	})
 }
 
 func buildPlanForConfig(cfg Config, items []map[string]any, cloudAccounts []api.CloudAccount) (*patchPlan, error) {
+	cfg = prepareReconcileConfig(cfg, time.Unix(1, 0).UTC())
+	planOptions, err := buildPlanOptionsFromConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	snapshot, err := parseNQESnapshotFromMapsWithOptions(items, parseNQESnapshotOptions{
+		AllowMalformedRows: cfg.AllowMalformedRows,
+		Completeness:       InventoryCompletenessComplete,
+	})
+	if err != nil {
+		return nil, err
+	}
+	snapshot.Source = "nqe"
+	return buildPlanFromSnapshot(snapshot, cloudAccounts, cfg.SetupIDs, planOptions)
+}
+
+func buildPlanOptionsFromConfig(cfg Config) (buildPlanOptions, error) {
 	defaultSetupID := ""
 	setupIDs := cleanSetupIDs(cfg.SetupIDs)
 	if len(setupIDs) == 1 {
@@ -1068,130 +1231,230 @@ func buildPlanForConfig(cfg Config, items []map[string]any, cloudAccounts []api.
 	}
 	assignments, err := loadExternalIDAssignments(cfg.ExternalIDFile, defaultSetupID)
 	if err != nil {
+		return buildPlanOptions{}, err
+	}
+	adaptedAssignments, err := adaptExternalIDAssignments(assignments)
+	if err != nil {
+		return buildPlanOptions{}, err
+	}
+	return buildPlanOptions{
+		ExternalIDByAccount: legacyExternalIDAssignments(adaptedAssignments),
+		Policy:              cfg.Policy,
+	}, nil
+}
+
+// buildPlanWithOptions is a test-only helper. See buildPlan on the asserted
+// completeness.
+func buildPlanWithOptions(items []map[string]any, cloudAccounts []api.CloudAccount, _ string, requestedSetupIDs []string, opts buildPlanOptions) (*patchPlan, error) {
+	snapshot, err := parseNQESnapshotFromMapsWithOptions(items, parseNQESnapshotOptions{
+		Completeness: InventoryCompletenessComplete,
+	})
+	if err != nil {
 		return nil, err
 	}
-	return buildPlanWithOptions(items, cloudAccounts, cfg.QueryID, cfg.SetupIDs, buildPlanOptions{
-		ExternalIDByAccount: assignments,
-		PreserveMissing:     !cfg.AuthoritativeInput && !cfg.PruneMissing,
+	snapshot.Source = "test_complete_inventory"
+	convertedAssignments, err := adaptExternalIDAssignments(opts.ExternalIDByAccount)
+	if err != nil {
+		return nil, err
+	}
+	kind := CompleteInventory
+	if opts.PreserveMissing {
+		kind = Additive
+	}
+	return buildPlanFromSnapshot(snapshot, cloudAccounts, requestedSetupIDs, buildPlanOptions{
+		RoleNameBySetup:     opts.RoleNameBySetup,
+		ExternalIDBySetup:   opts.ExternalIDBySetup,
+		ExternalIDByAccount: legacyExternalIDAssignments(convertedAssignments),
+		Policy: ReconcilePolicy{
+			Kind:            kind,
+			PlanningInstant: time.Unix(1, 0).UTC(),
+		},
 	})
 }
 
-func buildPlanWithOptions(items []map[string]any, cloudAccounts []api.CloudAccount, _ string, requestedSetupIDs []string, opts buildPlanOptions) (*patchPlan, error) {
-	cloudMetaMap := cloudAccountMetaMap(cloudAccounts, requestedSetupIDs)
+func nqeParseOptionsFromQueryResult(result api.QueryAWSAccountsResult, allowMalformedRows bool) parseNQESnapshotOptions {
+	completeness := InventoryCompletenessComplete
+	if result.CompletenessUnproven {
+		completeness = InventoryCompletenessLikelyIncomplete
+	}
+	return parseNQESnapshotOptions{
+		AllowMalformedRows: allowMalformedRows,
+		Completeness:       completeness,
+		CompletenessReason: result.CompletenessReason,
+		PageLimit:          result.PageLimit,
+	}
+}
+
+func buildPlanFromSnapshot(snapshot *InventorySnapshot, cloudAccounts []api.CloudAccount, requestedSetupIDs []string, opts buildPlanOptions) (*patchPlan, error) {
+	policy := opts.Policy
+	if policy.Kind == "" {
+		kind := CompleteInventory
+		if opts.PreserveMissing {
+			kind = Additive
+		}
+		policy = ReconcilePolicy{Kind: kind, PlanningInstant: time.Unix(1, 0).UTC()}
+	}
+	if policy.PlanningInstant.IsZero() {
+		return nil, fmt.Errorf("reconcile policy planning instant is required")
+	}
+	cloudMetaMap, err := adaptCloudAccountsBySetupID(cloudAccounts, requestedSetupIDs)
+	if err != nil {
+		return nil, err
+	}
 	if len(cloudMetaMap) == 0 {
 		return nil, fmt.Errorf("no cloud account metadata available in Forward")
 	}
-	validItems, ignoredAccounts := validNQEAccountItems(items)
-	groupedAccounts := groupAccountsBySetup(validItems)
-	if len(groupedAccounts) == 0 {
-		fallbackSetupID, fallbackAccounts := fallbackAccounts(validItems, cloudMetaMap)
-		if fallbackSetupID != "" && len(fallbackAccounts) > 0 {
-			groupedAccounts = map[string][]accountRow{fallbackSetupID: fallbackAccounts}
+
+	groupedAccounts := make(map[SetupID][]accountRow)
+	groupedDiscovered := make(map[SetupID][]DiscoveredAccount)
+	for _, account := range snapshot.DiscoveredAccounts {
+		if account.SetupID.IsZero() {
+			continue
+		}
+		groupedDiscovered[account.SetupID] = append(groupedDiscovered[account.SetupID], account)
+		groupedAccounts[account.SetupID] = append(groupedAccounts[account.SetupID], accountRow{
+			AccountID:   account.AccountID.String(),
+			AccountName: account.AccountName,
+		})
+	}
+	if len(groupedAccounts) == 0 && len(snapshot.DiscoveredAccounts) > 0 {
+		if setupID, ok := firstSetupID(cloudMetaMap); ok {
+			for _, account := range snapshot.DiscoveredAccounts {
+				account.SetupID = setupID
+				groupedDiscovered[setupID] = append(groupedDiscovered[setupID], account)
+			}
+			groupedAccounts[setupID] = toAccountRows(groupedDiscovered[setupID])
 		}
 	}
-	for setupID := range opts.ExternalIDByAccount {
+
+	for setupIDStr := range opts.ExternalIDByAccount {
+		setupID, err := NewSetupID(setupIDStr)
+		if err != nil {
+			return nil, fmt.Errorf("external ID file contains setup %s: %w", setupIDStr, err)
+		}
 		if _, ok := groupedAccounts[setupID]; !ok {
 			return nil, fmt.Errorf("external ID file contains setup %s, but that setup is not present in the discovered account inventory", setupID)
 		}
 	}
+
 	if len(groupedAccounts) == 0 {
-		if len(cloudMetaMap) > 1 && hasAccountRows(items) {
+		if len(cloudMetaMap) > 1 && len(snapshot.DiscoveredAccounts) > 0 {
 			return nil, fmt.Errorf("NQE response has AWS accounts but no setup ID data; pass --query-id only if overriding the platform query")
 		}
 		return nil, fmt.Errorf("no AWS accounts found in query response")
 	}
+	if err := assertSafeSelectedSetupOwnership(cloudMetaMap, groupedDiscovered); err != nil {
+		return nil, err
+	}
 
-	plannedSetupIDs := make([]string, 0, len(groupedAccounts))
+	plannedSetupIDs := make([]SetupID, 0, len(groupedAccounts))
 	for setupID := range groupedAccounts {
 		plannedSetupIDs = append(plannedSetupIDs, setupID)
 	}
-	sort.Strings(plannedSetupIDs)
+	sort.Slice(plannedSetupIDs, func(i, j int) bool {
+		return plannedSetupIDs[i] < plannedSetupIDs[j]
+	})
 
-	plan := &patchPlan{Payloads: make(auditPayloads), IgnoredAccounts: ignoredAccounts}
+	plan := &patchPlan{
+		Payloads:        make(auditPayloads),
+		IgnoredAccounts: append([]AccountSummary(nil), snapshot.IgnoredAccounts...),
+		SkippedRows:     append([]MalformedNQERowSummary(nil), snapshot.SkippedRows...),
+	}
 	for _, setupID := range plannedSetupIDs {
 		meta, ok := cloudMetaMap[setupID]
 		if !ok {
-			plan.Skips = append(plan.Skips, SkipSummary{SetupID: setupID, Reason: "setup metadata not found in Forward"})
+			plan.Skips = append(plan.Skips, SkipSummary{SetupID: setupID.String(), Reason: "setup metadata not found in Forward"})
 			continue
 		}
-		if err := validateCloudAccountPartition(meta); err != nil {
+		if err := validateCloudAccountPartitionFromMetadata(meta); err != nil {
 			return nil, fmt.Errorf("setup %s: %w", setupID, err)
 		}
-		roleName := extractRoleName(meta.AssumeRoleInfos)
-		if override := strings.TrimSpace(opts.RoleNameBySetup[setupID]); override != "" {
+		roleName := extractRoleName(meta.assumeRoleInfos)
+		if override := strings.TrimSpace(opts.RoleNameBySetup[setupID.String()]); override != "" {
 			roleName = override
 		}
 		if roleName == "" {
-			plan.Skips = append(plan.Skips, SkipSummary{SetupID: setupID, Reason: "unable to determine role ARN name from assumeRoleInfos"})
+			plan.Skips = append(plan.Skips, SkipSummary{SetupID: setupID.String(), Reason: "unable to determine role ARN name from assumeRoleInfos"})
 			continue
 		}
-		partition := extractRolePartition(meta.AssumeRoleInfos)
-		discoveredAccounts := groupedAccounts[setupID]
-		current := currentAccounts(meta.AssumeRoleInfos)
-		nextAccounts := discoveredAccounts
-		if opts.PreserveMissing {
-			nextAccounts = mergeDiscoveredWithCurrent(discoveredAccounts, current)
-		}
-		added, removed, unchanged := accountDiff(current, nextAccounts)
-		reenabled := reenabledAccounts(meta.AssumeRoleInfos, nextAccounts)
-		uniformExternalID, hasUniformOverride := opts.ExternalIDBySetup[setupID]
-		if hasUniformOverride && len(opts.ExternalIDByAccount[setupID]) > 0 {
+		discoveredRows := groupedAccounts[setupID]
+		discoveredSet := groupedDiscovered[setupID]
+		current := currentAccounts(meta.assumeRoleInfos)
+		uniformExternalID, hasUniformOverride := opts.ExternalIDBySetup[setupID.String()]
+		setupIDStr := setupID.String()
+		if hasUniformOverride && len(opts.ExternalIDByAccount[setupIDStr]) > 0 {
 			return nil, fmt.Errorf("setup %s has both setup-wide and per-account External ID overrides", setupID)
 		}
-		infos, err := buildAssumeRoleInfosPreservingExternalIDs(
-			nextAccounts,
-			meta.AssumeRoleInfos,
-			roleName,
-			partition,
-			hasUniformOverride,
-			strings.TrimSpace(uniformExternalID),
-			opts.ExternalIDByAccount[setupID],
-		)
+		currentSetup, err := adaptCurrentSetup(meta)
 		if err != nil {
 			return nil, fmt.Errorf("setup %s: %w", setupID, err)
 		}
+		setupPolicy := policy
+		setupPolicy.DefaultRoleName = roleName
+		setupPolicy.UniformExternalID = nil
+		if hasUniformOverride {
+			value := strings.TrimSpace(uniformExternalID)
+			setupPolicy.UniformExternalID = &value
+		}
+		setupPolicy.ExternalIDByAccount = make(map[AccountID]string, len(opts.ExternalIDByAccount[setupIDStr]))
+		for rawAccountID, externalID := range opts.ExternalIDByAccount[setupIDStr] {
+			accountID, err := NewAccountID(rawAccountID)
+			if err != nil {
+				return nil, err
+			}
+			setupPolicy.ExternalIDByAccount[accountID] = externalID
+		}
+		setupSnapshot := *snapshot
+		if setupSnapshot.PageLimit == 0 {
+			setupSnapshot.PageLimit = api.PageLimit
+		}
+		setupSnapshot.DiscoveredAccounts = append([]DiscoveredAccount(nil), discoveredSet...)
+		desired, changes, err := ComputeDesired(currentSetup, setupSnapshot, setupPolicy)
+		if err != nil {
+			return nil, fmt.Errorf("setup %s: %w", setupID, err)
+		}
+		payload := patchPayloadFromDesired(desired)
+		infos := payload.AssumeRoleInfos
+		nextAccounts := currentAccounts(infos)
+		added, removed, unchanged := accountDiff(current, nextAccounts)
+		reenabled := accountRowsFromChanges(changes.Enable, false)
+		disabled := accountRowsFromChanges(changes.Disable, false)
 		externalIDConfigured, externalIDConsistent := externalIDState(infos)
 		externalID := ""
 		if externalIDConsistent && len(infos) > 0 {
 			externalID = strings.TrimSpace(infos[0].ExternalID)
 		}
 		orgID := parseOrgID(externalID)
-		payload := api.PatchPayload{
-			Type:                  "AWS",
-			Name:                  setupID,
-			Regions:               regionMap(meta.Regions),
-			RegionToProxyServerID: stringMap(meta.RegionToProxyServerID),
-			AssumeRoleInfos:       infos,
+		collectedCount := countCollectedAccountsFromRows(snapshot.DiscoveredAccounts, setupID)
+		candidateCount := countUncollectedCandidatesFromRows(snapshot.DiscoveredAccounts, setupID, current)
+		orgUnitRowCount := countOrgUnitRowsFromRows(snapshot.DiscoveredAccounts, setupID)
+		if !changes.Empty() {
+			plan.Payloads[setupID.String()] = payload
 		}
-		if strings.TrimSpace(meta.ProxyServerID) != "" {
-			payload.ProxyServerID = meta.ProxyServerID
-		}
-		collectedCount := countCollectedAccounts(validItems, setupID)
-		candidateCount := countUncollectedCandidates(validItems, setupID, current)
-		orgUnitRowCount := countOrgUnitRows(validItems, setupID)
-		plan.Payloads[setupID] = payload
 		plan.Setups = append(plan.Setups, plannedSetup{
-			SetupID:                   setupID,
+			SetupID:                   setupID.String(),
 			RoleName:                  roleName,
 			OrgID:                     orgID,
 			ExternalIDConfigured:      externalIDConfigured,
 			ExternalIDConsistent:      externalIDConsistent,
-			ProxyServerID:             meta.ProxyServerID,
+			ProxyServerID:             meta.proxyServerID,
 			Payload:                   payload,
+			ChangeSet:                 changes,
 			AddedAccounts:             added,
 			RemovedAccounts:           removed,
 			ReenabledAccounts:         reenabled,
+			DisabledAccounts:          disabled,
 			UnchangedAccounts:         unchanged,
 			CurrentAccounts:           current,
-			DiscoveredAccounts:        discoveredAccounts,
+			DiscoveredAccounts:        toAccountRows(discoveredSet),
 			DiscoveredCollectedCount:  collectedCount,
 			DiscoveredCandidateCount:  candidateCount,
 			DiscoveredOrgUnitRowCount: orgUnitRowCount,
 		})
 		plan.CandidateChecks = append(plan.CandidateChecks, CandidateCheck{
-			SetupID:                setupID,
+			SetupID:                setupID.String(),
 			ConfiguredAccountCount: len(current),
-			NQEAccountRowCount:     len(discoveredAccounts),
+			NQEAccountRowCount:     len(discoveredRows),
 			NQECollectedRowCount:   collectedCount,
 			NQECandidateRowCount:   candidateCount,
 			NQEOrgUnitRowCount:     orgUnitRowCount,
@@ -1206,18 +1469,190 @@ func buildPlanWithOptions(items []map[string]any, cloudAccounts []api.CloudAccou
 	return plan, nil
 }
 
-func countCollectedAccounts(items []map[string]any, setupID string) int {
-	count := 0
-	for _, item := range items {
-		if itemSetupID(item) != setupID {
+func assertSafeSelectedSetupOwnership(
+	currentBySetup map[SetupID]cloudSetupMetadata,
+	discoveredBySetup map[SetupID][]DiscoveredAccount,
+) error {
+	currentOwner := make(map[AccountID]SetupID)
+	for setupID, meta := range currentBySetup {
+		current, err := adaptCurrentSetup(meta)
+		if err != nil {
+			return err
+		}
+		for _, account := range current.Accounts {
+			if owner, exists := currentOwner[account.AccountID]; exists && owner != setupID {
+				return fmt.Errorf("account %s is currently owned by both selected setups %s and %s", account.AccountID, owner, setupID)
+			}
+			currentOwner[account.AccountID] = setupID
+		}
+	}
+
+	desiredOwner := make(map[AccountID]SetupID)
+	for setupID, accounts := range discoveredBySetup {
+		for _, account := range accounts {
+			if owner, exists := desiredOwner[account.AccountID]; exists && owner != setupID {
+				return fmt.Errorf("account %s is desired in both selected setups %s and %s", account.AccountID, owner, setupID)
+			}
+			desiredOwner[account.AccountID] = setupID
+			if owner, exists := currentOwner[account.AccountID]; exists && owner != setupID {
+				return fmt.Errorf(
+					"refusing cross-setup move of account %s from %s to %s: selected setup ownership is unique, but sequential setup PATCHes cannot guarantee a partial apply leaves the account in exactly one setup",
+					account.AccountID,
+					owner,
+					setupID,
+				)
+			}
+		}
+	}
+	return nil
+}
+
+func accountRowsFromChanges(changes []AccountChange, useBefore bool) []accountRow {
+	result := make([]accountRow, 0, len(changes))
+	for _, change := range changes {
+		account := change.After
+		if useBefore {
+			account = change.Before
+		}
+		if account == nil {
 			continue
 		}
-		collected, ok := boolValue(item["Collected?"])
-		if ok && collected {
+		result = append(result, accountRow{
+			AccountID:   account.AccountID.String(),
+			AccountName: account.AccountName,
+		})
+	}
+	return result
+}
+
+func legacyExternalIDAssignments(assignments externalIDBySetupAssignments) externalIDAssignments {
+	if len(assignments) == 0 {
+		return nil
+	}
+	result := make(externalIDAssignments, len(assignments))
+	for setupID, byAccount := range assignments {
+		legacy := make(map[string]string, len(byAccount))
+		for accountID, externalID := range byAccount {
+			legacy[accountID.String()] = externalID
+		}
+		result[setupID.String()] = legacy
+	}
+	return result
+}
+
+func extMapToStringMap(assignments map[AccountID]string) map[string]string {
+	if len(assignments) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(assignments))
+	for accountID, externalID := range assignments {
+		result[accountID.String()] = externalID
+	}
+	return result
+}
+
+func firstSetupID[T any](values map[SetupID]T) (SetupID, bool) {
+	if len(values) != 1 {
+		return "", false
+	}
+	for setupID := range values {
+		return setupID, true
+	}
+	return "", false
+}
+
+func countCollectedAccountsFromRows(accounts []DiscoveredAccount, setupID SetupID) int {
+	count := 0
+	for _, account := range accounts {
+		if account.SetupID != setupID || !account.CollectedSet {
+			continue
+		}
+		if account.Collected {
 			count++
 		}
 	}
 	return count
+}
+
+func countUncollectedCandidatesFromRows(accounts []DiscoveredAccount, setupID SetupID, current []accountRow) int {
+	currentIDs := make(map[string]bool, len(current))
+	for _, account := range current {
+		currentIDs[account.AccountID] = true
+	}
+	count := 0
+	for _, account := range accounts {
+		if account.SetupID != setupID || !account.CollectedSet {
+			continue
+		}
+		if !account.Collected && !currentIDs[account.AccountID.String()] {
+			count++
+		}
+	}
+	return count
+}
+
+func countOrgUnitRowsFromRows(accounts []DiscoveredAccount, setupID SetupID) int {
+	count := 0
+	for _, account := range accounts {
+		if account.SetupID != setupID {
+			continue
+		}
+		if account.HasOrganizationalID {
+			count++
+		}
+	}
+	return count
+}
+
+func toAccountRows(accounts []DiscoveredAccount) []accountRow {
+	result := make([]accountRow, 0, len(accounts))
+	for _, account := range accounts {
+		result = append(result, accountRow{AccountID: account.AccountID.String(), AccountName: account.AccountName})
+	}
+	return result
+}
+
+func mustNewAccountID(value string) AccountID {
+	id, _ := NewAccountID(value)
+	return id
+}
+
+func validateCloudAccountPartitionFromMetadata(account cloudSetupMetadata) error {
+	rolePartitions := make(map[string]bool)
+	for _, info := range account.assumeRoleInfos {
+		parts := strings.Split(strings.TrimSpace(info.RoleArn), ":")
+		if len(parts) < 6 || parts[0] != "arn" || parts[2] != "iam" {
+			continue
+		}
+		partition, err := normalizeAWSPartition(parts[1])
+		if err != nil {
+			return err
+		}
+		rolePartitions[partition] = true
+	}
+	if len(rolePartitions) > 1 {
+		partitions := make([]string, 0, len(rolePartitions))
+		for partition := range rolePartitions {
+			partitions = append(partitions, partition)
+		}
+		sort.Strings(partitions)
+		return fmt.Errorf("mixed IAM role ARN partitions are unsafe: %s", strings.Join(partitions, ", "))
+	}
+	if len(rolePartitions) == 0 || len(account.regions) == 0 {
+		return nil
+	}
+	var rolePartition string
+	for partition := range rolePartitions {
+		rolePartition = partition
+	}
+	regions := make([]string, 0, len(account.regions))
+	for region := range account.regions {
+		regions = append(regions, region)
+	}
+	if err := validateRegionsForPartition(regions, rolePartition); err != nil {
+		return fmt.Errorf("role ARN partition and configured regions disagree: %w", err)
+	}
+	return nil
 }
 
 type accountRow struct {
@@ -1258,170 +1693,6 @@ func reenabledAccounts(current []api.AssumeRoleInfo, next []accountRow) []accoun
 		return result[i].AccountID < result[j].AccountID
 	})
 	return result
-}
-
-func groupAccountsBySetup(items []map[string]any) map[string][]accountRow {
-	grouped := make(map[string][]accountRow)
-	for _, item := range items {
-		setupID := stringValue(item["Cloud Setup ID"])
-		if setupID == "" {
-			setupID = stringValue(item["Setup ID"])
-		}
-		if setupID == "" {
-			setupID = stringValue(item["Cloud Account Setup ID"])
-		}
-		if setupID == "" {
-			setupID = stringValue(item["Cloud Account Setup"])
-		}
-		accountID := stringValue(item["Cloud Account ID"])
-		if setupID == "" || accountID == "" {
-			continue
-		}
-		accountName := stringValue(item["Cloud Account Name"])
-		if accountName == "" {
-			accountName = accountID
-		}
-		grouped[setupID] = append(grouped[setupID], accountRow{AccountID: accountID, AccountName: accountName})
-	}
-	for setupID := range grouped {
-		grouped[setupID] = dedupeAccounts(grouped[setupID])
-	}
-	return grouped
-}
-
-func validNQEAccountItems(items []map[string]any) ([]map[string]any, []AccountSummary) {
-	valid := make([]map[string]any, 0, len(items))
-	ignored := make([]AccountSummary, 0)
-	for _, item := range items {
-		accountID := stringValue(item["Cloud Account ID"])
-		if accountID == "" {
-			valid = append(valid, item)
-			continue
-		}
-		if isPlausibleAWSAccountID(accountID) {
-			valid = append(valid, item)
-			continue
-		}
-		ignored = append(ignored, AccountSummary{
-			AccountID:   accountID,
-			AccountName: stringValue(item["Cloud Account Name"]),
-		})
-	}
-	return valid, ignored
-}
-
-func isPlausibleAWSAccountID(value string) bool {
-	value = strings.TrimSpace(value)
-	if len(value) == 0 || len(value) > 12 {
-		return false
-	}
-	for _, char := range value {
-		if char < '0' || char > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-func fallbackAccounts(items []map[string]any, cloudMetaMap map[string]api.CloudAccount) (string, []accountRow) {
-	if len(cloudMetaMap) != 1 {
-		return "", nil
-	}
-	var setupID string
-	for key := range cloudMetaMap {
-		setupID = key
-	}
-	accounts := make([]accountRow, 0, len(items))
-	for _, item := range items {
-		accountID := stringValue(item["Cloud Account ID"])
-		if accountID == "" {
-			continue
-		}
-		accountName := stringValue(item["Cloud Account Name"])
-		if accountName == "" {
-			accountName = accountID
-		}
-		accounts = append(accounts, accountRow{AccountID: accountID, AccountName: accountName})
-	}
-	return setupID, dedupeAccounts(accounts)
-}
-
-func hasAccountRows(items []map[string]any) bool {
-	for _, item := range items {
-		if stringValue(item["Cloud Account ID"]) != "" {
-			return true
-		}
-	}
-	return false
-}
-
-func countUncollectedCandidates(items []map[string]any, setupID string, current []accountRow) int {
-	currentIDs := make(map[string]bool, len(current))
-	for _, account := range current {
-		currentIDs[account.AccountID] = true
-	}
-	count := 0
-	for _, item := range items {
-		if itemSetupID(item) != setupID {
-			continue
-		}
-		collected, ok := boolValue(item["Collected?"])
-		accountID := stringValue(item["Cloud Account ID"])
-		if ok && !collected && accountID != "" && !currentIDs[accountID] {
-			count++
-		}
-	}
-	return count
-}
-
-func countOrgUnitRows(items []map[string]any, setupID string) int {
-	count := 0
-	for _, item := range items {
-		if itemSetupID(item) != setupID {
-			continue
-		}
-		if hasOrgUnitIDs(item["Organizational Unit IDs"]) {
-			count++
-		}
-	}
-	return count
-}
-
-func hasOrgUnitIDs(value any) bool {
-	switch typed := value.(type) {
-	case []any:
-		return len(typed) > 0
-	case []string:
-		return len(typed) > 0
-	case string:
-		return strings.TrimSpace(typed) != "" && strings.TrimSpace(typed) != "[]"
-	default:
-		return false
-	}
-}
-
-func itemSetupID(item map[string]any) string {
-	for _, key := range []string{"Cloud Setup ID", "Setup ID", "Cloud Account Setup ID", "Cloud Account Setup"} {
-		if setupID := stringValue(item[key]); setupID != "" {
-			return setupID
-		}
-	}
-	return ""
-}
-
-func boolValue(value any) (bool, bool) {
-	switch typed := value.(type) {
-	case bool:
-		return typed, true
-	case string:
-		switch strings.ToLower(strings.TrimSpace(typed)) {
-		case "true", "yes":
-			return true, true
-		case "false", "no":
-			return false, true
-		}
-	}
-	return false, false
 }
 
 func organizationDiscoveryVisible(candidateCount, orgUnitRowCount int) bool {
@@ -1467,26 +1738,6 @@ func dedupeAccounts(accounts []accountRow) []accountRow {
 	result := make([]accountRow, 0, len(order))
 	for _, accountID := range order {
 		result = append(result, seen[accountID])
-	}
-	return result
-}
-
-func cloudAccountMetaMap(cloudAccounts []api.CloudAccount, setupIDs []string) map[string]api.CloudAccount {
-	allowed := setupIDSet(setupIDs)
-	result := make(map[string]api.CloudAccount)
-	for _, account := range cloudAccounts {
-		accountType := strings.ToUpper(strings.TrimSpace(account.Type))
-		if accountType != "" && accountType != "AWS" {
-			continue
-		}
-		setupID := strings.TrimSpace(account.Name)
-		if setupID == "" {
-			continue
-		}
-		if len(allowed) > 0 && !allowed[setupID] {
-			continue
-		}
-		result[setupID] = account
 	}
 	return result
 }
@@ -1767,19 +2018,6 @@ func buildManualPayloads(payloads auditPayloads) map[string][]api.AssumeRoleInfo
 	return manual
 }
 
-func regionMap(regions map[string]api.RegionMeta) map[string]int64 {
-	result := make(map[string]int64, len(regions))
-	currentEpochMs := time.Now().UnixMilli()
-	for region, meta := range regions {
-		if meta.TestInstant != 0 {
-			result[region] = meta.TestInstant
-			continue
-		}
-		result[region] = currentEpochMs
-	}
-	return result
-}
-
 func stringMap(values map[string]string) map[string]string {
 	result := make(map[string]string, len(values))
 	for key, value := range values {
@@ -1798,11 +2036,6 @@ func nonEmptyStringMap(values map[string]string) map[string]string {
 		return nil
 	}
 	return values
-}
-
-func stringValue(value any) string {
-	text, _ := value.(string)
-	return strings.TrimSpace(text)
 }
 
 func writeAuditPayloads(path string, payloads auditPayloads) (string, error) {

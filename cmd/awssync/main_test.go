@@ -29,6 +29,27 @@ func TestRootCommandIncludesBuildMetadataInVersion(t *testing.T) {
 	}
 }
 
+func TestNQECommandsRefusePruneMissingAtCLIBoundary(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "root", args: []string{"--prune-missing"}},
+		{name: "preflight", args: []string{"preflight", "--prune-missing"}},
+		{name: "webhook", args: []string{"serve-webhook", "--prune-missing"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cmd := newRootCommand()
+			cmd.SetArgs(test.args)
+			if err := cmd.Execute(); err == nil || err.Error() != pruneMissingRefusal {
+				t.Fatalf("Execute() error = %v; want exactly %q", err, pruneMissingRefusal)
+			}
+		})
+	}
+}
+
 func TestRootCommandHonorsLocalSnapshotAndOutputFlags(t *testing.T) {
 	var seenNQEQuery string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -41,10 +62,10 @@ func TestRootCommandHonorsLocalSnapshotAndOutputFlags(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			seenNQEQuery = r.URL.RawQuery
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111","Cloud Account Name":"acct-a","Collected?":false}]}`))
+			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111111111111","Cloud Account Name":"acct-a","Collected?":false}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[{"name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111:role/ForwardRole","externalId":"Org:99","enabled":true}]}]`))
+			_, _ = w.Write([]byte(`[{"name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111111111111:role/ForwardRole","externalId":"Org:99","enabled":true}]}]`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -99,6 +120,121 @@ func TestRootCommandHonorsLocalSnapshotAndOutputFlags(t *testing.T) {
 	}
 }
 
+func TestEmitSummaryHumanReportsSkippedNQERows(t *testing.T) {
+	stdout := captureStdout(t, func() {
+		err := emitSummaryHuman(&app.Summary{
+			Host:                "https://fwd.example",
+			NetworkID:           "network-1",
+			Output:              "payload.json",
+			FetchedItemCount:    2,
+			IgnoredNQEItemCount: 1,
+			SkippedNQERows: []app.MalformedNQERowSummary{{
+				Row:       2,
+				SetupID:   "setup-a",
+				AccountID: "bad-row",
+				Reason:    "invalid AWS account ID",
+			}},
+		})
+		if err != nil {
+			t.Fatalf("emitSummaryHuman() error = %v", err)
+		}
+	})
+	if !strings.Contains(stdout, "ignored:   1 invalid NQE account row(s)") ||
+		!strings.Contains(stdout, "row 2 setup=setup-a account_id=bad-row: invalid AWS account ID") {
+		t.Fatalf("expected skipped row details in human output:\n%s", stdout)
+	}
+}
+
+func TestSyncAccountsDryRunReportsUnattendedDestructiveGate(t *testing.T) {
+	patchCount := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+			_, _ = w.Write([]byte(`[{
+              "type":"AWS",
+              "name":"setup-a",
+              "assumeRoleInfos":[
+                {"accountId":"111111111111","accountName":"keep","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true},
+                {"accountId":"222222222222","accountName":"remove","roleArn":"arn:aws:iam::222222222222:role/ForwardRole","enabled":true}
+              ]
+            }]`))
+		case r.Method == http.MethodPatch:
+			patchCount++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "accounts.json")
+	if err := os.WriteFile(manifestPath, []byte(`[{"id":"111111111111","name":"keep"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := func(outputPath string, jsonOutput bool) []string {
+		result := []string{
+			"sync-accounts",
+			"--host", server.URL,
+			"--username", "alice",
+			"--password", "secret",
+			"--network-id", "network-1",
+			"--accounts-file", manifestPath,
+			"--setup-id", "setup-a",
+			"--output", outputPath,
+			"--yes",
+			"--allow-removals",
+			"--max-removals", "1",
+			"--max-removal-percent", "100",
+			"--insecure",
+		}
+		if jsonOutput {
+			result = append(result, "--json")
+		}
+		return result
+	}
+
+	jsonOutput := captureStdout(t, func() {
+		cmd := newRootCommand()
+		cmd.SetArgs(args(filepath.Join(dir, "json-payload.json"), true))
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("JSON dry-run Execute() error = %v", err)
+		}
+	})
+	var summary app.Summary
+	if err := json.Unmarshal([]byte(jsonOutput), &summary); err != nil {
+		t.Fatalf("decode JSON dry-run summary: %v\n%s", err, jsonOutput)
+	}
+	if !summary.RemovalBlocked || !strings.Contains(summary.RemovalBlockReason, "--allow-unattended-destructive") {
+		t.Fatalf("JSON dry-run did not report unattended destructive gate: %#v", summary)
+	}
+
+	humanOutput := captureStdout(t, func() {
+		cmd := newRootCommand()
+		cmd.SetArgs(args(filepath.Join(dir, "human-payload.json"), false))
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("human dry-run Execute() error = %v", err)
+		}
+	})
+	for _, want := range []string{
+		"Apply would be blocked:",
+		"--allow-unattended-destructive",
+		"--allow-removals",
+		"--max-removals",
+		"--max-removal-percent",
+	} {
+		if !strings.Contains(humanOutput, want) {
+			t.Fatalf("human dry-run output missing %q:\n%s", want, humanOutput)
+		}
+	}
+	if strings.Contains(humanOutput, "--allow-no-candidates") || strings.Contains(humanOutput, "--allow-no-org-evidence") {
+		t.Fatalf("human dry-run output lists retired NQE removal flags:\n%s", humanOutput)
+	}
+	if patchCount != 0 {
+		t.Fatalf("dry-run unexpectedly patched %d setup(s)", patchCount)
+	}
+}
+
 func TestApplyPlanCommandHonorsLocalYesFlag(t *testing.T) {
 	patched := false
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -115,7 +251,9 @@ func TestApplyPlanCommandHonorsLocalYesFlag(t *testing.T) {
 	defer server.Close()
 
 	planPath := filepath.Join(t.TempDir(), "payload.json")
-	if err := os.WriteFile(planPath, []byte(`{"setup-a":{"type":"AWS","name":"setup-a","regionToProxyServerId":{},"assumeRoleInfos":[]}}`), 0o600); err != nil {
+	if err := os.WriteFile(planPath, []byte(`{"setup-a":{"type":"AWS","name":"setup-a","regionToProxyServerId":{},"assumeRoleInfos":[
+		{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true}
+	]}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	captureStdout(t, func() {
@@ -140,6 +278,59 @@ func TestApplyPlanCommandHonorsLocalYesFlag(t *testing.T) {
 	}
 }
 
+func TestHumanRecoveryOutputIncludesArtifactPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		emit func() error
+		want []string
+	}{
+		{
+			name: "apply-plan",
+			emit: func() error {
+				return emitApplyPlanHuman(&app.ApplyPlanSummary{
+					RollbackOutput:      "/tmp/plan.rollback.json",
+					RollbackSHA256:      "rollback-digest",
+					ResultJournalOutput: "/tmp/plan.result.json",
+				})
+			},
+			want: []string{
+				"rollback:  /tmp/plan.rollback.json",
+				"rollback sha256: rollback-digest",
+				"journal:   /tmp/plan.result.json",
+			},
+		},
+		{
+			name: "external-id",
+			emit: func() error {
+				return emitExternalIDHuman(&app.ExternalIDSummary{
+					RollbackOutput:      "/tmp/external-id.rollback.json",
+					RollbackSHA256:      "rollback-digest",
+					ResultJournalOutput: "/tmp/external-id.result.json",
+				})
+			},
+			want: []string{
+				"rollback:   /tmp/external-id.rollback.json",
+				"rollback sha256: rollback-digest",
+				"journal:    /tmp/external-id.result.json",
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stdout := captureStdout(t, func() {
+				if err := test.emit(); err != nil {
+					t.Fatalf("emit human output: %v", err)
+				}
+			})
+			for _, want := range test.want {
+				if !strings.Contains(stdout, want) {
+					t.Fatalf("human output missing %q:\n%s", want, stdout)
+				}
+			}
+		})
+	}
+}
+
 func TestSafeSyncRunsPreflightPreviewAndAdditiveApply(t *testing.T) {
 	enabled := false
 	patched := false
@@ -149,14 +340,16 @@ func TestSafeSyncRunsPreflightPreviewAndAdditiveApply(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprintf(w, `{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}`, processedAt)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots":
+			_, _ = fmt.Fprintf(w, `{"snapshots":[{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}]}`, processedAt)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111","Cloud Account Name":"acct-a","Collected?":false}]}`))
+			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111111111111","Cloud Account Name":"acct-a","Collected?":false}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprintf(
 				w,
-				`[{"type":"AWS","name":"setup-a","regions":{"us-east-1":{"testInstant":123}},"assumeRoleInfos":[{"roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":%t}]}]`,
+				`[{"type":"AWS","name":"setup-a","regions":{"us-east-1":{"testInstant":123}},"assumeRoleInfos":[{"roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":%t}]}]`,
 				enabled,
 			)
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/networks/network-1/cloudAccounts/setup-a":
@@ -220,15 +413,17 @@ func TestSafeSyncHandlesMultipleSetups(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
 			_, _ = fmt.Fprintf(w, `{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}`, processedAt)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots":
+			_, _ = fmt.Fprintf(w, `{"snapshots":[{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}]}`, processedAt)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			_, _ = w.Write([]byte(`{"items":[
-				{"Cloud Setup ID":"setup-a","Cloud Account ID":"111","Collected?":false},
-				{"Cloud Setup ID":"setup-b","Cloud Account ID":"222","Collected?":false}
+					{"Cloud Setup ID":"setup-a","Cloud Account ID":"111111111111","Collected?":false},
+					{"Cloud Setup ID":"setup-b","Cloud Account ID":"222222222222","Collected?":false}
 			]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			_, _ = w.Write([]byte(`[
-				{"type":"AWS","name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":false}]},
-				{"type":"AWS","name":"setup-b","assumeRoleInfos":[{"roleArn":"arn:aws:iam::222:role/ForwardRole","enabled":false}]}
+				{"type":"AWS","name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":false}]},
+				{"type":"AWS","name":"setup-b","assumeRoleInfos":[{"roleArn":"arn:aws:iam::222222222222:role/ForwardRole","enabled":false}]}
 			]`))
 		case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/api/networks/network-1/cloudAccounts/"):
 			setupID := strings.TrimPrefix(r.URL.Path, "/api/networks/network-1/cloudAccounts/")
@@ -276,10 +471,12 @@ func TestSafeSyncRequiresConfirmationOutsideAutomation(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
 			_, _ = fmt.Fprintf(w, `{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}`, processedAt)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots":
+			_, _ = fmt.Fprintf(w, `{"snapshots":[{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}]}`, processedAt)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
-			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111","Collected?":false}]}`))
+			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111111111111","Collected?":false}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
-			_, _ = w.Write([]byte(`[{"type":"AWS","name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":false}]}]`))
+			_, _ = w.Write([]byte(`[{"type":"AWS","name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":false}]}]`))
 		case r.Method == http.MethodPatch:
 			patched = true
 			_, _ = w.Write([]byte(`{}`))
@@ -318,10 +515,12 @@ func TestSafeSyncDoesNotPatchWhenNoChangesAreNeeded(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
 			_, _ = fmt.Fprintf(w, `{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}`, processedAt)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots":
+			_, _ = fmt.Fprintf(w, `{"snapshots":[{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}]}`, processedAt)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
-			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111","Collected?":true}]}`))
+			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111111111111","Collected?":true}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
-			_, _ = w.Write([]byte(`[{"type":"AWS","name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true}]}]`))
+			_, _ = w.Write([]byte(`[{"type":"AWS","name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true}]}]`))
 		case r.Method == http.MethodPatch:
 			patched = true
 			_, _ = w.Write([]byte(`{}`))
@@ -359,7 +558,7 @@ func TestSafeSyncStopsWhenPreflightIsNotReady(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
-			_, _ = w.Write([]byte(`[{"type":"AWS","name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111:role/ForwardRole","enabled":true}]}]`))
+			_, _ = w.Write([]byte(`[{"type":"AWS","name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true}]}]`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
 			_, _ = w.Write([]byte(`{"id":"stale","state":"PROCESSED","processedAt":"2020-01-01T00:00:00Z"}`))
 		case r.Method == http.MethodPatch:

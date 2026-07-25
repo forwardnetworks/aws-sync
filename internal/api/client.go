@@ -38,6 +38,14 @@ type NQEResponse struct {
 	Items []map[string]any `json:"items"`
 }
 
+type QueryAWSAccountsResult struct {
+	Items                []map[string]any
+	ObservedRowCount     int
+	PageLimit            int
+	CompletenessUnproven bool
+	CompletenessReason   string
+}
+
 type QueryRequest struct {
 	Query        string         `json:"query,omitempty"`
 	QueryID      string         `json:"queryId,omitempty"`
@@ -230,16 +238,32 @@ func (c *Client) QueryAWSAccounts(
 	parameters map[string]any,
 	setupIDs []string,
 ) ([]map[string]any, error) {
+	result, err := c.QueryAWSAccountsWithMetadata(ctx, networkID, snapshotID, query, queryID, parameters, setupIDs)
+	if err != nil {
+		return nil, err
+	}
+	return result.Items, nil
+}
+
+func (c *Client) QueryAWSAccountsWithMetadata(
+	ctx context.Context,
+	networkID, snapshotID, query, queryID string,
+	parameters map[string]any,
+	setupIDs []string,
+) (QueryAWSAccountsResult, error) {
 	if strings.TrimSpace(networkID) == "" {
-		return nil, fmt.Errorf("network ID is required")
+		return QueryAWSAccountsResult{}, fmt.Errorf("network ID is required")
 	}
 	query = strings.TrimSpace(query)
 	queryID = strings.TrimSpace(queryID)
 	if query == "" && queryID == "" {
-		return nil, fmt.Errorf("query or query ID is required")
+		return QueryAWSAccountsResult{}, fmt.Errorf("query or query ID is required")
 	}
 	setupIDs = cleanSetupIDs(setupIDs)
 	var allItems []map[string]any
+	var previousPageSignature string
+	var completenessUnproven bool
+	completenessReason := "NQE pagination returned a terminating short page"
 	for offset := 0; ; offset += PageLimit {
 		columnFilters := []ColumnFilter{{
 			ColumnName: "Cloud Type",
@@ -267,14 +291,31 @@ func (c *Client) QueryAWSAccounts(
 			endpointPath += fmt.Sprintf("&snapshotId=%s", url.QueryEscape(snapshotID))
 		}
 		if err := c.doJSONRetryable(ctx, http.MethodPost, endpointPath, payload, &response); err != nil {
-			return nil, err
+			return QueryAWSAccountsResult{}, err
 		}
+		pageSignature := nqePageSignature(response.Items)
+		if len(response.Items) > 0 && pageSignature == previousPageSignature {
+			completenessUnproven = true
+			completenessReason = "NQE pagination returned a repeated page; the offset cursor did not advance the result window"
+			break
+		}
+		previousPageSignature = pageSignature
 		allItems = append(allItems, filterItemsBySetupID(response.Items, setupIDs)...)
 		if len(response.Items) < PageLimit {
 			break
 		}
 	}
-	return allItems, nil
+	if len(allItems) > 0 && len(allItems)%PageLimit == 0 && !completenessUnproven {
+		completenessUnproven = true
+		completenessReason = "NQE result count is an exact multiple of PageLimit, so truncation cannot be ruled out"
+	}
+	return QueryAWSAccountsResult{
+		Items:                allItems,
+		ObservedRowCount:     len(allItems),
+		PageLimit:            PageLimit,
+		CompletenessUnproven: completenessUnproven,
+		CompletenessReason:   completenessReason,
+	}, nil
 }
 
 func (c *Client) Networks(ctx context.Context) ([]Network, error) {
@@ -317,6 +358,17 @@ func filterItemsBySetupID(items []map[string]any, setupIDs []string) []map[strin
 	return result
 }
 
+func nqePageSignature(items []map[string]any) string {
+	if len(items) == 0 {
+		return ""
+	}
+	encoded, err := json.Marshal(items)
+	if err != nil {
+		return fmt.Sprintf("%#v", items)
+	}
+	return string(encoded)
+}
+
 func (c *Client) LatestProcessedSnapshot(ctx context.Context, networkID string) (*SnapshotInfo, error) {
 	if strings.TrimSpace(networkID) == "" {
 		return nil, fmt.Errorf("network ID is required")
@@ -335,11 +387,59 @@ func (c *Client) ListSnapshots(ctx context.Context, networkID string) ([]Snapsho
 	if strings.TrimSpace(networkID) == "" {
 		return nil, fmt.Errorf("network ID is required")
 	}
-	var snapshots NetworkSnapshots
-	if err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/networks/%s/snapshots?includeArchived=true", networkID), nil, &snapshots); err != nil {
-		return nil, err
+	var allSnapshots []SnapshotInfo
+	seenSnapshotIDs := make(map[string]int)
+	var previousPage []SnapshotInfo
+	for offset := 0; ; offset += PageLimit {
+		var page NetworkSnapshots
+		endpointPath := fmt.Sprintf(
+			"/networks/%s/snapshots?includeArchived=true&offset=%d&limit=%d",
+			networkID,
+			offset,
+			PageLimit,
+		)
+		if err := c.doJSON(ctx, http.MethodGet, endpointPath, nil, &page); err != nil {
+			return nil, err
+		}
+		if len(page.Snapshots) > PageLimit {
+			return nil, fmt.Errorf("list snapshots returned %d entries at offset %d, exceeding requested limit %d", len(page.Snapshots), offset, PageLimit)
+		}
+		if offset > 0 && sameSnapshotPage(previousPage, page.Snapshots) {
+			return nil, fmt.Errorf("list snapshots pagination repeated the page at offset %d", offset)
+		}
+		for _, snapshot := range page.Snapshots {
+			snapshotID := strings.TrimSpace(snapshot.ID)
+			if snapshotID == "" {
+				continue
+			}
+			if firstOffset, ok := seenSnapshotIDs[snapshotID]; ok {
+				return nil, fmt.Errorf(
+					"list snapshots pagination repeated snapshot %s at offset %d (first seen at offset %d)",
+					snapshotID,
+					offset,
+					firstOffset,
+				)
+			}
+			seenSnapshotIDs[snapshotID] = offset
+		}
+		allSnapshots = append(allSnapshots, page.Snapshots...)
+		if len(page.Snapshots) < PageLimit {
+			return allSnapshots, nil
+		}
+		previousPage = append(previousPage[:0], page.Snapshots...)
 	}
-	return snapshots.Snapshots, nil
+}
+
+func sameSnapshotPage(left, right []SnapshotInfo) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 func (c *Client) CloudAccounts(ctx context.Context, networkID string) ([]CloudAccount, error) {
 	if strings.TrimSpace(networkID) == "" {

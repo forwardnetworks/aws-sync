@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/forwardnetworks/aws-sync/internal/api"
 )
@@ -33,6 +34,7 @@ type PreflightCheck struct {
 }
 
 func Preflight(ctx context.Context, cfg Config) (*PreflightSummary, error) {
+	cfg = prepareReconcileConfig(cfg, time.Now().UTC())
 	if err := validateRemovalLimitValues(cfg.MaxRemovals, cfg.MaxRemovalPercent); err != nil {
 		return nil, err
 	}
@@ -75,11 +77,12 @@ func Preflight(ctx context.Context, cfg Config) (*PreflightSummary, error) {
 		return result, nil
 	}
 	query, queryID, parameters := queryInputs(cfg)
-	items, err := client.QueryAWSAccounts(ctx, cfg.NetworkID, cfg.SnapshotID, query, queryID, parameters, cfg.SetupIDs)
+	queryResult, err := client.QueryAWSAccountsWithMetadata(ctx, cfg.NetworkID, cfg.SnapshotID, query, queryID, parameters, cfg.SetupIDs)
 	if err != nil {
 		result.fail("nqe_aws_accounts", err.Error())
 		return result, nil
 	}
+	items := queryResult.Items
 	result.FetchedItemCount = len(items)
 	if len(items) == 0 {
 		result.fail("nqe_aws_accounts", "query returned no AWS account rows")
@@ -92,16 +95,27 @@ func Preflight(ctx context.Context, cfg Config) (*PreflightSummary, error) {
 		result.fail("forward_cloud_setups", err.Error())
 		return result, nil
 	}
+
+	snapshot, err := parseNQESnapshotFromMapsWithOptions(items, nqeParseOptionsFromQueryResult(queryResult, cfg.AllowMalformedRows))
+	if err != nil {
+		result.fail("patch_plan", err.Error())
+		return result, nil
+	}
+
 	if len(cloudAccounts) == 0 {
 		result.fail("forward_cloud_setups", "Forward returned no cloud account setups")
 	} else {
 		result.pass("forward_cloud_setups", fmt.Sprintf("Forward returned %d cloud account setups", len(cloudAccounts)))
 	}
-	setupIDValues := nqeSetupIDValues(items)
-	awsSetups := cloudAccountMetaMap(cloudAccounts, cfg.SetupIDs)
+	setupIDValues := SetupIDsFromSnapshot(snapshot)
+	awsSetups, err := adaptCloudAccountsBySetupID(cloudAccounts, cfg.SetupIDs)
+	if err != nil {
+		result.fail("aws_account_setups", err.Error())
+		return result, nil
+	}
 	partitionIssues := make([]string, 0)
 	for setupID, setup := range awsSetups {
-		if err := validateCloudAccountPartition(setup); err != nil {
+		if err := validateCloudAccountPartitionFromMetadata(setup); err != nil {
 			partitionIssues = append(partitionIssues, fmt.Sprintf("%s: %s", setupID, err))
 		}
 	}
@@ -119,7 +133,12 @@ func Preflight(ctx context.Context, cfg Config) (*PreflightSummary, error) {
 		result.pass("nqe_setup_id_differentiator", fmt.Sprintf("NQE rows include setup IDs: %s", strings.Join(setupIDValues, ", ")))
 	}
 
-	plan, err := buildPlanForConfig(cfg, items, cloudAccounts)
+	planOptions, err := buildPlanOptionsFromConfig(cfg)
+	if err != nil {
+		result.fail("patch_plan", err.Error())
+		return result, nil
+	}
+	plan, err := buildPlanFromSnapshot(snapshot, cloudAccounts, cfg.SetupIDs, planOptions)
 	if err != nil {
 		result.fail("patch_plan", err.Error())
 		return result, nil
@@ -133,7 +152,7 @@ func Preflight(ctx context.Context, cfg Config) (*PreflightSummary, error) {
 	if summary.IgnoredNQEItemCount > 0 {
 		result.warn("nqe_account_id_validation", fmt.Sprintf("ignored %d NQE row(s) with invalid AWS account IDs", summary.IgnoredNQEItemCount))
 	} else {
-		result.pass("nqe_account_id_validation", "all NQE AWS account IDs are numeric")
+		result.pass("nqe_account_id_validation", "all NQE AWS account IDs are valid 12-digit IDs")
 	}
 	if plan.HasRemovals() {
 		result.fail("account_removals", "planned account removals require review and --allow-removals for apply")
@@ -203,19 +222,4 @@ func (s *PreflightSummary) fail(name, message string) {
 
 func (s *PreflightSummary) warn(name, message string) {
 	s.Checks = append(s.Checks, PreflightCheck{Name: name, Status: "warn", Message: message})
-}
-
-func nqeSetupIDValues(items []map[string]any) []string {
-	seen := make(map[string]bool)
-	result := make([]string, 0)
-	for _, item := range items {
-		setupID := itemSetupID(item)
-		if setupID == "" || seen[setupID] {
-			continue
-		}
-		seen[setupID] = true
-		result = append(result, setupID)
-	}
-	sort.Strings(result)
-	return result
 }
