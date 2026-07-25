@@ -272,7 +272,7 @@ func ChangeExternalID(ctx context.Context, cfg ExternalIDConfig) (*ExternalIDSum
 			Completeness:     InventoryCompletenessUnknown,
 		},
 		ReconcilePolicy{
-			Kind:                 ExplicitOperations,
+			Kind:                 Additive,
 			PlanningInstant:      time.Now().UTC(),
 			OrganizationEvidence: AllowMissingOrganizationEvidence,
 		},

@@ -256,9 +256,8 @@ type DesiredSetup struct {
 type ReconcilePolicyKind string
 
 const (
-	Additive           ReconcilePolicyKind = "Additive"
-	CompleteInventory  ReconcilePolicyKind = "CompleteInventory"
-	ExplicitOperations ReconcilePolicyKind = "ExplicitOperations"
+	Additive          ReconcilePolicyKind = "Additive"
+	CompleteInventory ReconcilePolicyKind = "CompleteInventory"
 )
 
 // OrganizationEvidencePolicy records how a policy treats missing NQE
@@ -271,15 +270,6 @@ const (
 	ReviewedAuthoritativeInventory   OrganizationEvidencePolicy = "ReviewedAuthoritativeInventory"
 )
 
-// ExplicitAccountOperation is an account operation supplied by an
-// ExplicitOperations policy. Value is used by Rename, RotateExternalID, and
-// ChangeRole.
-type ExplicitAccountOperation struct {
-	Kind      ChangeKind
-	AccountID AccountID
-	Value     string
-}
-
 // ReconcilePolicy is a tagged reconciliation policy. PlanningInstant is
 // mandatory: ComputeDesired never consults a clock or supplies a fallback.
 type ReconcilePolicy struct {
@@ -289,7 +279,6 @@ type ReconcilePolicy struct {
 	DefaultRoleName      string
 	UniformExternalID    *string
 	ExternalIDByAccount  map[AccountID]string
-	Operations           []ExplicitAccountOperation
 }
 
 // ChangeKind enumerates field-level changes emitted by ComputeDesired.

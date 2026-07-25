@@ -217,6 +217,207 @@ func TestApplyIntentDigestBindsBaselineSnapshotPolicyAndTarget(t *testing.T) {
 	}
 }
 
+func TestApplyIntentDigestChangesWhenPlanMeaningfullyChanges(t *testing.T) {
+	baseline := []api.AssumeRoleInfo{gatewayAssumeRole("111111111111", true)}
+	first := gatewayTestIntent(t, t.TempDir(), []gatewayTestSetup{{
+		setupID:  "setup-a",
+		baseline: baseline,
+		target: append(append([]api.AssumeRoleInfo(nil), baseline...),
+			gatewayAssumeRole("222222222222", true)),
+		changes: ChangeSet{Add: []AccountChange{{AccountID: AccountID("222222222222")}}},
+	}})
+	second := gatewayTestIntent(t, t.TempDir(), []gatewayTestSetup{{
+		setupID:  "setup-a",
+		baseline: baseline,
+		target: append(append([]api.AssumeRoleInfo(nil), baseline...),
+			gatewayAssumeRole("333333333333", true)),
+		changes: ChangeSet{Add: []AccountChange{{AccountID: AccountID("333333333333")}}},
+	}})
+
+	if first.Digest() == "" || second.Digest() == "" {
+		t.Fatalf("meaningful plans produced empty digests: first=%q second=%q", first.Digest(), second.Digest())
+	}
+	if first.Digest() == second.Digest() {
+		t.Fatalf("different target accounts produced the same digest %q", first.Digest())
+	}
+}
+
+func TestApplyIntentDigestZeroValueIsEmpty(t *testing.T) {
+	if got := (ApplyIntent{}).Digest(); got != "" {
+		t.Fatalf("zero-value ApplyIntent digest = %q, want empty", got)
+	}
+}
+
+func TestValidateDestructiveEvidence(t *testing.T) {
+	type evidenceSetup struct {
+		setupID        string
+		baseline       api.AssumeRoleInfo
+		changes        ChangeSet
+		candidateCount int
+		orgUnitCount   int
+	}
+	govAccount := gatewayAssumeRole("111111111111", true)
+	govAccount.RoleArn = "arn:aws-us-gov:iam::111111111111:role/ForwardRole"
+	remove := ChangeSet{Remove: []AccountChange{{AccountID: AccountID("111111111111")}}}
+	disable := ChangeSet{Disable: []AccountChange{{AccountID: AccountID("111111111111")}}}
+	tests := []struct {
+		name              string
+		evidence          OrganizationEvidencePolicy
+		setups            []evidenceSetup
+		allowNoCandidates bool
+		wantError         string
+	}{
+		{
+			name:     "reviewed authoritative inventory bypasses discovery evidence",
+			evidence: ReviewedAuthoritativeInventory,
+			setups:   []evidenceSetup{{setupID: "setup-a", baseline: gatewayAssumeRole("111111111111", true), changes: remove}},
+		},
+		{
+			name:      "removal with no candidates requires override",
+			evidence:  AllowMissingOrganizationEvidence,
+			setups:    []evidenceSetup{{setupID: "setup-a", baseline: gatewayAssumeRole("111111111111", true), changes: remove}},
+			wantError: "planned removals with no uncollected candidate accounts visible require --allow-no-candidates",
+		},
+		{
+			name:      "disable with no candidates requires override",
+			evidence:  AllowMissingOrganizationEvidence,
+			setups:    []evidenceSetup{{setupID: "setup-a", baseline: gatewayAssumeRole("111111111111", true), changes: disable}},
+			wantError: "planned removals or disables with no uncollected candidate accounts visible require --allow-no-candidates",
+		},
+		{
+			name:              "GovCloud removal requires positive evidence",
+			evidence:          AllowMissingOrganizationEvidence,
+			setups:            []evidenceSetup{{setupID: "setup-gov", baseline: govAccount, changes: remove}},
+			allowNoCandidates: true,
+			wantError:         "GovCloud account removals require positive AWS Organizations evidence; use sync-accounts with an authoritative reviewed manifest when Organizations is unavailable",
+		},
+		{
+			name:              "GovCloud disable requires positive evidence",
+			evidence:          AllowMissingOrganizationEvidence,
+			setups:            []evidenceSetup{{setupID: "setup-gov", baseline: govAccount, changes: disable}},
+			allowNoCandidates: true,
+			wantError:         "GovCloud account removals or disables require positive AWS Organizations evidence; use sync-accounts with an authoritative reviewed manifest when Organizations is unavailable",
+		},
+		{
+			name:     "required evidence reports sorted removal setups",
+			evidence: RequireOrganizationEvidence,
+			setups: []evidenceSetup{
+				{setupID: "setup-z", baseline: gatewayAssumeRole("111111111111", true), changes: remove},
+				{setupID: "setup-a", baseline: gatewayAssumeRole("111111111111", true), changes: remove},
+			},
+			allowNoCandidates: true,
+			wantError:         "planned removals with no AWS Organizations evidence in NQE for setup(s): setup-a, setup-z require --allow-no-org-evidence",
+		},
+		{
+			name:              "required evidence distinguishes disables",
+			evidence:          RequireOrganizationEvidence,
+			setups:            []evidenceSetup{{setupID: "setup-a", baseline: gatewayAssumeRole("111111111111", true), changes: disable}},
+			allowNoCandidates: true,
+			wantError:         "planned removals or disables with no AWS Organizations evidence in NQE for setup(s): setup-a require --allow-no-org-evidence",
+		},
+		{
+			name:              "allow missing evidence accepts explicit override",
+			evidence:          AllowMissingOrganizationEvidence,
+			setups:            []evidenceSetup{{setupID: "setup-a", baseline: gatewayAssumeRole("111111111111", true), changes: remove}},
+			allowNoCandidates: true,
+		},
+		{
+			name:     "visible candidates satisfy required evidence",
+			evidence: RequireOrganizationEvidence,
+			setups: []evidenceSetup{{
+				setupID: "setup-a", baseline: gatewayAssumeRole("111111111111", true), changes: remove, candidateCount: 1,
+			}},
+		},
+		{
+			name:     "non-destructive setup needs no evidence",
+			evidence: RequireOrganizationEvidence,
+			setups:   []evidenceSetup{{setupID: "setup-a", baseline: gatewayAssumeRole("111111111111", true)}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gatewaySetups := make([]gatewayTestSetup, 0, len(tt.setups))
+			counts := make(map[string][2]int, len(tt.setups))
+			for _, setup := range tt.setups {
+				gatewaySetups = append(gatewaySetups, gatewayTestSetup{
+					setupID:  setup.setupID,
+					baseline: []api.AssumeRoleInfo{setup.baseline},
+					changes:  setup.changes,
+				})
+				counts[setup.setupID] = [2]int{setup.candidateCount, setup.orgUnitCount}
+			}
+			intent := gatewayTestIntent(t, t.TempDir(), gatewaySetups)
+			intent.state.policy.OrganizationEvidence = tt.evidence
+			for index := range intent.state.setups {
+				count := counts[intent.state.setups[index].setupID]
+				intent.state.setups[index].discoveredCandidateCount = count[0]
+				intent.state.setups[index].discoveredOrgUnitRowCount = count[1]
+			}
+
+			err := validateDestructiveEvidence(intent.state, ApplyAuthorization{AllowNoCandidates: tt.allowNoCandidates})
+			if tt.wantError == "" {
+				if err != nil {
+					t.Fatalf("validateDestructiveEvidence() error = %v", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != tt.wantError {
+				t.Fatalf("validateDestructiveEvidence() error = %v, want %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestGuardAndApplyPreApplyArtifactFailureFailsEveryPendingSetup(t *testing.T) {
+	intent := gatewayTestIntent(t, t.TempDir(), []gatewayTestSetup{
+		{
+			setupID:  "setup-a",
+			baseline: []api.AssumeRoleInfo{gatewayAssumeRole("111111111111", true)},
+			target: []api.AssumeRoleInfo{
+				gatewayAssumeRole("111111111111", true),
+				gatewayAssumeRole("222222222222", true),
+			},
+			changes: ChangeSet{Add: []AccountChange{{AccountID: AccountID("222222222222")}}},
+		},
+		{
+			setupID:  "setup-b",
+			baseline: []api.AssumeRoleInfo{gatewayAssumeRole("333333333333", true)},
+			target: []api.AssumeRoleInfo{
+				gatewayAssumeRole("333333333333", true),
+				gatewayAssumeRole("444444444444", true),
+			},
+			changes: ChangeSet{Add: []AccountChange{{AccountID: AccountID("444444444444")}}},
+		},
+	})
+	if err := os.Mkdir(rollbackPath(intent.state.outputPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := GuardAndApply(context.Background(), nil, intent, ApplyAuthorization{
+		PlanDigest: intent.Digest(),
+		Approved:   true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "write pre-apply rollback payload") {
+		t.Fatalf("GuardAndApply() error = %v, want rollback artifact failure", err)
+	}
+	if result.PatchedCount != 0 {
+		t.Fatalf("patched count = %d, want 0", result.PatchedCount)
+	}
+	for _, setupID := range []string{"setup-a", "setup-b"} {
+		assertGatewayJournalEntry(t, result.Journal, setupID, ApplyStatusFailed,
+			[]ApplyStatus{ApplyStatusPlanned, ApplyStatusPending, ApplyStatusFailed},
+			"write pre-apply rollback payload")
+	}
+
+	persisted := readGatewayJournal(t, result.JournalOutput)
+	for _, setupID := range []string{"setup-a", "setup-b"} {
+		assertGatewayJournalEntry(t, persisted, setupID, ApplyStatusFailed,
+			[]ApplyStatus{ApplyStatusPlanned, ApplyStatusPending, ApplyStatusFailed},
+			"write pre-apply rollback payload")
+	}
+}
+
 func TestGuardAndApplyReturnsDurablePartialJournal(t *testing.T) {
 	var (
 		mu    sync.Mutex
@@ -300,25 +501,70 @@ func TestGuardAndApplyReturnsDurablePartialJournal(t *testing.T) {
 	if result.PatchedCount != 1 {
 		t.Fatalf("patched count = %d, want 1", result.PatchedCount)
 	}
-	statuses := make(map[string]ApplyStatus)
-	for _, entry := range result.Journal.Setups {
-		statuses[entry.SetupID] = entry.Status
+	assertGatewayJournalEntry(t, result.Journal, "setup-a", ApplyStatusApplied,
+		[]ApplyStatus{ApplyStatusPlanned, ApplyStatusPending, ApplyStatusApplied}, "")
+	assertGatewayJournalEntry(t, result.Journal, "setup-b", ApplyStatusFailed,
+		[]ApplyStatus{ApplyStatusPlanned, ApplyStatusPending, ApplyStatusFailed}, "patch setup setup-b")
+	assertGatewayJournalEntry(t, result.Journal, "setup-c", ApplyStatusPending,
+		[]ApplyStatus{ApplyStatusPlanned, ApplyStatusPending}, "")
+
+	persisted := readGatewayJournal(t, result.JournalOutput)
+	if len(persisted.Setups) != 3 {
+		t.Fatalf("persisted journal = %#v", persisted)
 	}
-	if statuses["setup-a"] != ApplyStatusApplied ||
-		statuses["setup-b"] != ApplyStatusFailed ||
-		statuses["setup-c"] != ApplyStatusPending {
-		t.Fatalf("journal statuses = %#v", statuses)
-	}
-	data, err := os.ReadFile(result.JournalOutput)
+	assertGatewayJournalEntry(t, persisted, "setup-a", ApplyStatusApplied,
+		[]ApplyStatus{ApplyStatusPlanned, ApplyStatusPending, ApplyStatusApplied}, "")
+	assertGatewayJournalEntry(t, persisted, "setup-b", ApplyStatusFailed,
+		[]ApplyStatus{ApplyStatusPlanned, ApplyStatusPending, ApplyStatusFailed}, "patch setup setup-b")
+	assertGatewayJournalEntry(t, persisted, "setup-c", ApplyStatusPending,
+		[]ApplyStatus{ApplyStatusPlanned, ApplyStatusPending}, "")
+}
+
+func readGatewayJournal(t *testing.T, path string) ApplyJournal {
+	t.Helper()
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read durable journal: %v", err)
 	}
-	var persisted ApplyJournal
-	if err := json.Unmarshal(data, &persisted); err != nil {
+	var journal ApplyJournal
+	if err := json.Unmarshal(data, &journal); err != nil {
 		t.Fatalf("decode durable journal: %v", err)
 	}
-	if len(persisted.Setups) != 3 {
-		t.Fatalf("persisted journal = %#v", persisted)
+	return journal
+}
+
+func assertGatewayJournalEntry(
+	t *testing.T,
+	journal ApplyJournal,
+	setupID string,
+	wantStatus ApplyStatus,
+	wantHistory []ApplyStatus,
+	wantError string,
+) {
+	t.Helper()
+	entry := journalEntry(&journal, setupID)
+	if entry == nil {
+		t.Fatalf("journal has no entry for %s: %#v", setupID, journal.Setups)
+	}
+	if entry.Status != wantStatus {
+		t.Fatalf("journal status for %s = %q, want %q", setupID, entry.Status, wantStatus)
+	}
+	if len(entry.History) != len(wantHistory) {
+		t.Fatalf("journal history for %s = %#v, want %#v", setupID, entry.History, wantHistory)
+	}
+	for index := range wantHistory {
+		if entry.History[index] != wantHistory[index] {
+			t.Fatalf("journal history for %s = %#v, want %#v", setupID, entry.History, wantHistory)
+		}
+	}
+	if wantError == "" {
+		if entry.Error != "" {
+			t.Fatalf("journal error for %s = %q, want empty", setupID, entry.Error)
+		}
+		return
+	}
+	if !strings.Contains(entry.Error, wantError) {
+		t.Fatalf("journal error for %s = %q, want substring %q", setupID, entry.Error, wantError)
 	}
 }
 

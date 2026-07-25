@@ -126,7 +126,7 @@ func ApplyPlan(ctx context.Context, cfg ApplyPlanConfig) (*ApplyPlanSummary, err
 	}
 
 	policy := ReconcilePolicy{
-		Kind:                 ExplicitOperations,
+		Kind:                 CompleteInventory,
 		PlanningInstant:      time.Now().UTC(),
 		OrganizationEvidence: AllowMissingOrganizationEvidence,
 	}
@@ -136,7 +136,7 @@ func ApplyPlan(ctx context.Context, cfg ApplyPlanConfig) (*ApplyPlanSummary, err
 		InventorySnapshot{
 			Source:           "reviewed apply-plan payload",
 			SelectedSetupIDs: selectedSetupIDs,
-			Completeness:     InventoryCompletenessUnknown,
+			Completeness:     InventoryCompletenessComplete,
 		},
 		policy,
 		cloudAccounts,

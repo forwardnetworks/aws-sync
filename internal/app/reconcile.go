@@ -17,7 +17,7 @@ func ComputeDesired(current CurrentSetup, snapshot InventorySnapshot, policy Rec
 		return DesiredSetup{}, ChangeSet{}, fmt.Errorf("reconcile policy planning instant is required")
 	}
 	switch policy.Kind {
-	case Additive, CompleteInventory, ExplicitOperations:
+	case Additive, CompleteInventory:
 	default:
 		return DesiredSetup{}, ChangeSet{}, fmt.Errorf("invalid reconcile policy kind %q", policy.Kind)
 	}
@@ -60,30 +60,12 @@ func ComputeDesired(current CurrentSetup, snapshot InventorySnapshot, policy Rec
 			targetMembership[id] = inventoryMembership(account.Membership)
 			targetNames[id] = discoveredAccountName(account)
 		}
-	case ExplicitOperations:
-		for id, account := range currentByID {
-			membership := MembershipPresentDisabled
-			if account.Enabled {
-				membership = MembershipPresentEnabled
-			}
-			targetMembership[id] = membership
-			targetNames[id] = accountName(account)
-		}
-		if err := applyExplicitMembershipOperations(targetMembership, targetNames, discoveredByID, policy.Operations); err != nil {
-			return DesiredSetup{}, ChangeSet{}, err
-		}
 	}
 
 	desiredAccounts, err := materializeDesiredAccounts(currentByID, targetMembership, targetNames, policy)
 	if err != nil {
 		return DesiredSetup{}, ChangeSet{}, err
 	}
-	if policy.Kind == ExplicitOperations {
-		if err := applyExplicitFieldOperations(desiredAccounts, policy.Operations); err != nil {
-			return DesiredSetup{}, ChangeSet{}, err
-		}
-	}
-
 	desired := DesiredSetup{
 		SetupID: current.SetupID,
 		Metadata: SetupMetadata{
@@ -174,51 +156,6 @@ func accountName(account SetupAccount) string {
 		return account.AccountID.String()
 	}
 	return name
-}
-
-func applyExplicitMembershipOperations(
-	membership map[AccountID]DesiredMembership,
-	names map[AccountID]string,
-	discovered map[AccountID]DiscoveredAccount,
-	operations []ExplicitAccountOperation,
-) error {
-	for _, operation := range operations {
-		if operation.AccountID.IsZero() {
-			return fmt.Errorf("explicit %s operation has no account ID", operation.Kind)
-		}
-		switch operation.Kind {
-		case ChangeAdd:
-			account, ok := discovered[operation.AccountID]
-			if !ok {
-				return fmt.Errorf("explicit Add for account %s requires a matching inventory row", operation.AccountID)
-			}
-			membership[operation.AccountID] = inventoryMembership(account.Membership)
-			names[operation.AccountID] = discoveredAccountName(account)
-		case ChangeEnable:
-			if _, ok := membership[operation.AccountID]; !ok {
-				return fmt.Errorf("explicit Enable references unknown account %s", operation.AccountID)
-			}
-			membership[operation.AccountID] = MembershipPresentEnabled
-		case ChangeDisable:
-			if _, ok := membership[operation.AccountID]; !ok {
-				return fmt.Errorf("explicit Disable references unknown account %s", operation.AccountID)
-			}
-			membership[operation.AccountID] = MembershipPresentDisabled
-		case ChangeRemove:
-			if _, ok := membership[operation.AccountID]; !ok {
-				return fmt.Errorf("explicit Remove references unknown account %s", operation.AccountID)
-			}
-			delete(membership, operation.AccountID)
-			delete(names, operation.AccountID)
-		case ChangeRename, ChangeRotateExternalID, ChangeRole:
-			if _, ok := membership[operation.AccountID]; !ok {
-				return fmt.Errorf("explicit %s references unknown account %s", operation.Kind, operation.AccountID)
-			}
-		default:
-			return fmt.Errorf("unsupported explicit account operation %q", operation.Kind)
-		}
-	}
-	return nil
 }
 
 func materializeDesiredAccounts(
@@ -325,43 +262,6 @@ func hasExternalIDAssignment(assignments map[AccountID]string, id AccountID) boo
 func currentAccountHasExternalID(current map[AccountID]SetupAccount, id AccountID) bool {
 	_, ok := current[id]
 	return ok
-}
-
-func applyExplicitFieldOperations(accounts map[AccountID]SetupAccount, operations []ExplicitAccountOperation) error {
-	for _, operation := range operations {
-		account, exists := accounts[operation.AccountID]
-		switch operation.Kind {
-		case ChangeRename:
-			if !exists {
-				return fmt.Errorf("explicit Rename references unknown account %s", operation.AccountID)
-			}
-			account.AccountName = strings.TrimSpace(operation.Value)
-			if account.AccountName == "" {
-				return fmt.Errorf("explicit Rename for account %s requires a non-empty name", operation.AccountID)
-			}
-			accounts[operation.AccountID] = account
-		case ChangeRotateExternalID:
-			if !exists {
-				return fmt.Errorf("explicit RotateExternalID references unknown account %s", operation.AccountID)
-			}
-			account.ExternalID = strings.TrimSpace(operation.Value)
-			accounts[operation.AccountID] = account
-		case ChangeRole:
-			if !exists {
-				return fmt.Errorf("explicit ChangeRole references unknown account %s", operation.AccountID)
-			}
-			roleARN, err := ParseRoleARN(operation.Value)
-			if err != nil {
-				return err
-			}
-			if roleARN.AccountID() != operation.AccountID {
-				return fmt.Errorf("explicit ChangeRole account %s disagrees with role ARN account %s", operation.AccountID, roleARN.AccountID())
-			}
-			account.RoleARN = roleARN
-			accounts[operation.AccountID] = account
-		}
-	}
-	return nil
 }
 
 func desiredRegions(current map[string]int64, planningInstant int64) map[string]int64 {

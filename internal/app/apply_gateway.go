@@ -123,7 +123,6 @@ type applyDigestPolicy struct {
 	DefaultRoleName      string                     `json:"default_role_name"`
 	UniformExternalID    *string                    `json:"uniform_external_id"`
 	ExternalIDByAccount  map[AccountID]string       `json:"external_id_by_account"`
-	Operations           []ExplicitAccountOperation `json:"operations"`
 }
 
 type applyDigestChangeSet struct {
@@ -291,7 +290,6 @@ func approvalDigestPolicy(policy ReconcilePolicy) applyDigestPolicy {
 		DefaultRoleName:      policy.DefaultRoleName,
 		UniformExternalID:    policy.UniformExternalID,
 		ExternalIDByAccount:  policy.ExternalIDByAccount,
-		Operations:           policy.Operations,
 	}
 }
 
@@ -374,11 +372,11 @@ func GuardAndApply(
 	result.RollbackOutput = rollbackPath(state.outputPath)
 	rollbackSHA256, err := writeAuditPayloads(result.RollbackOutput, state.baselines)
 	if err != nil {
-		return failPendingApply(result, fmt.Errorf("write pre-apply rollback payload: %w", err))
+		return failPendingApply(result, "", fmt.Errorf("write pre-apply rollback payload: %w", err))
 	}
 	result.RollbackSHA256 = rollbackSHA256
 	if _, err := writeAuditPayloads(auditPath(state.outputPath), state.targets); err != nil {
-		return failPendingApply(result, err)
+		return failPendingApply(result, "", err)
 	}
 
 	for _, setup := range state.setups {
@@ -389,9 +387,7 @@ func GuardAndApply(
 		current, err := client.CloudAccounts(ctx, state.networkID)
 		if err != nil {
 			wrapped := fmt.Errorf("reload cloud setup %s immediately before apply: %w", setup.setupID, err)
-			setJournalStatus(entry, ApplyStatusFailed, wrapped.Error())
-			_ = persistApplyJournal(&result)
-			return result, wrapped
+			return failPendingApply(result, setup.setupID, wrapped)
 		}
 		actual, err := buildRollbackPayloads(current, []string{setup.setupID})
 		if err != nil {
@@ -410,9 +406,7 @@ func GuardAndApply(
 		}
 		if err := client.PatchCloudAccount(ctx, state.networkID, setup.setupID, setup.target); err != nil {
 			wrapped := fmt.Errorf("patch setup %s: %w", setup.setupID, err)
-			setJournalStatus(entry, ApplyStatusFailed, wrapped.Error())
-			_ = persistApplyJournal(&result)
-			return result, wrapped
+			return failPendingApply(result, setup.setupID, wrapped)
 		}
 		result.PatchedCount++
 		setJournalStatus(entry, ApplyStatusApplied, "")
@@ -555,8 +549,12 @@ func intentHasChanges(state *applyIntentState) bool {
 	return false
 }
 
-func failPendingApply(result ApplyResult, err error) (ApplyResult, error) {
-	markChangedEntries(&result.Journal, ApplyStatusFailed, err.Error())
+func failPendingApply(result ApplyResult, failedSetupID string, err error) (ApplyResult, error) {
+	if failedSetupID == "" {
+		markChangedEntries(&result.Journal, ApplyStatusFailed, err.Error())
+	} else {
+		setJournalStatus(journalEntry(&result.Journal, failedSetupID), ApplyStatusFailed, err.Error())
+	}
 	_ = persistApplyJournal(&result)
 	return result, err
 }
@@ -653,7 +651,6 @@ func cloneReconcilePolicy(policy ReconcilePolicy) ReconcilePolicy {
 	for accountID, externalID := range policy.ExternalIDByAccount {
 		result.ExternalIDByAccount[accountID] = externalID
 	}
-	result.Operations = append([]ExplicitAccountOperation(nil), policy.Operations...)
 	if policy.UniformExternalID != nil {
 		value := *policy.UniformExternalID
 		result.UniformExternalID = &value

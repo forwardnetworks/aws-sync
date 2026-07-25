@@ -71,39 +71,6 @@ func TestComputeDesiredIsDeterministicAndClassifiesFieldChanges(t *testing.T) {
 	}
 }
 
-func TestComputeDesiredMakesDisableFirstClass(t *testing.T) {
-	current := CurrentSetup{
-		SetupID: SetupID("setup-a"),
-		Metadata: SetupMetadata{
-			CloudType: "AWS",
-		},
-		Accounts: []SetupAccount{
-			reconcileTestAccount(t, "111111111111", "account-a", "ForwardRole", "", true),
-		},
-	}
-	policy := ReconcilePolicy{
-		Kind:            ExplicitOperations,
-		PlanningInstant: time.Unix(123, 0).UTC(),
-		DefaultRoleName: "ForwardRole",
-		Operations: []ExplicitAccountOperation{{
-			Kind:      ChangeDisable,
-			AccountID: AccountID("111111111111"),
-		}},
-	}
-	desired, changes, err := ComputeDesired(current, InventorySnapshot{
-		Completeness: InventoryCompletenessUnknown,
-	}, policy)
-	if err != nil {
-		t.Fatalf("ComputeDesired() error = %v", err)
-	}
-	if len(changes.Disable) != 1 || desired.Accounts[0].Enabled {
-		t.Fatalf("disable was not classified explicitly: desired=%#v changes=%#v", desired, changes)
-	}
-	if len(changes.Remove) != 0 {
-		t.Fatalf("disable was misclassified as removal: %#v", changes)
-	}
-}
-
 func TestComputeDesiredCompletenessInvariantByPolicy(t *testing.T) {
 	current := CurrentSetup{
 		SetupID: SetupID("setup-a"),
@@ -143,19 +110,6 @@ func TestComputeDesiredCompletenessInvariantByPolicy(t *testing.T) {
 	}
 	if len(desired.Accounts) != 2 || len(changes.Remove) != 0 {
 		t.Fatalf("Additive removed missing accounts: desired=%#v changes=%#v", desired, changes)
-	}
-
-	explicit := base
-	explicit.Kind = ExplicitOperations
-	explicit.Operations = []ExplicitAccountOperation{{
-		Kind: ChangeRemove, AccountID: AccountID("222222222222"),
-	}}
-	_, changes, err = ComputeDesired(current, snapshot, explicit)
-	if err != nil {
-		t.Fatalf("ExplicitOperations error = %v", err)
-	}
-	if len(changes.Remove) != 1 {
-		t.Fatalf("explicit tombstone did not remove account: %#v", changes)
 	}
 }
 
