@@ -1,5 +1,70 @@
 ## aws-sync {{VERSION}}
 
+### Breaking changes
+
+Read this section before upgrading. Both changes fail closed, so an automated
+deployment that does not act on them will stop working rather than degrade.
+
+**1. `serve-webhook --apply` now requires authentication and an explicit network.**
+
+The server previously accepted unauthenticated requests when no webhook
+credentials were configured, and let an event select any network or setup. It
+now refuses to start in apply mode without all three of:
+
+```bash
+awssync serve-webhook --apply --yes \
+  --webhook-basic-username <USER> \
+  --webhook-basic-password <PASSWORD> \
+  --network-id <NETWORK_ID>
+```
+
+Configure Forward to send matching credentials (`awssync configure-webhook`).
+Event scope is now intersected with configured scope: an event naming a
+different network, or a setup outside `--setup-id`, is rejected with `403`
+instead of being honored.
+
+The server also persists dedupe and snapshot-ordering state to
+`$UserConfigDir/awssync/webhook-state.json`. Ensure the service user can write
+that directory, or set `--webhook-state-file`.
+
+**2. Destructive applies in unattended contexts now require an explicit flag.**
+
+Forward's API exposes no compare-and-swap token, so a concurrent edit in the UI
+cannot be detected before a full-list PATCH overwrites it. Removals and disables
+requested without a human present now require `--allow-unattended-destructive`:
+
+```bash
+awssync --apply --yes --prune-missing --allow-unattended-destructive ...
+awssync sync-accounts --apply --yes --allow-unattended-destructive ...
+awssync apply-plan --allow-unattended-destructive ...   # when removing/disabling
+awssync serve-webhook --apply --yes --allow-unattended-destructive ...
+```
+
+`--yes` counts as unattended even in a terminal. The flag does not bypass
+`--allow-removals`, evidence rules, or either removal ceiling — it is an
+additional acknowledgement, not a replacement. `safe-sync` is unaffected,
+being additive-only. Non-destructive applies are unaffected.
+
+### Safety changes
+
+- Account removal is refused when the NQE inventory cannot be proven complete. A result that is an exact multiple of the page limit, a repeated page, or a non-advancing cursor is treated as possibly truncated, because that is exactly when truncation is invisible. Adds and re-enables are unaffected.
+- A malformed account ID now fails the plan instead of being silently skipped, since skipping rows is how a partial inventory becomes a deletion. Use `--allow-malformed-rows` to skip and report them; doing so marks the inventory incomplete and therefore blocks removals.
+- Setting an account to `enabled: false` is now classified as destructive. It consumes the same authorization and removal ceilings as deletion, closing a path where `apply-plan` could disable every account in a setup without tripping any removal guard.
+- All account-list writes go through one guarded apply path, enforced by a test that fails if any other caller appears.
+- External ID rotation now writes a pre-change rollback artifact, re-reads before PATCH, and binds confirmation to the computed payload.
+- A partial multi-setup apply reports per-setup disposition (applied, pending, conflicted, failed) and a result-journal path instead of a bare error.
+- Planning is deterministic: preview and apply produce identical digests for identical inputs.
+- Cross-setup account moves are refused. Sequential per-setup PATCHes cannot guarantee an account ends up in exactly one setup if the run fails midway.
+
+### Known limitation
+
+Forward's cloud-account API provides no ETag, version field, or other
+compare-and-swap token. A concurrent edit made in the Forward UI between this
+tool's final read and its PATCH will be overwritten, and this is deterministic
+rather than a narrow race. The pre-PATCH re-read narrows the window but does not
+close it. Prefer `safe-sync` for routine work, and avoid unattended destructive
+runs on setups that people also edit by hand.
+
 ### Highlights
 
 - New `awssync safe-sync` command provides a one-command routine workflow: 24-hour snapshot freshness, preflight, compact preview, additive-only enforcement, one confirmation, rollback, and apply.
