@@ -11,6 +11,11 @@ import (
 	"github.com/forwardnetworks/aws-sync/internal/api"
 )
 
+const (
+	manifestNQESimilarityThreshold        = 0.95
+	manifestConfiguredDifferenceThreshold = 0.20
+)
+
 type AWSAccountManifestEntry struct {
 	ID   string `json:"id"`
 	Name string `json:"name,omitempty"`
@@ -95,6 +100,7 @@ func SyncAWSAccountManifest(ctx context.Context, cfg Config, accounts []AWSOrgan
 	if err != nil {
 		return nil, err
 	}
+	warnings := inspectManifestInventoryShape(ctx, client, cfg, setupID, accounts, cloudAccounts)
 	discovered, err := adaptManifestAccountsToSetupRows(accounts, setupID)
 	if err != nil {
 		return nil, err
@@ -111,5 +117,121 @@ func SyncAWSAccountManifest(ctx context.Context, cfg Config, accounts []AWSOrgan
 	} else {
 		snapshot.SelectedSetupIDs = []SetupID{SetupID(setupID)}
 	}
-	return runPlannedSyncFromSnapshot(ctx, cfg, client, snapshot, cloudAccounts)
+	summary, runErr := runPlannedSyncFromSnapshot(ctx, cfg, client, snapshot, cloudAccounts)
+	if summary != nil {
+		summary.SafetyWarnings = append(summary.SafetyWarnings, warnings...)
+	}
+	return summary, runErr
+}
+
+func inspectManifestInventoryShape(
+	ctx context.Context,
+	client *api.Client,
+	cfg Config,
+	setupID string,
+	manifest []AWSOrganizationAccount,
+	cloudAccounts []api.CloudAccount,
+) []SafetyWarning {
+	query, queryID, parameters := queryInputs(cfg)
+	queryResult, err := client.QueryAWSAccountsWithMetadata(
+		ctx,
+		cfg.NetworkID,
+		cfg.SnapshotID,
+		query,
+		queryID,
+		parameters,
+		[]string{setupID},
+	)
+	if err != nil {
+		return []SafetyWarning{{
+			Code: "manifest_nqe_shape_check_unavailable",
+			Message: fmt.Sprintf(
+				"WARNING: could not compare the reviewed manifest with current NQE-observed inventory: %v. This does not block sync-accounts; independently confirm the manifest is authoritative and was not generated from NQE output.",
+				err,
+			),
+		}}
+	}
+	nqeSnapshot, err := parseNQESnapshotFromMapsWithOptions(
+		queryResult.Items,
+		nqeParseOptionsFromQueryResult(queryResult, cfg.AllowMalformedRows),
+	)
+	if err != nil {
+		return []SafetyWarning{{
+			Code: "manifest_nqe_shape_check_unavailable",
+			Message: fmt.Sprintf(
+				"WARNING: could not interpret current NQE-observed inventory for the manifest safeguard: %v. This does not block sync-accounts; independently confirm the manifest is authoritative and was not generated from NQE output.",
+				err,
+			),
+		}}
+	}
+
+	manifestIDs := makeStringSet(len(manifest))
+	for _, account := range manifest {
+		manifestIDs[strings.TrimSpace(account.ID)] = struct{}{}
+	}
+	nqeIDs := makeStringSet(len(nqeSnapshot.DiscoveredAccounts))
+	for _, account := range nqeSnapshot.DiscoveredAccounts {
+		if !account.SetupID.IsZero() && account.SetupID.String() != setupID {
+			continue
+		}
+		nqeIDs[account.AccountID.String()] = struct{}{}
+	}
+	configuredIDs := makeStringSet(0)
+	for _, cloudAccount := range cloudAccounts {
+		if strings.TrimSpace(cloudAccount.Name) != setupID {
+			continue
+		}
+		configuredIDs = makeStringSet(len(cloudAccount.AssumeRoleInfos))
+		for _, account := range cloudAccount.AssumeRoleInfos {
+			if accountID := assumeRoleAccountID(account); accountID != "" {
+				configuredIDs[accountID] = struct{}{}
+			}
+		}
+		break
+	}
+
+	similarity := setJaccardSimilarity(manifestIDs, nqeIDs)
+	configuredDifference := setDifferenceFraction(manifestIDs, configuredIDs)
+	if len(manifestIDs) == 0 || len(nqeIDs) == 0 || len(configuredIDs) == 0 ||
+		similarity < manifestNQESimilarityThreshold ||
+		configuredDifference < manifestConfiguredDifferenceThreshold {
+		return nil
+	}
+	return []SafetyWarning{{
+		Code: "manifest_matches_nqe_observation",
+		Message: fmt.Sprintf(
+			"WARNING: the reviewed manifest account set matches current NQE-observed inventory by %.2f%% while differing from configured membership by %.2f%%. This is the signature of an NQE-derived manifest; NQE is observed and potentially partial, so confirm the manifest came from an independent authoritative source. This warning does not block the operation because a legitimate manifest can coincidentally match NQE.",
+			similarity*100,
+			configuredDifference*100,
+		),
+	}}
+}
+
+func makeStringSet(capacity int) map[string]struct{} {
+	return make(map[string]struct{}, capacity)
+}
+
+func setJaccardSimilarity(left, right map[string]struct{}) float64 {
+	union := make(map[string]struct{}, len(left)+len(right))
+	intersection := 0
+	for value := range left {
+		union[value] = struct{}{}
+		if _, ok := right[value]; ok {
+			intersection++
+		}
+	}
+	for value := range right {
+		union[value] = struct{}{}
+	}
+	if len(union) == 0 {
+		return 1
+	}
+	return float64(intersection) / float64(len(union))
+}
+
+func setDifferenceFraction(candidate, configured map[string]struct{}) float64 {
+	if len(configured) == 0 {
+		return 0
+	}
+	return 1 - setJaccardSimilarity(candidate, configured)
 }

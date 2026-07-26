@@ -139,6 +139,11 @@ func TestChangeExternalIDConfirmsComputedDigestBeforeGatewayApply(t *testing.T) 
 			_ = json.NewEncoder(w).Encode([]api.CloudAccount{stored})
 		case http.MethodPatch:
 			patchCount++
+			var payload api.PatchPayload
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode PATCH: %v", err)
+			}
+			stored = testCloudAccountFromPatchPayload(payload)
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)
@@ -175,8 +180,8 @@ func TestChangeExternalIDConfirmsComputedDigestBeforeGatewayApply(t *testing.T) 
 	if err != nil {
 		t.Fatalf("ChangeExternalID() error = %v", err)
 	}
-	if confirmationCount != 1 || getCount != 2 || patchCount != 1 {
-		t.Fatalf("confirmation/weak re-read/PATCH counts = %d/%d/%d, want 1/2/1", confirmationCount, getCount, patchCount)
+	if confirmationCount != 1 || getCount != 3 || patchCount != 1 {
+		t.Fatalf("confirmation/pre-read/post-read/PATCH counts = %d/%d/%d, want 1/3/1", confirmationCount, getCount, patchCount)
 	}
 	if summary.PlanDigest == "" || summary.ResultJournalOutput == "" {
 		t.Fatalf("missing gateway digest or result journal: %#v", summary)

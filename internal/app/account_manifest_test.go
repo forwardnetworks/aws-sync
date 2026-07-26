@@ -51,6 +51,101 @@ func TestLoadAWSAccountManifestRejectsInvalidAndDuplicateIDs(t *testing.T) {
 	}
 }
 
+func TestSyncAWSAccountManifestWarnsWhenManifestMatchesNQEButNotConfiguredMembership(t *testing.T) {
+	server := newManifestSafeguardTestServer(t)
+	defer server.Close()
+
+	summary, err := SyncAWSAccountManifest(context.Background(), Config{
+		Host:      server.URL,
+		Username:  "user",
+		Password:  "pass",
+		NetworkID: "network-1",
+		SetupIDs:  []string{"setup-a"},
+		APIPrefix: "/api",
+		Output:    filepath.Join(t.TempDir(), "plan.json"),
+	}, manifestSafeguardAccounts())
+	if err != nil {
+		t.Fatalf("SyncAWSAccountManifest() error = %v", err)
+	}
+	if len(summary.SafetyWarnings) != 1 || summary.SafetyWarnings[0].Code != "manifest_matches_nqe_observation" {
+		t.Fatalf("safety warnings = %#v", summary.SafetyWarnings)
+	}
+	if !strings.Contains(summary.SafetyWarnings[0].Message, "legitimate manifest can coincidentally match NQE") {
+		t.Fatalf("warning does not explain false-positive behavior: %q", summary.SafetyWarnings[0].Message)
+	}
+}
+
+func TestSyncAWSAccountManifestSurfacesHighRemovalFraction(t *testing.T) {
+	server := newManifestSafeguardTestServer(t)
+	defer server.Close()
+
+	summary, err := SyncAWSAccountManifest(context.Background(), Config{
+		Host:              server.URL,
+		Username:          "user",
+		Password:          "pass",
+		NetworkID:         "network-1",
+		SetupIDs:          []string{"setup-a"},
+		APIPrefix:         "/api",
+		Output:            filepath.Join(t.TempDir(), "plan.json"),
+		MaxRemovals:       5,
+		MaxRemovalPercent: 100,
+	}, manifestSafeguardAccounts())
+	if err != nil {
+		t.Fatalf("SyncAWSAccountManifest() error = %v", err)
+	}
+	if len(summary.RemovalImpacts) != 1 {
+		t.Fatalf("removal impacts = %#v", summary.RemovalImpacts)
+	}
+	impact := summary.RemovalImpacts[0]
+	if impact.RemovedCount != 3 || impact.ConfiguredCount != 5 || impact.RemovalPercent != 60 ||
+		impact.Message != "This removes 3 of 5 accounts (60.00%) from setup setup-a." {
+		t.Fatalf("removal impact = %#v", impact)
+	}
+}
+
+func newManifestSafeguardTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"items":[
+				{"Cloud Setup ID":"setup-a","Cloud Account ID":"111111111111","Cloud Account Name":"one","Collected?":true},
+				{"Cloud Setup ID":"setup-a","Cloud Account ID":"222222222222","Cloud Account Name":"two","Collected?":true}
+			]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+			infos := make([]api.AssumeRoleInfo, 0, 5)
+			for _, accountID := range []string{
+				"111111111111",
+				"222222222222",
+				"333333333333",
+				"444444444444",
+				"555555555555",
+			} {
+				infos = append(infos, api.AssumeRoleInfo{
+					AccountID: accountID,
+					RoleArn:   "arn:aws:iam::" + accountID + ":role/ForwardRole",
+					Enabled:   true,
+				})
+			}
+			_ = json.NewEncoder(w).Encode([]api.CloudAccount{{
+				Type:            "AWS",
+				Name:            "setup-a",
+				AssumeRoleInfos: infos,
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func manifestSafeguardAccounts() []AWSOrganizationAccount {
+	return []AWSOrganizationAccount{
+		{ID: "111111111111", Name: "one"},
+		{ID: "222222222222", Name: "two"},
+	}
+}
+
 func TestRunAWSAccountManifestBuildsGovCloudRoleARNs(t *testing.T) {
 	output := filepath.Join(t.TempDir(), "payload.json")
 	summary, err := RunAWSAccountManifest(context.Background(), AWSOrganizationConfig{
@@ -109,13 +204,21 @@ func TestRunAWSAccountManifestRejectsPartitionRegionMismatch(t *testing.T) {
 func TestSyncAWSAccountManifestDryRunReportsRemovalAndApplyRequiresApproval(t *testing.T) {
 	patchCount := 0
 	var patchedPayload api.PatchPayload
+	current := api.CloudAccount{
+		Type: "AWS",
+		Name: "gov-prod",
+		Regions: map[string]api.RegionMeta{
+			"us-gov-west-1": {TestInstant: 1},
+		},
+		AssumeRoleInfos: []api.AssumeRoleInfo{
+			{AccountID: "111111111111", AccountName: "keep", RoleArn: "arn:aws-us-gov:iam::111111111111:role/ForwardRole", Enabled: true},
+			{AccountID: "222222222222", AccountName: "remove", RoleArn: "arn:aws-us-gov:iam::222222222222:role/ForwardRole", Enabled: true},
+		},
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
-			_, _ = w.Write([]byte(`[{"type":"AWS","name":"gov-prod","regions":{"us-gov-west-1":{"testInstant":1}},"assumeRoleInfos":[
-              {"accountId":"111111111111","accountName":"keep","roleArn":"arn:aws-us-gov:iam::111111111111:role/ForwardRole","enabled":true},
-              {"accountId":"222222222222","accountName":"remove","roleArn":"arn:aws-us-gov:iam::222222222222:role/ForwardRole","enabled":true}
-            ]}]`))
+			_ = json.NewEncoder(w).Encode([]api.CloudAccount{current})
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/networks/network-1/cloudAccounts/gov-prod":
 			if err := json.NewDecoder(r.Body).Decode(&patchedPayload); err != nil {
 				t.Errorf("decode PATCH payload: %v", err)
@@ -123,6 +226,7 @@ func TestSyncAWSAccountManifestDryRunReportsRemovalAndApplyRequiresApproval(t *t
 				return
 			}
 			patchCount++
+			current = testCloudAccountFromPatchPayload(patchedPayload)
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)

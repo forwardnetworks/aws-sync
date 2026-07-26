@@ -145,6 +145,75 @@ func TestEmitSummaryHumanReportsSkippedNQERows(t *testing.T) {
 	}
 }
 
+func TestEmitSummaryHumanAndJSONExposePostPatchVerificationFailure(t *testing.T) {
+	failure := app.ApplyVerificationFailure{
+		SetupID:        "setup-a",
+		Status:         "mismatch",
+		Message:        "CRITICAL: post-PATCH verification detected unexplained Forward state; use rollback artifact /tmp/rollback.json",
+		RollbackOutput: "/tmp/rollback.json",
+	}
+	summary := &app.Summary{
+		Output:                    "/tmp/plan.json",
+		ApplyVerificationFailures: []app.ApplyVerificationFailure{failure},
+	}
+	human := captureStdout(t, func() {
+		if err := emitSummaryHuman(summary); err != nil {
+			t.Fatalf("emitSummaryHuman() error = %v", err)
+		}
+	})
+	for _, want := range []string{
+		"!!! CRITICAL POST-APPLY SAFETY ALERT !!!",
+		"setup setup-a",
+		"rollback artifact /tmp/rollback.json",
+		"No automatic remediation was attempted",
+	} {
+		if !strings.Contains(human, want) {
+			t.Fatalf("human output missing %q:\n%s", want, human)
+		}
+	}
+	data, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"apply_verification_failures"`) ||
+		!strings.Contains(string(data), `"status":"mismatch"`) ||
+		!strings.Contains(string(data), `"rollback_output":"/tmp/rollback.json"`) {
+		t.Fatalf("JSON output did not expose post-PATCH failure: %s", data)
+	}
+}
+
+func TestEmitSummaryHumanHighlightsManifestWarningAndRemovalFraction(t *testing.T) {
+	summary := &app.Summary{
+		Output: "/tmp/plan.json",
+		SafetyWarnings: []app.SafetyWarning{{
+			Code:    "manifest_matches_nqe_observation",
+			Message: "WARNING: manifest resembles NQE-observed inventory",
+		}},
+		RemovalImpacts: []app.RemovalImpact{{
+			SetupID:         "setup-a",
+			RemovedCount:    968,
+			ConfiguredCount: 978,
+			RemovalPercent:  98.9775,
+			Message:         "This removes 968 of 978 accounts (98.98%) from setup setup-a.",
+		}},
+	}
+	output := captureStdout(t, func() {
+		if err := emitSummaryHuman(summary); err != nil {
+			t.Fatalf("emitSummaryHuman() error = %v", err)
+		}
+	})
+	for _, want := range []string{
+		"!!! SAFETY WARNING !!!",
+		"manifest_matches_nqe_observation",
+		"!!! DESTRUCTIVE REMOVAL PREVIEW !!!",
+		"This removes 968 of 978 accounts (98.98%)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("human output missing %q:\n%s", want, output)
+		}
+	}
+}
+
 func TestSyncAccountsDryRunReportsUnattendedDestructiveGate(t *testing.T) {
 	patchCount := 0
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -237,12 +306,18 @@ func TestSyncAccountsDryRunReportsUnattendedDestructiveGate(t *testing.T) {
 
 func TestApplyPlanCommandHonorsLocalYesFlag(t *testing.T) {
 	patched := false
+	current := api.CloudAccount{Type: "AWS", Name: "setup-a", AssumeRoleInfos: []api.AssumeRoleInfo{}}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
-			_, _ = w.Write([]byte(`[{"type":"AWS","name":"setup-a","assumeRoleInfos":[]}]`))
+			_ = json.NewEncoder(w).Encode([]api.CloudAccount{current})
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/networks/network-1/cloudAccounts/setup-a":
 			patched = true
+			var payload api.PatchPayload
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode PATCH: %v", err)
+			}
+			current = testCloudAccountFromPatchPayload(payload)
 			_, _ = w.Write([]byte(`{}`))
 		default:
 			http.NotFound(w, r)
@@ -334,6 +409,15 @@ func TestHumanRecoveryOutputIncludesArtifactPaths(t *testing.T) {
 func TestSafeSyncRunsPreflightPreviewAndAdditiveApply(t *testing.T) {
 	enabled := false
 	patched := false
+	current := api.CloudAccount{
+		Type:    "AWS",
+		Name:    "setup-a",
+		Regions: map[string]api.RegionMeta{"us-east-1": {TestInstant: 123}},
+		AssumeRoleInfos: []api.AssumeRoleInfo{{
+			RoleArn: "arn:aws:iam::111111111111:role/ForwardRole",
+			Enabled: false,
+		}},
+	}
 	processedAt := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -347,11 +431,7 @@ func TestSafeSyncRunsPreflightPreviewAndAdditiveApply(t *testing.T) {
 			_, _ = w.Write([]byte(`{"items":[{"Cloud Setup ID":"setup-a","Cloud Account ID":"111111111111","Cloud Account Name":"acct-a","Collected?":false}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprintf(
-				w,
-				`[{"type":"AWS","name":"setup-a","regions":{"us-east-1":{"testInstant":123}},"assumeRoleInfos":[{"roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":%t}]}]`,
-				enabled,
-			)
+			_ = json.NewEncoder(w).Encode([]api.CloudAccount{current})
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/networks/network-1/cloudAccounts/setup-a":
 			var payload api.PatchPayload
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -361,6 +441,7 @@ func TestSafeSyncRunsPreflightPreviewAndAdditiveApply(t *testing.T) {
 				t.Fatalf("safe-sync payload did not re-enable account: %#v", payload)
 			}
 			enabled = true
+			current = testCloudAccountFromPatchPayload(payload)
 			patched = true
 			_, _ = w.Write([]byte(`{}`))
 		default:
@@ -408,6 +489,24 @@ func TestSafeSyncRunsPreflightPreviewAndAdditiveApply(t *testing.T) {
 
 func TestSafeSyncHandlesMultipleSetups(t *testing.T) {
 	patched := map[string]bool{}
+	current := map[string]api.CloudAccount{
+		"setup-a": {
+			Type: "AWS",
+			Name: "setup-a",
+			AssumeRoleInfos: []api.AssumeRoleInfo{{
+				RoleArn: "arn:aws:iam::111111111111:role/ForwardRole",
+				Enabled: false,
+			}},
+		},
+		"setup-b": {
+			Type: "AWS",
+			Name: "setup-b",
+			AssumeRoleInfos: []api.AssumeRoleInfo{{
+				RoleArn: "arn:aws:iam::222222222222:role/ForwardRole",
+				Enabled: false,
+			}},
+		},
+	}
 	processedAt := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -421,12 +520,14 @@ func TestSafeSyncHandlesMultipleSetups(t *testing.T) {
 					{"Cloud Setup ID":"setup-b","Cloud Account ID":"222222222222","Collected?":false}
 			]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
-			_, _ = w.Write([]byte(`[
-				{"type":"AWS","name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":false}]},
-				{"type":"AWS","name":"setup-b","assumeRoleInfos":[{"roleArn":"arn:aws:iam::222222222222:role/ForwardRole","enabled":false}]}
-			]`))
+			_ = json.NewEncoder(w).Encode([]api.CloudAccount{current["setup-a"], current["setup-b"]})
 		case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/api/networks/network-1/cloudAccounts/"):
 			setupID := strings.TrimPrefix(r.URL.Path, "/api/networks/network-1/cloudAccounts/")
+			var payload api.PatchPayload
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode PATCH: %v", err)
+			}
+			current[setupID] = testCloudAccountFromPatchPayload(payload)
 			patched[setupID] = true
 			_, _ = w.Write([]byte(`{}`))
 		default:
@@ -1026,6 +1127,25 @@ func TestResolveSetupIDsForCLINonInteractiveAutoSelectsSingle(t *testing.T) {
 	}
 	if len(setupIDs) != 1 || setupIDs[0] != "only-setup" {
 		t.Fatalf("unexpected setup IDs %#v", setupIDs)
+	}
+}
+
+func testCloudAccountFromPatchPayload(payload api.PatchPayload) api.CloudAccount {
+	regions := make(map[string]api.RegionMeta, len(payload.Regions))
+	for region, instant := range payload.Regions {
+		regions[region] = api.RegionMeta{TestInstant: instant}
+	}
+	regionToProxy := make(map[string]string, len(payload.RegionToProxyServerID))
+	for region, proxyID := range payload.RegionToProxyServerID {
+		regionToProxy[region] = proxyID
+	}
+	return api.CloudAccount{
+		Type:                  payload.Type,
+		Name:                  payload.Name,
+		ProxyServerID:         payload.ProxyServerID,
+		RegionToProxyServerID: regionToProxy,
+		Regions:               regions,
+		AssumeRoleInfos:       append([]api.AssumeRoleInfo(nil), payload.AssumeRoleInfos...),
 	}
 }
 

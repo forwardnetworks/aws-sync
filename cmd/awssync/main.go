@@ -157,7 +157,7 @@ func newRootCommand() *cobra.Command {
 			}
 			summary, err := app.Run(cmd.Context(), cfg)
 			if err != nil {
-				return err
+				return emitVerificationFailureResult(cmd, v, summary, summaryVerificationFailures(summary), err)
 			}
 			return emitResult(cmd, v, summary)
 		},
@@ -268,7 +268,7 @@ func newSafeSyncCommand(v *viper.Viper) *cobra.Command {
 			}
 			result, err := app.Run(cmd.Context(), base)
 			if err != nil {
-				return err
+				return emitVerificationFailureResult(cmd, v, result, summaryVerificationFailures(result), err)
 			}
 			emitSafeSyncComplete(result)
 			return nil
@@ -337,7 +337,7 @@ func newExternalIDCommand(v *viper.Viper) *cobra.Command {
 				},
 			})
 			if err != nil {
-				return err
+				return emitVerificationFailureResult(cmd, v, summary, externalIDVerificationFailures(summary), err)
 			}
 			return emitResult(cmd, v, summary)
 		},
@@ -567,7 +567,7 @@ func newApplyPlanCommand(v *viper.Viper) *cobra.Command {
 				AuthorizationActor:         "CLI apply-plan --yes",
 			})
 			if err != nil {
-				return err
+				return emitVerificationFailureResult(cmd, v, summary, applyPlanVerificationFailures(summary), err)
 			}
 			return emitResult(cmd, v, summary)
 		},
@@ -897,7 +897,7 @@ func newSyncAccountsCommand(v *viper.Viper) *cobra.Command {
 			}
 			summary, err := app.SyncAWSAccountManifest(cmd.Context(), cfg, accounts)
 			if err != nil {
-				return err
+				return emitVerificationFailureResult(cmd, v, summary, summaryVerificationFailures(summary), err)
 			}
 			return emitResult(cmd, v, summary)
 		},
@@ -1441,6 +1441,7 @@ func emitWaitHuman(result *monitor.WaitResult) error {
 
 func emitApplyPlanHuman(summary *app.ApplyPlanSummary) error {
 	fmt.Fprintln(os.Stdout, "Apply-plan report")
+	emitApplyVerificationFailures(summary.ApplyVerificationFailures)
 	fmt.Fprintf(os.Stdout, "  host:      %s\n", summary.Host)
 	fmt.Fprintf(os.Stdout, "  network:   %s\n", summary.NetworkID)
 	fmt.Fprintf(os.Stdout, "  plan:      %s\n", summary.PlanPath)
@@ -1457,6 +1458,7 @@ func emitApplyPlanHuman(summary *app.ApplyPlanSummary) error {
 
 func emitExternalIDHuman(summary *app.ExternalIDSummary) error {
 	fmt.Fprintln(os.Stdout, "External ID migration report")
+	emitApplyVerificationFailures(summary.ApplyVerificationFailures)
 	fmt.Fprintf(os.Stdout, "  host:       %s\n", summary.Host)
 	fmt.Fprintf(os.Stdout, "  network:    %s\n", summary.NetworkID)
 	fmt.Fprintf(os.Stdout, "  setup:      %s\n", summary.SetupID)
@@ -1533,6 +1535,9 @@ func emitSummaryHuman(summary *app.Summary) error {
 		return emitAWSOrganizationsHuman(summary)
 	}
 	fmt.Fprintf(os.Stdout, "Sync report\n")
+	emitApplyVerificationFailures(summary.ApplyVerificationFailures)
+	emitSafetyWarnings(os.Stdout, summary.SafetyWarnings)
+	emitRemovalImpacts(os.Stdout, summary.RemovalImpacts)
 	fmt.Fprintf(os.Stdout, "  host:      %s\n", summary.Host)
 	fmt.Fprintf(os.Stdout, "  network:   %s\n", summary.NetworkID)
 	if summary.Source != "" {
@@ -1616,6 +1621,74 @@ func emitSummaryHuman(summary *app.Summary) error {
 	fmt.Fprintln(os.Stdout, "\nSummary:")
 	fmt.Fprintf(os.Stdout, "  total added=%d, total reenabled=%d, total disabled=%d, total removed=%d\n", addedTotal, reenabledTotal, disabledTotal, removedTotal)
 	return nil
+}
+
+func emitApplyVerificationFailures(failures []app.ApplyVerificationFailure) {
+	if len(failures) == 0 {
+		return
+	}
+	fmt.Fprintln(os.Stdout, "\n!!! CRITICAL POST-APPLY SAFETY ALERT !!!")
+	for _, failure := range failures {
+		fmt.Fprintf(os.Stdout, "  setup %s: %s\n", failure.SetupID, failure.Message)
+	}
+	fmt.Fprintln(os.Stdout, "  No automatic remediation was attempted. Review the journal and rollback artifact before deciding whose change wins.")
+}
+
+func emitSafetyWarnings(output io.Writer, warnings []app.SafetyWarning) {
+	if len(warnings) == 0 {
+		return
+	}
+	fmt.Fprintln(output, "\n!!! SAFETY WARNING !!!")
+	for _, warning := range warnings {
+		fmt.Fprintf(output, "  [%s] %s\n", warning.Code, warning.Message)
+	}
+}
+
+func emitRemovalImpacts(output io.Writer, impacts []app.RemovalImpact) {
+	if len(impacts) == 0 {
+		return
+	}
+	fmt.Fprintln(output, "\n!!! DESTRUCTIVE REMOVAL PREVIEW !!!")
+	for _, impact := range impacts {
+		fmt.Fprintf(output, "  %s\n", impact.Message)
+	}
+}
+
+func emitVerificationFailureResult(
+	cmd *cobra.Command,
+	v *viper.Viper,
+	value any,
+	failures []app.ApplyVerificationFailure,
+	runErr error,
+) error {
+	if value == nil || len(failures) == 0 {
+		return runErr
+	}
+	if err := emitResult(cmd, v, value); err != nil {
+		return fmt.Errorf("%w; additionally failed to emit post-apply safety result: %v", runErr, err)
+	}
+	return runErr
+}
+
+func summaryVerificationFailures(summary *app.Summary) []app.ApplyVerificationFailure {
+	if summary == nil {
+		return nil
+	}
+	return summary.ApplyVerificationFailures
+}
+
+func externalIDVerificationFailures(summary *app.ExternalIDSummary) []app.ApplyVerificationFailure {
+	if summary == nil {
+		return nil
+	}
+	return summary.ApplyVerificationFailures
+}
+
+func applyPlanVerificationFailures(summary *app.ApplyPlanSummary) []app.ApplyVerificationFailure {
+	if summary == nil {
+		return nil
+	}
+	return summary.ApplyVerificationFailures
 }
 
 func safeSyncPreflightError(summary *app.PreflightSummary) error {
@@ -1779,6 +1852,8 @@ func confirmPost(post, yes bool, setupID string, stdin *os.File, stderr io.Write
 }
 
 func confirmApplyFromSummary(summary *app.Summary, stdin *os.File, stderr io.Writer) error {
+	emitSafetyWarnings(stderr, summary.SafetyWarnings)
+	emitRemovalImpacts(stderr, summary.RemovalImpacts)
 	addedTotal, disabledTotal, removedTotal := 0, 0, 0
 	for _, setup := range summary.PlannedSetups {
 		addedTotal += len(setup.AddedAccounts)
