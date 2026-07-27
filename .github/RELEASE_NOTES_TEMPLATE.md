@@ -1,95 +1,51 @@
 ## aws-sync {{VERSION}}
 
-### Breaking changes
+### This release
 
-Read this section before upgrading. These changes fail closed, so an automated
-deployment that does not act on them will stop working rather than degrade.
+Additive safety hardening. **No breaking changes** — upgrading from v3.0.0
+requires no configuration changes.
 
-**1. NQE-based account removal has been removed.**
+- **Post-apply verification.** Each setup is re-read after a successful PATCH
+  and compared against the approved target. Unexplained divergence stops the
+  apply, is recorded as `conflicted` in the result journal, and points at the
+  rollback artifact. No automatic remediation is attempted: a corrective PATCH
+  would repeat the same overwrite, and deciding whose change wins is a human
+  call.
 
-`--prune-missing` remains a recognized option so existing automation receives
-an actionable error, but it always refuses before credentials, NQE, planning,
-or PATCH work. NQE is observed snapshot inventory, not an authoritative account
-manifest, so an absent row cannot prove an account should be deleted. Replace
-NQE prune workflows with `sync-accounts` and a complete human-reviewed manifest.
-Manifest removals still require `--allow-removals` and both nonzero removal
-ceilings.
+  This narrows the concurrent-edit gap; it does not close it. See *Known
+  limitation* below for exactly what remains undetectable.
 
-**2. `serve-webhook --apply` now requires authentication and an explicit network.**
+- **Manifest quality warnings.** `sync-accounts` warns when a manifest closely
+  matches observed NQE inventory while diverging from configured membership —
+  the signature of a manifest derived from NQE, which reproduces by hand the
+  unsound inference retired in v3.0.0. It warns rather than blocks.
 
-The server previously accepted unauthenticated requests when no webhook
-credentials were configured, and let an event select any network or setup. It
-now refuses to start in apply mode without all three of:
+- **Removal impact is always stated.** Previews now say "removes 968 of 978
+  accounts (98.98%)" regardless of what the configured ceilings permit.
 
-```bash
-awssync serve-webhook --apply --yes \
-  --webhook-basic-username <USER> \
-  --webhook-basic-password <PASSWORD> \
-  --network-id <NETWORK_ID>
-```
+- **Webhook state locking.** A second daemon sharing a state file now fails
+  fast instead of silently corrupting dedupe records and snapshot watermarks.
 
-Configure Forward to send matching credentials (`awssync configure-webhook`).
-Event scope is now intersected with configured scope: an event naming a
-different network, or a setup outside `--setup-id`, is rejected with `403`
-instead of being honored.
+### Upgrading from v2.x
 
-The server also persists dedupe and snapshot-ordering state to
-`$UserConfigDir/awssync/webhook-state.json`. Ensure the service user can write
-that directory, or set `--webhook-state-file`.
-
-**3. Destructive applies in unattended contexts now require an explicit flag.**
-
-Forward's API exposes no compare-and-swap token, so a concurrent edit in the UI
-cannot be detected before a full-list PATCH overwrites it. Removals and disables
-requested without a human present now require `--allow-unattended-destructive`:
-
-```bash
-awssync sync-accounts --apply --yes --allow-unattended-destructive ...
-awssync apply-plan --allow-unattended-destructive ...   # when removing/disabling
-awssync serve-webhook --apply --yes --allow-unattended-destructive ...
-```
-
-`--yes` counts as unattended even in a terminal. The flag does not bypass
-`--allow-removals`, evidence rules, or either removal ceiling — it is an
-additional acknowledgement, not a replacement. `safe-sync` is unaffected,
-being additive-only. Non-destructive applies are unaffected.
-
-### Safety changes
-
-- NQE reconciliation is unconditionally additive. Pagination completeness checks remain to diagnose truncated observed data, but completeness no longer authorizes absence-based deletion.
-- A malformed account ID now fails the plan instead of being silently skipped, since skipping rows is how a partial inventory becomes a deletion. Use `--allow-malformed-rows` to skip and report them; doing so marks the inventory incomplete and therefore blocks removals.
-- Setting an account to `enabled: false` is now classified as destructive. It consumes the same authorization and removal ceilings as deletion, closing a path where `apply-plan` could disable every account in a setup without tripping any removal guard.
-- All account-list writes go through one guarded apply path, enforced by a test that fails if any other caller appears.
-- External ID rotation now writes a pre-change rollback artifact, re-reads before PATCH, and binds confirmation to the computed payload.
-- A partial multi-setup apply reports per-setup disposition (applied, pending, conflicted, failed) and a result-journal path instead of a bare error.
-- Planning is deterministic: preview and apply produce identical digests for identical inputs.
-- Cross-setup account moves are refused. Sequential per-setup PATCHes cannot guarantee an account ends up in exactly one setup if the run fails midway.
+v3.0.0 removed NQE-based account removal and made webhook authentication and
+unattended destructive authorization mandatory. If you are coming from v2.x,
+read [docs/upgrading.md](https://github.com/forwardnetworks/aws-sync/blob/main/docs/upgrading.md)
+before installing — three previously-working invocations now fail closed.
 
 ### Known limitation
 
 Forward's cloud-account API provides no ETag, version field, or other
-compare-and-swap token. A concurrent edit made in the Forward UI between this
-tool's final read and its PATCH will be overwritten, and this is deterministic
-rather than a narrow race. The pre-PATCH re-read narrows the window but does not
-close it. Prefer `safe-sync` for routine work, and avoid unattended destructive
-runs on setups that people also edit by hand.
+compare-and-swap token.
 
-### Highlights
+Post-apply verification detects unexplained divergence after a write. It cannot
+detect a concurrent edit that arrived between this tool's final read and its
+PATCH: the full-list write erases it, and the resulting state then matches the
+approved intent exactly, leaving nothing observable.
 
-- New `awssync safe-sync` command provides a one-command routine workflow: 24-hour snapshot freshness, preflight, compact preview, additive-only enforcement, one confirmation, rollback, and apply.
-- `safe-sync` does not expose prune or removal controls and stops before PATCH if preflight is not ready or the reviewed payload changes.
-- A zero-change `safe-sync` exits successfully without PATCHing Forward or refreshing setup test timestamps.
-- The README is now novice-first, with the routine workflow, count definitions, expected output, common stop conditions, and a short decision diagram before expert features.
-- A one-page routine operator handoff is available at `docs/routine-safe-sync.md`.
-- NQE reconciliation is additive by default: configured accounts missing from the current NQE result remain in the setup, while discovered disabled accounts are re-enabled.
-- NQE-based deletion is retired; `--prune-missing` returns an actionable refusal and reviewed manifest removal remains available through `sync-accounts`.
-- Every apply writes a pre-change `.rollback.json` PATCH payload containing the account list and PATCHable setup fields, not a full setup backup, and verifies that the selected setup state has not changed before the first PATCH.
-- CLI runs pin the latest processed snapshot so planning and apply use one immutable NQE inventory.
-- Invalid NQE account-ID placeholders are ignored and reported instead of becoming AWS accounts.
-- Human-readable output is now the default; use `--json` or `--format json` for automation.
-- Regression coverage includes 0, 1, 10, half, and all-enabled account states; additive NQE and authoritative-manifest paths; multi-setup isolation; concurrent setup changes; rollback; and snapshot pinning.
-- Per-account External ID selection and CSV workflows from v2.3.0 remain supported.
-- Release assets remain available for Linux and macOS on amd64 and arm64 with SHA-256 checksums and GitHub build-provenance attestations.
+Combined with the pre-PATCH comparison, what remains uncovered is an edit
+landing inside the PATCH execution window. Prefer `safe-sync` for routine work,
+and avoid unattended destructive runs on setups that people also edit by hand.
 
 ### Download and verify
 
