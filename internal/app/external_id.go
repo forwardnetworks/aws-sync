@@ -31,30 +31,31 @@ type ExternalIDConfig struct {
 }
 
 type ExternalIDSummary struct {
-	Host                         string                 `json:"host"`
-	NetworkID                    string                 `json:"network_id"`
-	SetupID                      string                 `json:"setup_id"`
-	Apply                        bool                   `json:"apply"`
-	Patched                      bool                   `json:"patched"`
-	Mode                         string                 `json:"mode"`
-	AccountCount                 int                    `json:"account_count"`
-	SelectedAccountCount         int                    `json:"selected_account_count"`
-	ChangedAccountCount          int                    `json:"changed_account_count"`
-	SetAccountCount              int                    `json:"set_account_count"`
-	ClearedAccountCount          int                    `json:"cleared_account_count"`
-	UnchangedAccountCount        int                    `json:"unchanged_account_count"`
-	PreviousExternalIDConfigured bool                   `json:"previous_external_id_configured"`
-	PreviousExternalIDConsistent bool                   `json:"previous_external_id_consistent"`
-	TargetExternalIDConfigured   bool                   `json:"target_external_id_configured"`
-	TargetExternalIDConsistent   bool                   `json:"target_external_id_consistent"`
-	Changes                      []ExternalIDChange     `json:"changes"`
-	Output                       string                 `json:"output"`
-	PayloadSHA256                string                 `json:"payload_sha256"`
-	PlanDigest                   string                 `json:"plan_digest,omitempty"`
-	RollbackOutput               string                 `json:"rollback_output,omitempty"`
-	RollbackSHA256               string                 `json:"rollback_sha256,omitempty"`
-	ResultJournalOutput          string                 `json:"result_journal_output,omitempty"`
-	Payload                      ExternalIDPatchPayload `json:"payload"`
+	Host                         string                     `json:"host"`
+	NetworkID                    string                     `json:"network_id"`
+	SetupID                      string                     `json:"setup_id"`
+	Apply                        bool                       `json:"apply"`
+	Patched                      bool                       `json:"patched"`
+	Mode                         string                     `json:"mode"`
+	AccountCount                 int                        `json:"account_count"`
+	SelectedAccountCount         int                        `json:"selected_account_count"`
+	ChangedAccountCount          int                        `json:"changed_account_count"`
+	SetAccountCount              int                        `json:"set_account_count"`
+	ClearedAccountCount          int                        `json:"cleared_account_count"`
+	UnchangedAccountCount        int                        `json:"unchanged_account_count"`
+	PreviousExternalIDConfigured bool                       `json:"previous_external_id_configured"`
+	PreviousExternalIDConsistent bool                       `json:"previous_external_id_consistent"`
+	TargetExternalIDConfigured   bool                       `json:"target_external_id_configured"`
+	TargetExternalIDConsistent   bool                       `json:"target_external_id_consistent"`
+	Changes                      []ExternalIDChange         `json:"changes"`
+	Output                       string                     `json:"output"`
+	PayloadSHA256                string                     `json:"payload_sha256"`
+	PlanDigest                   string                     `json:"plan_digest,omitempty"`
+	RollbackOutput               string                     `json:"rollback_output,omitempty"`
+	RollbackSHA256               string                     `json:"rollback_sha256,omitempty"`
+	ResultJournalOutput          string                     `json:"result_journal_output,omitempty"`
+	ApplyVerificationFailures    []ApplyVerificationFailure `json:"apply_verification_failures,omitempty"`
+	Payload                      ExternalIDPatchPayload     `json:"payload"`
 }
 
 type ExternalIDChange struct {
@@ -303,6 +304,7 @@ func ChangeExternalID(ctx context.Context, cfg ExternalIDConfig) (*ExternalIDSum
 	summary.RollbackOutput = applyResult.RollbackOutput
 	summary.RollbackSHA256 = applyResult.RollbackSHA256
 	summary.ResultJournalOutput = applyResult.JournalOutput
+	summary.ApplyVerificationFailures = append([]ApplyVerificationFailure(nil), applyResult.VerificationFailures...)
 	if applyErr != nil {
 		if applyResult.JournalOutput != "" {
 			return summary, fmt.Errorf("%w; apply result journal: %s", applyErr, applyResult.JournalOutput)

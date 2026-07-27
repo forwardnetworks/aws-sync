@@ -3,15 +3,21 @@ package webhook
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/forwardnetworks/aws-sync/internal/api"
 )
+
+type webhookStateLock struct {
+	file *os.File
+}
 
 const (
 	previousWebhookStateVersion = 1
@@ -79,6 +85,48 @@ func resolveStatePath(configured string) (string, error) {
 		return "", fmt.Errorf("resolve webhook state directory: %w", err)
 	}
 	return filepath.Join(configDir, "awssync", "webhook-state.json"), nil
+}
+
+func lockWebhookState(path string) (*webhookStateLock, error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("create webhook state directory for lock: %w", err)
+	}
+	// The state itself is atomically replaced during persistence, so its inode
+	// cannot carry a lifetime lock. A stable sidecar represents ownership of the
+	// configured state path across those renames.
+	lockPath := path + ".lock"
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open webhook state lock %s: %w", lockPath, err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = file.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, fmt.Errorf(
+				"webhook state file %s is already locked by another process; only one webhook daemon may use a state file",
+				path,
+			)
+		}
+		return nil, fmt.Errorf("lock webhook state file %s: %w", path, err)
+	}
+	return &webhookStateLock{file: file}, nil
+}
+
+func (lock *webhookStateLock) close() error {
+	if lock == nil || lock.file == nil {
+		return nil
+	}
+	unlockErr := syscall.Flock(int(lock.file.Fd()), syscall.LOCK_UN)
+	closeErr := lock.file.Close()
+	lock.file = nil
+	if unlockErr != nil {
+		return fmt.Errorf("unlock webhook state file: %w", unlockErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close webhook state lock: %w", closeErr)
+	}
+	return nil
 }
 
 func loadWebhookState(path string) (webhookState, error) {

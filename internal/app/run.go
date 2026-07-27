@@ -130,48 +130,68 @@ func prepareReconcileConfig(cfg Config, planningInstant time.Time) Config {
 }
 
 type Summary struct {
-	Host                string                          `json:"host"`
-	NetworkID           string                          `json:"network_id"`
-	SnapshotID          string                          `json:"snapshot_id,omitempty"`
-	Source              string                          `json:"source,omitempty"`
-	AWSOrganizationID   string                          `json:"aws_organization_id,omitempty"`
-	AWSManagementID     string                          `json:"aws_management_account_id,omitempty"`
-	AWSAccountCount     int                             `json:"aws_account_count,omitempty"`
-	AWSSkippedCount     int                             `json:"aws_skipped_account_count,omitempty"`
-	CredentialMode      string                          `json:"credential_mode,omitempty"`
-	Regions             []string                        `json:"regions,omitempty"`
-	CreatePayloadReady  bool                            `json:"create_payload_ready,omitempty"`
-	PostedSetupCount    int                             `json:"posted_setup_count,omitempty"`
-	CreatePayload       *api.CreateAWSPayload           `json:"create_payload,omitempty"`
-	ManualAccountData   []ManualAccountData             `json:"manual_account_data,omitempty"`
-	QueryID             string                          `json:"query_id,omitempty"`
-	QueryOverride       bool                            `json:"query_override"`
-	QuerySetupParam     string                          `json:"query_setup_param,omitempty"`
-	SetupIDs            []string                        `json:"setup_ids,omitempty"`
-	SelectedSetupIDs    []string                        `json:"selected_setup_ids,omitempty"`
-	Output              string                          `json:"output"`
-	PayloadSHA256       string                          `json:"payload_sha256,omitempty"`
-	ManualOutput        string                          `json:"manual_output,omitempty"`
-	ManualPayloadSHA256 string                          `json:"manual_payload_sha256,omitempty"`
-	ManualPayloads      map[string][]api.AssumeRoleInfo `json:"manual_payloads,omitempty"`
-	RollbackOutput      string                          `json:"rollback_output,omitempty"`
-	RollbackSHA256      string                          `json:"rollback_sha256,omitempty"`
-	PlanDigest          string                          `json:"plan_digest,omitempty"`
-	ResultJournalOutput string                          `json:"result_journal_output,omitempty"`
-	ApplyJournal        *ApplyJournal                   `json:"apply_journal,omitempty"`
-	Apply               bool                            `json:"apply"`
-	FetchedItemCount    int                             `json:"fetched_item_count"`
-	IgnoredNQEItemCount int                             `json:"ignored_nqe_item_count,omitempty"`
-	IgnoredNQEAccounts  []AccountSummary                `json:"ignored_nqe_accounts,omitempty"`
-	SkippedNQERows      []MalformedNQERowSummary        `json:"skipped_nqe_rows,omitempty"`
-	PlannedSetupCount   int                             `json:"planned_setup_count"`
-	PatchedSetupCount   int                             `json:"patched_setup_count"`
-	SkippedSetupCount   int                             `json:"skipped_setup_count"`
-	PlannedSetups       []SetupSummary                  `json:"planned_setups"`
-	SkippedSetups       []SkipSummary                   `json:"skipped_setups,omitempty"`
-	CandidateCheck      []CandidateCheck                `json:"candidate_check,omitempty"`
-	RemovalBlocked      bool                            `json:"removal_blocked,omitempty"`
-	RemovalBlockReason  string                          `json:"removal_block_reason,omitempty"`
+	Host                      string                          `json:"host"`
+	NetworkID                 string                          `json:"network_id"`
+	SnapshotID                string                          `json:"snapshot_id,omitempty"`
+	Source                    string                          `json:"source,omitempty"`
+	AWSOrganizationID         string                          `json:"aws_organization_id,omitempty"`
+	AWSManagementID           string                          `json:"aws_management_account_id,omitempty"`
+	AWSAccountCount           int                             `json:"aws_account_count,omitempty"`
+	AWSSkippedCount           int                             `json:"aws_skipped_account_count,omitempty"`
+	CredentialMode            string                          `json:"credential_mode,omitempty"`
+	Regions                   []string                        `json:"regions,omitempty"`
+	CreatePayloadReady        bool                            `json:"create_payload_ready,omitempty"`
+	PostedSetupCount          int                             `json:"posted_setup_count,omitempty"`
+	CreatePayload             *api.CreateAWSPayload           `json:"create_payload,omitempty"`
+	ManualAccountData         []ManualAccountData             `json:"manual_account_data,omitempty"`
+	QueryID                   string                          `json:"query_id,omitempty"`
+	QueryOverride             bool                            `json:"query_override"`
+	QuerySetupParam           string                          `json:"query_setup_param,omitempty"`
+	SetupIDs                  []string                        `json:"setup_ids,omitempty"`
+	SelectedSetupIDs          []string                        `json:"selected_setup_ids,omitempty"`
+	Output                    string                          `json:"output"`
+	PayloadSHA256             string                          `json:"payload_sha256,omitempty"`
+	ManualOutput              string                          `json:"manual_output,omitempty"`
+	ManualPayloadSHA256       string                          `json:"manual_payload_sha256,omitempty"`
+	ManualPayloads            map[string][]api.AssumeRoleInfo `json:"manual_payloads,omitempty"`
+	RollbackOutput            string                          `json:"rollback_output,omitempty"`
+	RollbackSHA256            string                          `json:"rollback_sha256,omitempty"`
+	PlanDigest                string                          `json:"plan_digest,omitempty"`
+	ResultJournalOutput       string                          `json:"result_journal_output,omitempty"`
+	ApplyJournal              *ApplyJournal                   `json:"apply_journal,omitempty"`
+	ApplyVerificationFailures []ApplyVerificationFailure      `json:"apply_verification_failures,omitempty"`
+	Apply                     bool                            `json:"apply"`
+	FetchedItemCount          int                             `json:"fetched_item_count"`
+	IgnoredNQEItemCount       int                             `json:"ignored_nqe_item_count,omitempty"`
+	IgnoredNQEAccounts        []AccountSummary                `json:"ignored_nqe_accounts,omitempty"`
+	SkippedNQERows            []MalformedNQERowSummary        `json:"skipped_nqe_rows,omitempty"`
+	PlannedSetupCount         int                             `json:"planned_setup_count"`
+	PatchedSetupCount         int                             `json:"patched_setup_count"`
+	SkippedSetupCount         int                             `json:"skipped_setup_count"`
+	PlannedSetups             []SetupSummary                  `json:"planned_setups"`
+	SkippedSetups             []SkipSummary                   `json:"skipped_setups,omitempty"`
+	CandidateCheck            []CandidateCheck                `json:"candidate_check,omitempty"`
+	RemovalBlocked            bool                            `json:"removal_blocked,omitempty"`
+	RemovalBlockReason        string                          `json:"removal_block_reason,omitempty"`
+	SafetyWarnings            []SafetyWarning                 `json:"safety_warnings,omitempty"`
+	RemovalImpacts            []RemovalImpact                 `json:"removal_impacts,omitempty"`
+}
+
+// SafetyWarning is a non-blocking operator warning with a stable code for JSON
+// consumers.
+type SafetyWarning struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// RemovalImpact makes destructive cardinality explicit instead of requiring
+// operators or automation to derive it from account arrays.
+type RemovalImpact struct {
+	SetupID         string  `json:"setup_id"`
+	RemovedCount    int     `json:"removed_count"`
+	ConfiguredCount int     `json:"configured_count"`
+	RemovalPercent  float64 `json:"removal_percent"`
+	Message         string  `json:"message"`
 }
 
 type CandidateCheck struct {
@@ -975,6 +995,7 @@ func buildSummary(
 	patchedCount int,
 ) *Summary {
 	setupSummaries := make([]SetupSummary, 0, len(plan.Setups))
+	removalImpacts := make([]RemovalImpact, 0, len(plan.Setups))
 	for _, setup := range plan.Setups {
 		regions := make([]string, 0, len(setup.Payload.Regions))
 		for region := range setup.Payload.Regions {
@@ -1013,6 +1034,26 @@ func buildSummary(
 			UnchangedAccountCount:        len(setup.UnchangedAccounts),
 			ApplyStatus:                  ApplyStatusPlanned,
 		})
+		if removedCount := len(setup.RemovedAccounts); removedCount > 0 {
+			configuredCount := len(setup.CurrentAccounts)
+			percent := 0.0
+			if configuredCount > 0 {
+				percent = float64(removedCount) * 100 / float64(configuredCount)
+			}
+			removalImpacts = append(removalImpacts, RemovalImpact{
+				SetupID:         setup.SetupID,
+				RemovedCount:    removedCount,
+				ConfiguredCount: configuredCount,
+				RemovalPercent:  percent,
+				Message: fmt.Sprintf(
+					"This removes %d of %d accounts (%.2f%%) from setup %s.",
+					removedCount,
+					configuredCount,
+					percent,
+					setup.SetupID,
+				),
+			})
+		}
 	}
 
 	return &Summary{
@@ -1041,6 +1082,7 @@ func buildSummary(
 		PlannedSetups:       setupSummaries,
 		SkippedSetups:       plan.Skips,
 		CandidateCheck:      plan.CandidateChecks,
+		RemovalImpacts:      removalImpacts,
 	}
 }
 
@@ -1050,6 +1092,7 @@ func applyResultToSummary(summary *Summary, result ApplyResult) {
 	summary.RollbackSHA256 = result.RollbackSHA256
 	summary.ResultJournalOutput = result.JournalOutput
 	summary.RemovalBlocked = result.Blocked
+	summary.ApplyVerificationFailures = append([]ApplyVerificationFailure(nil), result.VerificationFailures...)
 	journal := result.Journal
 	summary.ApplyJournal = &journal
 	entries := make(map[string]ApplyJournalEntry, len(result.Journal.Setups))
@@ -1063,7 +1106,7 @@ func applyResultToSummary(summary *Summary, result ApplyResult) {
 		}
 		summary.PlannedSetups[index].ApplyStatus = entry.Status
 		summary.PlannedSetups[index].ApplyError = entry.Error
-		summary.PlannedSetups[index].Patched = entry.Status == ApplyStatusApplied
+		summary.PlannedSetups[index].Patched = journalEntryWasPatched(entry)
 	}
 }
 

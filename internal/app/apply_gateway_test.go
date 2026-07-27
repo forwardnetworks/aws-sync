@@ -168,6 +168,147 @@ func TestGuardAndApplyDisableUsesDestructiveAuthorizationAndRemovalBudget(t *tes
 	}
 }
 
+func TestGuardAndApplyDetectsUnexplainedStateAfterPatch(t *testing.T) {
+	baseline := []api.AssumeRoleInfo{gatewayAssumeRole("111111111111", true)}
+	target := append(append([]api.AssumeRoleInfo(nil), baseline...), gatewayAssumeRole("222222222222", true))
+	var (
+		mu    sync.Mutex
+		state = append([]api.AssumeRoleInfo(nil), baseline...)
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			mu.Lock()
+			accounts := append([]api.AssumeRoleInfo(nil), state...)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode([]api.CloudAccount{{
+				Type:            "AWS",
+				Name:            "setup-a",
+				AssumeRoleInfos: accounts,
+			}})
+		case http.MethodPatch:
+			var payload api.PatchPayload
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("decode PATCH: %v", err)
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			state = append([]api.AssumeRoleInfo(nil), payload.AssumeRoleInfos...)
+			state = append(state, gatewayAssumeRole("333333333333", true))
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := api.NewClient(server.URL, "/api", "alice", "secret", false, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := gatewayTestIntent(t, t.TempDir(), []gatewayTestSetup{{
+		setupID:  "setup-a",
+		baseline: baseline,
+		target:   target,
+		changes:  ChangeSet{Add: []AccountChange{{AccountID: AccountID("222222222222")}}},
+	}})
+	result, err := GuardAndApply(context.Background(), client, intent, ApplyAuthorization{
+		PlanDigest: intent.Digest(),
+		Approved:   true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "CRITICAL: post-PATCH verification") ||
+		!strings.Contains(err.Error(), "extra account(s): 333333333333") ||
+		!strings.Contains(err.Error(), result.RollbackOutput) {
+		t.Fatalf("GuardAndApply() error = %v; want prominent mismatch and rollback guidance", err)
+	}
+	if result.PatchedCount != 1 || len(result.VerificationFailures) != 1 {
+		t.Fatalf("verification result = %+v", result)
+	}
+	assertGatewayJournalEntry(t, result.Journal, "setup-a", ApplyStatusConflicted,
+		[]ApplyStatus{ApplyStatusPlanned, ApplyStatusPending, ApplyStatusApplied, ApplyStatusConflicted},
+		"concurrent write may have been clobbered or interleaved")
+	entry := journalEntry(&result.Journal, "setup-a")
+	if entry.PostPatchVerification == nil || entry.PostPatchVerification.Status != "mismatch" {
+		t.Fatalf("post-PATCH verification journal = %#v", entry.PostPatchVerification)
+	}
+	persisted := readGatewayJournal(t, result.JournalOutput)
+	persistedEntry := journalEntry(&persisted, "setup-a")
+	if persistedEntry.PostPatchVerification == nil || persistedEntry.PostPatchVerification.Status != "mismatch" {
+		t.Fatalf("persisted post-PATCH verification = %#v", persistedEntry.PostPatchVerification)
+	}
+}
+
+func TestGuardAndApplyIgnoresNormalServerManagedPostPatchChanges(t *testing.T) {
+	baseline := []api.AssumeRoleInfo{gatewayAssumeRole("111111111111", true)}
+	target := append(append([]api.AssumeRoleInfo(nil), baseline...), gatewayAssumeRole("222222222222", true))
+	getCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			getCount++
+			accounts := baseline
+			testInstant := int64(456)
+			if getCount > 1 {
+				accounts = []api.AssumeRoleInfo{target[1], target[0]}
+				accounts[0].ErrorMsg = "server-managed collection status"
+				testInstant = 999
+			}
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"type":                  "AWS",
+				"name":                  "setup-a",
+				"regions":               map[string]any{"us-east-1": map[string]any{"testInstant": testInstant}},
+				"regionToProxyServerId": map[string]string{},
+				"assumeRoleInfos":       accounts,
+				"numVirtualizedDevices": 42,
+			}})
+		case http.MethodPatch:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := api.NewClient(server.URL, "/api", "alice", "secret", false, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := gatewayTestIntent(t, t.TempDir(), []gatewayTestSetup{{
+		setupID:  "setup-a",
+		baseline: baseline,
+		target:   target,
+		changes:  ChangeSet{Add: []AccountChange{{AccountID: AccountID("222222222222")}}},
+	}})
+	for _, payloads := range []auditPayloads{intent.state.baselines, intent.state.targets} {
+		payload := payloads["setup-a"]
+		payload.Regions = map[string]int64{"us-east-1": 123}
+		payloads["setup-a"] = payload
+	}
+	intent.state.setups[0].baseline = clonePatchPayload(intent.state.baselines["setup-a"])
+	intent.state.setups[0].target = clonePatchPayload(intent.state.targets["setup-a"])
+	intent.state.digest, err = computeApplyIntentDigest(intent.state)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := GuardAndApply(context.Background(), client, intent, ApplyAuthorization{
+		PlanDigest: intent.Digest(),
+		Approved:   true,
+	})
+	if err != nil {
+		t.Fatalf("GuardAndApply() error = %v", err)
+	}
+	if len(result.VerificationFailures) != 0 {
+		t.Fatalf("normal server-managed changes flagged: %#v", result.VerificationFailures)
+	}
+	entry := journalEntry(&result.Journal, "setup-a")
+	if entry.PostPatchVerification == nil || entry.PostPatchVerification.Status != "matched" {
+		t.Fatalf("post-PATCH verification journal = %#v", entry.PostPatchVerification)
+	}
+}
+
 func TestApplyIntentDigestBindsBaselineSnapshotPolicyAndTarget(t *testing.T) {
 	setup := gatewayTestSetup{
 		setupID: "setup-a",
@@ -633,5 +774,20 @@ func gatewayAssumeRole(accountID string, enabled bool) api.AssumeRoleInfo {
 		AccountID: accountID,
 		RoleArn:   "arn:aws:iam::" + accountID + ":role/ForwardRole",
 		Enabled:   enabled,
+	}
+}
+
+func testCloudAccountFromPatchPayload(payload api.PatchPayload) api.CloudAccount {
+	regions := make(map[string]api.RegionMeta, len(payload.Regions))
+	for region, instant := range payload.Regions {
+		regions[region] = api.RegionMeta{TestInstant: instant}
+	}
+	return api.CloudAccount{
+		Type:                  payload.Type,
+		Name:                  payload.Name,
+		ProxyServerID:         payload.ProxyServerID,
+		RegionToProxyServerID: cloneStringMap(payload.RegionToProxyServerID),
+		Regions:               regions,
+		AssumeRoleInfos:       append([]api.AssumeRoleInfo(nil), payload.AssumeRoleInfos...),
 	}
 }

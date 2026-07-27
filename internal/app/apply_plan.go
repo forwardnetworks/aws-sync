@@ -30,16 +30,17 @@ type ApplyPlanConfig struct {
 }
 
 type ApplyPlanSummary struct {
-	Host                string   `json:"host"`
-	NetworkID           string   `json:"network_id"`
-	PlanPath            string   `json:"plan_path"`
-	PayloadSHA256       string   `json:"payload_sha256"`
-	PlanDigest          string   `json:"plan_digest"`
-	RollbackOutput      string   `json:"rollback_output,omitempty"`
-	RollbackSHA256      string   `json:"rollback_sha256,omitempty"`
-	ResultJournalOutput string   `json:"result_journal_output"`
-	PatchedSetupCount   int      `json:"patched_setup_count"`
-	PatchedSetups       []string `json:"patched_setups"`
+	Host                      string                     `json:"host"`
+	NetworkID                 string                     `json:"network_id"`
+	PlanPath                  string                     `json:"plan_path"`
+	PayloadSHA256             string                     `json:"payload_sha256"`
+	PlanDigest                string                     `json:"plan_digest"`
+	RollbackOutput            string                     `json:"rollback_output,omitempty"`
+	RollbackSHA256            string                     `json:"rollback_sha256,omitempty"`
+	ResultJournalOutput       string                     `json:"result_journal_output"`
+	PatchedSetupCount         int                        `json:"patched_setup_count"`
+	PatchedSetups             []string                   `json:"patched_setups"`
+	ApplyVerificationFailures []ApplyVerificationFailure `json:"apply_verification_failures,omitempty"`
 }
 
 func ApplyPlan(ctx context.Context, cfg ApplyPlanConfig) (*ApplyPlanSummary, error) {
@@ -166,21 +167,22 @@ func ApplyPlan(ctx context.Context, cfg ApplyPlanConfig) (*ApplyPlanSummary, err
 	})
 	patchedSetups := make([]string, 0, applyResult.PatchedCount)
 	for _, entry := range applyResult.Journal.Setups {
-		if entry.Status == ApplyStatusApplied {
+		if journalEntryWasPatched(entry) {
 			patchedSetups = append(patchedSetups, entry.SetupID)
 		}
 	}
 	summary := &ApplyPlanSummary{
-		Host:                cfg.Host,
-		NetworkID:           cfg.NetworkID,
-		PlanPath:            planPath,
-		PayloadSHA256:       fmt.Sprintf("%x", sha256.Sum256(data)),
-		PlanDigest:          intent.Digest(),
-		RollbackOutput:      applyResult.RollbackOutput,
-		RollbackSHA256:      applyResult.RollbackSHA256,
-		ResultJournalOutput: applyResult.JournalOutput,
-		PatchedSetupCount:   applyResult.PatchedCount,
-		PatchedSetups:       patchedSetups,
+		Host:                      cfg.Host,
+		NetworkID:                 cfg.NetworkID,
+		PlanPath:                  planPath,
+		PayloadSHA256:             fmt.Sprintf("%x", sha256.Sum256(data)),
+		PlanDigest:                intent.Digest(),
+		RollbackOutput:            applyResult.RollbackOutput,
+		RollbackSHA256:            applyResult.RollbackSHA256,
+		ResultJournalOutput:       applyResult.JournalOutput,
+		PatchedSetupCount:         applyResult.PatchedCount,
+		PatchedSetups:             patchedSetups,
+		ApplyVerificationFailures: append([]ApplyVerificationFailure(nil), applyResult.VerificationFailures...),
 	}
 	if applyErr != nil {
 		if applyResult.JournalOutput != "" {

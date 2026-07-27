@@ -44,6 +44,9 @@ func TestAcceptedEventSurvivesCrashBeforeCompletion(t *testing.T) {
 
 	// A real crash discards process-local admission signals and the channel.
 	finishProcessAdmission(statePath, eventDedupeKey(event))
+	if err := server.Close(); err != nil {
+		t.Fatalf("release crashed daemon state lock: %v", err)
+	}
 	var recoveredRuns atomic.Int32
 	restarted := newDurableQueueServer(t, statePath, func(_ context.Context, cfg app.Config) (*app.Summary, error) {
 		recoveredRuns.Add(1)
@@ -78,6 +81,9 @@ func TestInFlightEventIsReplayedAfterCrash(t *testing.T) {
 		t.Fatalf("markJobInFlight() exists=%v error=%v", exists, err)
 	}
 	finishProcessAdmission(statePath, eventDedupeKey(event))
+	if err := server.Close(); err != nil {
+		t.Fatalf("release crashed daemon state lock: %v", err)
+	}
 
 	restartedRuns := make(chan struct{}, 1)
 	restarted := newDurableQueueServer(t, statePath, func(_ context.Context, cfg app.Config) (*app.Summary, error) {
@@ -360,6 +366,11 @@ func newDurableQueueServer(t *testing.T, statePath string, run RunFunc) *Server 
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	t.Cleanup(func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("close webhook server: %v", err)
+		}
+	})
 	return server
 }
 

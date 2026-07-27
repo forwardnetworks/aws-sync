@@ -820,6 +820,17 @@ func TestBuildPlanRejectsMalformedNQEAccountID(t *testing.T) {
 
 func TestRunWritesPayloadAndPatchesWhenApplyEnabled(t *testing.T) {
 	var patched []string
+	current := api.CloudAccount{
+		Type:          "AWS",
+		Name:          "setup-a",
+		Regions:       map[string]api.RegionMeta{"us-east-1": {TestInstant: 123}},
+		ProxyServerID: "proxy-1",
+		AssumeRoleInfos: []api.AssumeRoleInfo{{
+			RoleArn:    "arn:aws:iam::111111111111:role/ForwardRole",
+			ExternalID: "Org:99",
+			Enabled:    true,
+		}},
+	}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
 		if !ok || user != "alice" || pass != "secret" {
@@ -832,9 +843,14 @@ func TestRunWritesPayloadAndPatchesWhenApplyEnabled(t *testing.T) {
 			_, _ = w.Write([]byte(`{"items":[{"Setup ID":"setup-a","Cloud Account ID":"111111111111","Cloud Account Name":"acct-a"}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[{"name":"setup-a","regions":{"us-east-1":{"testInstant":123}},"assumeRoleInfos":[{"roleArn":"arn:aws:iam::111111111111:role/ForwardRole","externalId":"Org:99","enabled":true}],"proxyServerId":"proxy-1"}]`))
+			_ = json.NewEncoder(w).Encode([]api.CloudAccount{current})
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/networks/network-1/cloudAccounts/setup-a":
 			patched = append(patched, r.URL.Path)
+			var payload api.PatchPayload
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode PATCH: %v", err)
+			}
+			current = testCloudAccountFromPatchPayload(payload)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{}`))
 		default:

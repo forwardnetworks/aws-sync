@@ -91,6 +91,33 @@ func TestNewRequiresConfiguredNetworkWhenApplyEnabled(t *testing.T) {
 	}
 }
 
+func TestNewRefusesSecondDaemonForSameStateFile(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "webhook-state.json")
+	cfg := Config{
+		StatePath: statePath,
+		Logger:    log.New(io.Discard, "", 0),
+		Run: func(context.Context, app.Config) (*app.Summary, error) {
+			return &app.Summary{}, nil
+		},
+		App: app.Config{
+			Host:     "https://fwd.example",
+			Username: "alice",
+			Password: "secret",
+		},
+	}
+	first, err := New(cfg)
+	if err != nil {
+		t.Fatalf("first New() error = %v", err)
+	}
+	defer first.Close()
+
+	second, err := New(cfg)
+	if second != nil || err == nil || !strings.Contains(err.Error(),
+		"webhook state file "+statePath+" is already locked by another process; only one webhook daemon may use a state file") {
+		t.Fatalf("second New() server=%v error=%v; want state-file lock refusal", second, err)
+	}
+}
+
 func TestHandleEventQueuesExactSnapshot(t *testing.T) {
 	var (
 		mu    sync.Mutex
@@ -230,6 +257,11 @@ func newTestServer(t *testing.T, cfg Config) (*httptest.Server, *Server) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	t.Cleanup(func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("close webhook server: %v", err)
+		}
+	})
 	t.Cleanup(func() {
 		waitForWebhookStateIdle(t, server)
 	})

@@ -18,6 +18,7 @@ import (
 
 func TestApplyPlanPatchesReviewedPayload(t *testing.T) {
 	var patched []string
+	current := api.CloudAccount{Type: "AWS", Name: "setup-a", AssumeRoleInfos: []api.AssumeRoleInfo{}}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
 		if !ok || user != "alice" || pass != "secret" {
@@ -25,7 +26,7 @@ func TestApplyPlanPatchesReviewedPayload(t *testing.T) {
 			return
 		}
 		if r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts" {
-			_, _ = w.Write([]byte(`[{"type":"AWS","name":"setup-a","assumeRoleInfos":[]}]`))
+			_ = json.NewEncoder(w).Encode([]api.CloudAccount{current})
 			return
 		}
 		if r.Method != http.MethodPatch {
@@ -33,6 +34,11 @@ func TestApplyPlanPatchesReviewedPayload(t *testing.T) {
 			return
 		}
 		patched = append(patched, r.URL.Path)
+		var payload api.PatchPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode PATCH: %v", err)
+		}
+		current = testCloudAccountFromPatchPayload(payload)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{}`))
 	}))
@@ -125,6 +131,7 @@ func TestApplyPlanAcceptsPreBranchBinaryArtifacts(t *testing.T) {
 					if err := json.NewDecoder(r.Body).Decode(&patched); err != nil {
 						t.Fatalf("decode PATCH: %v", err)
 					}
+					current = testCloudAccountFromPatchPayload(patched)
 					_, _ = w.Write([]byte(`{}`))
 				default:
 					http.NotFound(w, r)
@@ -263,15 +270,25 @@ func TestApplyPlanDisableRequiresGatewayDestructiveAuthorization(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			patchCount := 0
+			current := api.CloudAccount{
+				Type: "AWS",
+				Name: "prod",
+				AssumeRoleInfos: []api.AssumeRoleInfo{
+					{AccountID: "111111111111", RoleArn: "arn:aws:iam::111111111111:role/ForwardRole", Enabled: true},
+					{AccountID: "222222222222", RoleArn: "arn:aws:iam::222222222222:role/ForwardRole", Enabled: true},
+				},
+			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
-					_, _ = w.Write([]byte(`[{"type":"AWS","name":"prod","assumeRoleInfos":[
-						{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true},
-						{"accountId":"222222222222","roleArn":"arn:aws:iam::222222222222:role/ForwardRole","enabled":true}
-					]}]`))
+					_ = json.NewEncoder(w).Encode([]api.CloudAccount{current})
 				case r.Method == http.MethodPatch:
 					patchCount++
+					var payload api.PatchPayload
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Fatalf("decode PATCH: %v", err)
+					}
+					current = testCloudAccountFromPatchPayload(payload)
 					w.WriteHeader(http.StatusNoContent)
 				default:
 					http.NotFound(w, r)

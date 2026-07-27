@@ -57,6 +57,9 @@ type Server struct {
 	maxAttempts        int
 	retryBaseDelay     time.Duration
 	retryMaxDelay      time.Duration
+	stateLock          *webhookStateLock
+	stateLockCloseOnce sync.Once
+	stateLockCloseErr  error
 }
 
 func New(cfg Config) (*Server, error) {
@@ -104,8 +107,13 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	cfg.StatePath = statePath
+	stateLock, err := lockWebhookState(statePath)
+	if err != nil {
+		return nil, err
+	}
 	state, err := loadWebhookState(statePath)
 	if err != nil {
+		_ = stateLock.close()
 		return nil, err
 	}
 
@@ -124,14 +132,17 @@ func New(cfg Config) (*Server, error) {
 		maxAttempts:        webhookMaxAttempts,
 		retryBaseDelay:     webhookRetryBaseDelay,
 		retryMaxDelay:      webhookRetryMaxDelay,
+		stateLock:          stateLock,
 	}
 	if err := server.recoverInFlightJobs(); err != nil {
+		_ = server.Close()
 		return nil, err
 	}
 	return server, nil
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	defer s.Close()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc(s.cfg.Path, s.handleEvent)
@@ -154,6 +165,18 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// Close releases the interprocess ownership of the configured webhook state
+// path. Run calls it automatically when the daemon stops.
+func (s *Server) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.stateLockCloseOnce.Do(func() {
+		s.stateLockCloseErr = s.stateLock.close()
+	})
+	return s.stateLockCloseErr
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {

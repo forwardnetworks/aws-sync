@@ -27,11 +27,28 @@ const (
 
 // ApplyJournalEntry records the recoverable state of one planned setup.
 type ApplyJournalEntry struct {
-	SetupID    string        `json:"setup_id"`
-	Status     ApplyStatus   `json:"status"`
-	History    []ApplyStatus `json:"history"`
-	HasChanges bool          `json:"has_changes"`
-	Error      string        `json:"error,omitempty"`
+	SetupID               string                       `json:"setup_id"`
+	Status                ApplyStatus                  `json:"status"`
+	History               []ApplyStatus                `json:"history"`
+	HasChanges            bool                         `json:"has_changes"`
+	Error                 string                       `json:"error,omitempty"`
+	PostPatchVerification *PostPatchVerificationRecord `json:"post_patch_verification,omitempty"`
+}
+
+// PostPatchVerificationRecord records whether Forward's state matched the
+// approved intent after a successful PATCH.
+type PostPatchVerificationRecord struct {
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
+}
+
+// ApplyVerificationFailure is surfaced in command JSON as well as the durable
+// journal so automation cannot mistake a sent-but-unverified PATCH for success.
+type ApplyVerificationFailure struct {
+	SetupID        string `json:"setup_id"`
+	Status         string `json:"status"`
+	Message        string `json:"message"`
+	RollbackOutput string `json:"rollback_output"`
 }
 
 // ApplyJournal is atomically rewritten after every setup disposition change.
@@ -73,12 +90,13 @@ type ApplyAuthorization struct {
 
 // ApplyResult is returned even when an apply is partial or blocked.
 type ApplyResult struct {
-	PatchedCount   int
-	Blocked        bool
-	RollbackOutput string
-	RollbackSHA256 string
-	JournalOutput  string
-	Journal        ApplyJournal
+	PatchedCount         int
+	Blocked              bool
+	RollbackOutput       string
+	RollbackSHA256       string
+	JournalOutput        string
+	Journal              ApplyJournal
+	VerificationFailures []ApplyVerificationFailure
 }
 
 // ApplyIntent is immutable after construction. Its state is private and every
@@ -395,7 +413,7 @@ func GuardAndApply(
 			_ = persistApplyJournal(&result)
 			return result, err
 		}
-		if !reflect.DeepEqual(setup.baseline, actual[setup.setupID]) {
+		if len(operatorControlledIntentDifferences(setup.baseline, actual[setup.setupID])) > 0 {
 			conflict := fmt.Errorf(
 				"selected Forward cloud setup state changed after planning for setup %s; no PATCH was sent for that setup; rerun the dry plan (the last-second re-read is only a weak mitigation because Forward provides no atomic compare-and-swap)",
 				setup.setupID,
@@ -410,11 +428,203 @@ func GuardAndApply(
 		}
 		result.PatchedCount++
 		setJournalStatus(entry, ApplyStatusApplied, "")
+		entry.PostPatchVerification = &PostPatchVerificationRecord{Status: "pending"}
+
+		observedAccounts, err := client.CloudAccounts(ctx, state.networkID)
+		if err != nil {
+			failure := fmt.Errorf(
+				"CRITICAL: post-PATCH verification could not re-read setup %s: %w; Forward state is unknown and no automatic remediation was attempted; decide whose change should win, then use rollback artifact %s (SHA-256 %s) if rollback is appropriate",
+				setup.setupID,
+				err,
+				result.RollbackOutput,
+				result.RollbackSHA256,
+			)
+			return failPostPatchVerification(result, entry, "read_failed", ApplyStatusFailed, failure)
+		}
+		observedPayloads, err := buildRollbackPayloads(observedAccounts, []string{setup.setupID})
+		if err != nil {
+			failure := fmt.Errorf(
+				"CRITICAL: post-PATCH verification could not observe setup %s: %w; Forward state is unknown and no automatic remediation was attempted; decide whose change should win, then use rollback artifact %s (SHA-256 %s) if rollback is appropriate",
+				setup.setupID,
+				err,
+				result.RollbackOutput,
+				result.RollbackSHA256,
+			)
+			return failPostPatchVerification(result, entry, "read_failed", ApplyStatusFailed, failure)
+		}
+		if differences := operatorControlledIntentDifferences(setup.target, observedPayloads[setup.setupID]); len(differences) > 0 {
+			failure := fmt.Errorf(
+				"CRITICAL: post-PATCH verification detected unexplained Forward state for setup %s (%s); a concurrent write may have been clobbered or interleaved; no automatic remediation was attempted; decide whose change should win, then use rollback artifact %s (SHA-256 %s) if rollback is appropriate",
+				setup.setupID,
+				strings.Join(differences, "; "),
+				result.RollbackOutput,
+				result.RollbackSHA256,
+			)
+			return failPostPatchVerification(result, entry, "mismatch", ApplyStatusConflicted, failure)
+		}
+		entry.PostPatchVerification = &PostPatchVerificationRecord{Status: "matched"}
 		if err := persistApplyJournal(&result); err != nil {
 			return result, fmt.Errorf("setup %s was patched but its applied result could not be journaled: %w", setup.setupID, err)
 		}
 	}
 	return result, nil
+}
+
+func failPostPatchVerification(
+	result ApplyResult,
+	entry *ApplyJournalEntry,
+	verificationStatus string,
+	applyStatus ApplyStatus,
+	err error,
+) (ApplyResult, error) {
+	entry.PostPatchVerification = &PostPatchVerificationRecord{
+		Status:  verificationStatus,
+		Message: err.Error(),
+	}
+	setJournalStatus(entry, applyStatus, err.Error())
+	result.VerificationFailures = append(result.VerificationFailures, ApplyVerificationFailure{
+		SetupID:        entry.SetupID,
+		Status:         verificationStatus,
+		Message:        err.Error(),
+		RollbackOutput: result.RollbackOutput,
+	})
+	if persistErr := persistApplyJournal(&result); persistErr != nil {
+		return result, fmt.Errorf("%w; additionally could not record post-PATCH verification in %s: %v", err, result.JournalOutput, persistErr)
+	}
+	return result, err
+}
+
+func operatorControlledIntentDifferences(expected, observed api.PatchPayload) []string {
+	differences := make([]string, 0)
+	if expected.Type != observed.Type {
+		differences = append(differences, "setup type differs")
+	}
+	if expected.Name != observed.Name {
+		differences = append(differences, "setup name differs")
+	}
+	if expected.ProxyServerID != observed.ProxyServerID {
+		differences = append(differences, "proxy server differs")
+	}
+	if !stringMapsEqual(expected.RegionToProxyServerID, observed.RegionToProxyServerID) {
+		differences = append(differences, "region-to-proxy mapping differs")
+	}
+	if !stringSetsEqual(mapKeys(expected.Regions), mapKeys(observed.Regions)) {
+		differences = append(differences, "region membership differs")
+	}
+
+	expectedAccounts, expectedAccountsInvalid := verificationAccountsByID(expected.AssumeRoleInfos)
+	observedAccounts, observedAccountsInvalid := verificationAccountsByID(observed.AssumeRoleInfos)
+	if expectedAccountsInvalid {
+		differences = append(differences, "approved intent contains duplicate or unidentifiable account entries")
+	}
+	if observedAccountsInvalid {
+		differences = append(differences, "observed state contains duplicate or unidentifiable account entries")
+	}
+	missing := make([]string, 0)
+	extra := make([]string, 0)
+	for accountID := range expectedAccounts {
+		if _, ok := observedAccounts[accountID]; !ok {
+			missing = append(missing, accountID)
+		}
+	}
+	for accountID := range observedAccounts {
+		if _, ok := expectedAccounts[accountID]; !ok {
+			extra = append(extra, accountID)
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(extra)
+	if len(missing) > 0 {
+		differences = append(differences, "missing account(s): "+strings.Join(missing, ", "))
+	}
+	if len(extra) > 0 {
+		differences = append(differences, "extra account(s): "+strings.Join(extra, ", "))
+	}
+
+	shared := make([]string, 0, len(expectedAccounts))
+	for accountID := range expectedAccounts {
+		if _, ok := observedAccounts[accountID]; ok {
+			shared = append(shared, accountID)
+		}
+	}
+	sort.Strings(shared)
+	for _, accountID := range shared {
+		expectedAccount := expectedAccounts[accountID]
+		observedAccount := observedAccounts[accountID]
+		fields := make([]string, 0, 4)
+		if expectedAccount.AccountName != observedAccount.AccountName {
+			fields = append(fields, "accountName")
+		}
+		if expectedAccount.RoleArn != observedAccount.RoleArn {
+			fields = append(fields, "roleArn")
+		}
+		if expectedAccount.ExternalID != observedAccount.ExternalID {
+			fields = append(fields, "externalId")
+		}
+		if expectedAccount.Enabled != observedAccount.Enabled {
+			fields = append(fields, "enabled")
+		}
+		if len(fields) > 0 {
+			differences = append(differences, fmt.Sprintf("account %s field(s) differ: %s", accountID, strings.Join(fields, ", ")))
+		}
+	}
+	return differences
+}
+
+func verificationAccountsByID(accounts []api.AssumeRoleInfo) (map[string]api.AssumeRoleInfo, bool) {
+	result := make(map[string]api.AssumeRoleInfo, len(accounts))
+	invalid := false
+	for _, account := range accounts {
+		accountID := assumeRoleAccountID(account)
+		if accountID == "" {
+			invalid = true
+			continue
+		}
+		if _, exists := result[accountID]; exists {
+			invalid = true
+		}
+		result[accountID] = account
+	}
+	return result, invalid
+}
+
+func mapKeys[V any](values map[string]V) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func stringSetsEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	sort.Strings(left)
+	sort.Strings(right)
+	return reflect.DeepEqual(left, right)
+}
+
+func stringMapsEqual(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		rightValue, ok := right[key]
+		if !ok || rightValue != value {
+			return false
+		}
+	}
+	return true
+}
+
+func journalEntryWasPatched(entry ApplyJournalEntry) bool {
+	for _, status := range entry.History {
+		if status == ApplyStatusApplied {
+			return true
+		}
+	}
+	return false
 }
 
 func validateApplyAuthorization(state *applyIntentState, authorization ApplyAuthorization) error {
