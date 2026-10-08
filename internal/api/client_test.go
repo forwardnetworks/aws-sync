@@ -421,8 +421,8 @@ func TestRetryWaitHonorsContextCancellation(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "2")
 		w.WriteHeader(http.StatusTooManyRequests)
-		cancel()
 	}))
+	time.AfterFunc(300*time.Millisecond, cancel)
 	defer server.Close()
 
 	client, err := NewClient(server.URL, "/api", "alice", "secret", true, time.Second)
