@@ -1,5 +1,15 @@
 # Upgrading `awssync`
 
+## v3.2.0
+
+`awssync` now talks to Forward exclusively through `forward-go-sdk`. No configuration changes are required. Operator-visible differences:
+
+- `--api-prefix` accepts only `/api`; any other value is rejected.
+- The latest processed snapshot ignores Predict forks.
+- Snapshot listings are read in one request. Forward ignores `offset`, so the former paging could fail on networks with more than 1000 snapshots.
+- PATCH and POST requests are retried only after HTTP 429 or 503. A PATCH is no longer repeated after a 502, 504, or transport failure, so an ambiguous failure is reported instead of replayed.
+
+
 This guide is for operators upgrading from the release that allowed NQE-based `--prune-missing`, allowed an applying webhook receiver without inbound credentials or a fixed network, and allowed unattended destructive applies without an additional acknowledgement.
 
 Read this before replacing the binary. Three existing automation patterns now fail closed.

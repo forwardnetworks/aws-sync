@@ -11,6 +11,21 @@ import (
 	"time"
 )
 
+// queryRequest is the NQE wire body as the server sees it.
+type queryRequest struct {
+	Query        string         `json:"query"`
+	QueryID      string         `json:"queryId"`
+	Parameters   map[string]any `json:"parameters"`
+	QueryOptions struct {
+		Offset        int `json:"offset"`
+		Limit         int `json:"limit"`
+		ColumnFilters []struct {
+			ColumnName string `json:"columnName"`
+			Value      string `json:"value"`
+		} `json:"columnFilters"`
+	} `json:"queryOptions"`
+}
+
 func TestQueryAWSAccountsPagesResults(t *testing.T) {
 	var seenOffsets []int
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -23,7 +38,7 @@ func TestQueryAWSAccountsPagesResults(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		var req QueryRequest
+		var req queryRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
@@ -40,10 +55,10 @@ func TestQueryAWSAccountsPagesResults(t *testing.T) {
 			for i := range items {
 				items[i] = map[string]any{"Cloud Account ID": "a"}
 			}
-			_ = json.NewEncoder(w).Encode(NQEResponse{Items: items})
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": items})
 			return
 		}
-		_ = json.NewEncoder(w).Encode(NQEResponse{Items: []map[string]any{{"Cloud Account ID": "b"}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"Cloud Account ID": "b"}}})
 	}))
 	defer server.Close()
 
@@ -66,7 +81,7 @@ func TestQueryAWSAccountsPagesResults(t *testing.T) {
 func TestQueryAWSAccountsMarksExactPageLimitMultipleUnproven(t *testing.T) {
 	var seenOffsets []int
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req QueryRequest
+		var req queryRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
@@ -77,10 +92,10 @@ func TestQueryAWSAccountsMarksExactPageLimitMultipleUnproven(t *testing.T) {
 			for i := range items {
 				items[i] = map[string]any{"Cloud Account ID": "111111111111"}
 			}
-			_ = json.NewEncoder(w).Encode(NQEResponse{Items: items})
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": items})
 			return
 		}
-		_ = json.NewEncoder(w).Encode(NQEResponse{})
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
 	}))
 	defer server.Close()
 
@@ -110,7 +125,7 @@ func TestQueryAWSAccountsMarksRepeatedPageUnproven(t *testing.T) {
 	}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(NQEResponse{Items: items})
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": items})
 	}))
 	defer server.Close()
 
@@ -140,7 +155,7 @@ func TestQueryAWSAccountsAddsSnapshotIDQueryParam(t *testing.T) {
 		}
 		rawQuery = r.URL.RawQuery
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(NQEResponse{Items: []map[string]any{{"Cloud Account ID": "a"}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"Cloud Account ID": "a"}}})
 	}))
 	defer server.Close()
 
@@ -158,13 +173,13 @@ func TestQueryAWSAccountsAddsSnapshotIDQueryParam(t *testing.T) {
 }
 
 func TestQueryAWSAccountsUsesSourceQueryAndSingleSetupFilter(t *testing.T) {
-	var req QueryRequest
+	var req queryRequest
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(NQEResponse{Items: []map[string]any{{"Cloud Account ID": "a"}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"Cloud Account ID": "a"}}})
 	}))
 	defer server.Close()
 
@@ -192,13 +207,13 @@ func TestQueryAWSAccountsUsesSourceQueryAndSingleSetupFilter(t *testing.T) {
 }
 
 func TestQueryAWSAccountsFiltersMultipleSetupsLocally(t *testing.T) {
-	var req QueryRequest
+	var req queryRequest
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(NQEResponse{Items: []map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{
 			{"Cloud Setup ID": "setup-a", "Cloud Account ID": "a"},
 			{"Cloud Setup ID": "setup-b", "Cloud Account ID": "b"},
 			{"Cloud Setup ID": "setup-c", "Cloud Account ID": "c"},
@@ -333,7 +348,7 @@ func TestIdempotentRequestsRetryTransientFailures(t *testing.T) {
 		{
 			name: "patch",
 			call: func(ctx context.Context, client *Client) error {
-				return client.PatchCloudAccount(ctx, "network-1", "setup-1", map[string]any{"name": "setup-1"})
+				return client.PatchCloudAccount(ctx, "network-1", "setup-1", PatchPayload{Type: "AWS", Name: "setup-1"})
 			},
 		},
 		{
@@ -370,7 +385,6 @@ func TestIdempotentRequestsRetryTransientFailures(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewClient() error = %v", err)
 			}
-			client.retryDelay = time.Millisecond
 			if err := tt.call(context.Background(), client); err != nil {
 				t.Fatalf("request error = %v", err)
 			}
@@ -381,11 +395,11 @@ func TestIdempotentRequestsRetryTransientFailures(t *testing.T) {
 	}
 }
 
-func TestCreateCloudAccountDoesNotRetry(t *testing.T) {
+func TestCreateCloudAccountDoesNotRetryAmbiguousFailure(t *testing.T) {
 	attempts := 0
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attempts++
-		w.WriteHeader(http.StatusServiceUnavailable)
+		w.WriteHeader(http.StatusBadGateway)
 	}))
 	defer server.Close()
 
@@ -393,10 +407,9 @@ func TestCreateCloudAccountDoesNotRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
-	client.retryDelay = time.Millisecond
-	err = client.CreateCloudAccount(context.Background(), "network-1", map[string]any{"name": "setup-1"})
-	if !IsHTTPStatus(err, http.StatusServiceUnavailable) {
-		t.Fatalf("expected 503 error, got %v", err)
+	err = client.CreateCloudAccount(context.Background(), "network-1", CreateAWSPayload{Type: "AWS", Name: "setup-1"})
+	if !IsHTTPStatus(err, http.StatusBadGateway) {
+		t.Fatalf("expected 502 error, got %v", err)
 	}
 	if attempts != 1 {
 		t.Fatalf("expected one attempt, got %d", attempts)
@@ -406,7 +419,7 @@ func TestCreateCloudAccountDoesNotRetry(t *testing.T) {
 func TestRetryWaitHonorsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Retry-After", "60")
+		w.Header().Set("Retry-After", "2")
 		w.WriteHeader(http.StatusTooManyRequests)
 		cancel()
 	}))
@@ -419,14 +432,5 @@ func TestRetryWaitHonorsContextCancellation(t *testing.T) {
 	_, err = client.Networks(ctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context cancellation, got %v", err)
-	}
-}
-
-func TestRetryDelayIsBounded(t *testing.T) {
-	if got := retryDelay(time.Second, 10, ""); got != maxRetryDelay {
-		t.Fatalf("exponential delay = %s; want %s", got, maxRetryDelay)
-	}
-	if got := retryDelay(time.Second, 1, "600"); got != maxRetryDelay {
-		t.Fatalf("Retry-After delay = %s; want %s", got, maxRetryDelay)
 	}
 }
