@@ -419,7 +419,7 @@ func TestCreateCloudAccountDoesNotRetryAmbiguousFailure(t *testing.T) {
 func TestRetryWaitHonorsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Retry-After", "60")
+		w.Header().Set("Retry-After", "2")
 		w.WriteHeader(http.StatusTooManyRequests)
 		cancel()
 	}))
