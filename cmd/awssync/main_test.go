@@ -421,9 +421,6 @@ func TestSafeSyncRunsPreflightPreviewAndAdditiveApply(t *testing.T) {
 	processedAt := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprintf(w, `{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}`, processedAt)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots":
 			_, _ = fmt.Fprintf(w, `{"snapshots":[{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}]}`, processedAt)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
@@ -510,8 +507,6 @@ func TestSafeSyncHandlesMultipleSetups(t *testing.T) {
 	processedAt := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
-			_, _ = fmt.Fprintf(w, `{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}`, processedAt)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots":
 			_, _ = fmt.Fprintf(w, `{"snapshots":[{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}]}`, processedAt)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
@@ -570,8 +565,6 @@ func TestSafeSyncRequiresConfirmationOutsideAutomation(t *testing.T) {
 	processedAt := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
-			_, _ = fmt.Fprintf(w, `{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}`, processedAt)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots":
 			_, _ = fmt.Fprintf(w, `{"snapshots":[{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}]}`, processedAt)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
@@ -614,8 +607,6 @@ func TestSafeSyncDoesNotPatchWhenNoChangesAreNeeded(t *testing.T) {
 	processedAt := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
-			_, _ = fmt.Fprintf(w, `{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}`, processedAt)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots":
 			_, _ = fmt.Fprintf(w, `{"snapshots":[{"id":"snapshot-1","state":"PROCESSED","processedAt":%q}]}`, processedAt)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
@@ -660,8 +651,8 @@ func TestSafeSyncStopsWhenPreflightIsNotReady(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			_, _ = w.Write([]byte(`[{"type":"AWS","name":"setup-a","assumeRoleInfos":[{"roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true}]}]`))
-		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
-			_, _ = w.Write([]byte(`{"id":"stale","state":"PROCESSED","processedAt":"2020-01-01T00:00:00Z"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots":
+			_, _ = w.Write([]byte(`{"snapshots":[{"id":"stale","state":"PROCESSED","processedAt":"2020-01-01T00:00:00Z"}]}`))
 		case r.Method == http.MethodPatch:
 			patched = true
 			_, _ = w.Write([]byte(`{}`))

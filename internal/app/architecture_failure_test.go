@@ -143,7 +143,11 @@ func TestP0IncompleteNonemptyNQEInventoryRequiresCompletenessProof(t *testing.T)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
-					var request api.QueryRequest
+					var request struct {
+						QueryOptions struct {
+							Offset int `json:"offset"`
+						} `json:"queryOptions"`
+					}
 					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 						t.Errorf("decode NQE request: %v", err)
 						http.Error(w, err.Error(), http.StatusBadRequest)
@@ -167,7 +171,7 @@ func TestP0IncompleteNonemptyNQEInventoryRequiresCompletenessProof(t *testing.T)
 						}
 					}
 					w.Header().Set("Content-Type", "application/json")
-					_ = json.NewEncoder(w).Encode(api.NQEResponse{Items: items})
+					_ = json.NewEncoder(w).Encode(map[string]any{"items": items})
 				case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 					w.Header().Set("Content-Type", "application/json")
 					_ = json.NewEncoder(w).Encode([]api.CloudAccount{current})
@@ -243,7 +247,7 @@ func TestP0PartialMultiSetupApplyReturnsDispositionAndResumesSafely(t *testing.T
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
-			_ = json.NewEncoder(w).Encode(api.NQEResponse{Items: []map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{
 				{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Cloud Account Name": "a-existing", "Collected?": true},
 				{"Cloud Setup ID": "setup-a", "Cloud Account ID": "222222222222", "Cloud Account Name": "a-addition", "Collected?": true},
 				{"Cloud Setup ID": "setup-b", "Cloud Account ID": "333333333333", "Cloud Account Name": "b-existing", "Collected?": true},
@@ -458,7 +462,7 @@ func newP0RaceForwardServer(t *testing.T, mutateAfterGet int, nqeItems []map[str
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(api.NQEResponse{Items: fake.nqeItems})
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": fake.nqeItems})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
 			fake.mu.Lock()
 			fake.getCount++

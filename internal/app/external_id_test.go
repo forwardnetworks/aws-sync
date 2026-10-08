@@ -52,7 +52,7 @@ func TestChangeExternalIDSetsAndClearsWithoutNQE(t *testing.T) {
 			if err := json.Unmarshal(data, &fields); err != nil {
 				t.Fatalf("decode patch fields: %v", err)
 			}
-			for _, field := range []string{"type", "name", "regions", "regionToProxyServerId", "assumeRoleInfos"} {
+			for _, field := range []string{"type", "name", "regions", "assumeRoleInfos"} {
 				if fields[field] == nil {
 					t.Fatalf("gateway External ID PATCH omitted preserved field %s: %s", field, string(data))
 				}

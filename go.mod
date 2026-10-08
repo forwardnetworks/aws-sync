@@ -7,7 +7,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.25
 	github.com/aws/aws-sdk-go-v2/service/organizations v1.51.10
 	github.com/aws/smithy-go v1.27.1
-	github.com/spf13/cobra v1.10.1
+	github.com/forwardnetworks/forward-go-sdk v0.4.6
+	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/spf13/viper v1.21.0
 	golang.org/x/term v0.43.0

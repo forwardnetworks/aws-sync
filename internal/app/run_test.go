@@ -1430,9 +1430,9 @@ func TestRunPinsLatestProcessedSnapshotForCLI(t *testing.T) {
 	var seenQuery string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"snapshot-pinned","state":"PROCESSED","processedAt":"2026-07-24T12:00:00Z"}`))
+			_, _ = w.Write([]byte(`{"snapshots":[{"id":"snapshot-pinned","state":"PROCESSED","processedAt":"2026-07-24T12:00:00Z"}]}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
 			seenQuery = r.URL.RawQuery
 			w.Header().Set("Content-Type", "application/json")
@@ -1471,9 +1471,9 @@ func TestRunRejectsStaleLatestProcessedSnapshot(t *testing.T) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		if r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots/latestProcessed" {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/snapshots" {
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"old","processedAt":"2020-01-01T00:00:00Z"}`))
+			_, _ = w.Write([]byte(`{"snapshots":[{"id":"old","state":"PROCESSED","processedAt":"2020-01-01T00:00:00Z"}]}`))
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)

@@ -194,8 +194,6 @@ func TestP0WebhookDeliveryAndScopeSafety(t *testing.T) {
 					{"id":"snapshot-new","createdAt":"2026-07-25T12:00:00Z","processedAt":"2026-07-25T12:05:00Z","state":"PROCESSED"},
 					{"id":"snapshot-old","createdAt":"2026-07-25T11:00:00Z","processedAt":"2026-07-25T11:05:00Z","state":"PROCESSED"}
 				]}`)
-			case "/api/networks/network-1/snapshots/latestProcessed":
-				_, _ = io.WriteString(w, `{"id":"snapshot-new","createdAt":"2026-07-25T12:00:00Z","processedAt":"2026-07-25T12:05:00Z","state":"PROCESSED"}`)
 			default:
 				http.NotFound(w, r)
 			}

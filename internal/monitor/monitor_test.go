@@ -15,7 +15,7 @@ import (
 
 func TestStatusFiltersBySnapshotID(t *testing.T) {
 	client, server := newTestClient(t, []string{
-		`{"id":"old","state":"PROCESSED","processedAt":"2026-03-25T10:00:00Z"}`,
+		`{"snapshots":[{"id":"old","state":"PROCESSED","processedAt":"2026-03-25T10:00:00Z"}]}`,
 		`{"snapshots":[{"id":"new","state":"PROCESSING"},{"id":"old","state":"PROCESSED"}]}`,
 	})
 	defer server.Close()
@@ -34,7 +34,7 @@ func TestStatusFiltersBySnapshotID(t *testing.T) {
 
 func TestStatusReportsDisagreeingLatestAndListResponses(t *testing.T) {
 	client, server := newTestClient(t, []string{
-		`{"id":"latest","state":"PROCESSED"}`,
+		`{"snapshots":[{"id":"latest","state":"PROCESSED"}]}`,
 		`{"snapshots":[{"id":"other","state":"PROCESSED"}]}`,
 	})
 	defer server.Close()
@@ -54,34 +54,23 @@ func TestStatusReportsDisagreeingLatestAndListResponses(t *testing.T) {
 	}
 }
 
-func TestStatusFindsSnapshotBeyondFirstPage(t *testing.T) {
+func TestStatusFindsSnapshotBeyondPageLimit(t *testing.T) {
 	firstPage := make([]api.SnapshotInfo, api.PageLimit)
 	for index := range firstPage {
 		firstPage[index] = api.SnapshotInfo{ID: fmt.Sprintf("snapshot-%04d", index), State: "PROCESSED"}
 	}
-	firstPageJSON := mustSnapshotsJSON(t, firstPage)
-	secondPageJSON := mustSnapshotsJSON(t, []api.SnapshotInfo{{ID: "target", State: "PROCESSED"}})
+	listing := append(firstPage, api.SnapshotInfo{ID: "target", State: "PROCESSED"})
+	listingJSON := mustSnapshotsJSON(t, listing)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/api/networks/n1/snapshots/latestProcessed":
-			_, _ = w.Write([]byte(`{"id":"target","state":"PROCESSED"}`))
-		case "/api/networks/n1/snapshots":
-			if r.URL.Query().Get("includeArchived") != "true" || r.URL.Query().Get("limit") != fmt.Sprint(api.PageLimit) {
-				t.Errorf("unexpected snapshot query: %s", r.URL.RawQuery)
-			}
-			switch r.URL.Query().Get("offset") {
-			case "0":
-				_, _ = w.Write([]byte(firstPageJSON))
-			case fmt.Sprint(api.PageLimit):
-				_, _ = w.Write([]byte(secondPageJSON))
-			default:
-				t.Errorf("unexpected snapshot offset: %s", r.URL.Query().Get("offset"))
-				http.Error(w, "unexpected offset", http.StatusBadRequest)
-			}
-		default:
+		if r.URL.Path != "/api/networks/n1/snapshots" {
 			http.NotFound(w, r)
+			return
 		}
+		if r.URL.Query().Get("includeArchived") == "true" && r.URL.Query().Get("limit") != "" {
+			t.Errorf("snapshot listing must not be limited: Forward ignores offset, so a limit silently truncates: %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(listingJSON))
 	}))
 	defer server.Close()
 	client, err := api.NewClient(server.URL, "/api", "u", "p", false, time.Second)
@@ -105,7 +94,7 @@ func TestWaitReturnsWhenDesiredStateReached(t *testing.T) {
 	client, server := newTestClient(t, []string{
 		`{"snapshots":[{"id":"s1","state":"PROCESSING"}]}`,
 		`{"snapshots":[{"id":"s1","state":"PROCESSED","processedAt":"2026-03-25T10:05:00Z"}]}`,
-		`{"id":"s1","state":"PROCESSED","processedAt":"2026-03-25T10:05:00Z"}`,
+		`{"snapshots":[{"id":"s1","state":"PROCESSED","processedAt":"2026-03-25T10:05:00Z"}]}`,
 	})
 	defer server.Close()
 
@@ -174,7 +163,7 @@ func TestWaitFailsFastWhenSnapshotIsMissing(t *testing.T) {
 
 func mustSnapshotsJSON(t *testing.T, snapshots []api.SnapshotInfo) string {
 	t.Helper()
-	encoded, err := json.Marshal(api.NetworkSnapshots{Snapshots: snapshots})
+	encoded, err := json.Marshal(map[string]any{"snapshots": snapshots})
 	if err != nil {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}

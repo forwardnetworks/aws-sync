@@ -1,21 +1,18 @@
 package api
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
-	"path"
-	"strconv"
 	"strings"
 	"time"
+
+	forward "github.com/forwardnetworks/forward-go-sdk"
 )
 
+// PageLimit is the page size for NQE and snapshot listings.
 const PageLimit = 1000
 
 const (
@@ -24,18 +21,10 @@ const (
 	maxRetryDelay      = 5 * time.Second
 )
 
+// Client is the only path from awssync to Forward. Every request goes through
+// forward-go-sdk; this type narrows it to the calls awssync makes.
 type Client struct {
-	baseURL     *url.URL
-	apiPrefix   string
-	username    string
-	password    string
-	httpClient  *http.Client
-	maxAttempts int
-	retryDelay  time.Duration
-}
-
-type NQEResponse struct {
-	Items []map[string]any `json:"items"`
+	sdk *forward.Client
 }
 
 type QueryAWSAccountsResult struct {
@@ -46,19 +35,6 @@ type QueryAWSAccountsResult struct {
 	CompletenessReason   string
 }
 
-type QueryRequest struct {
-	Query        string         `json:"query,omitempty"`
-	QueryID      string         `json:"queryId,omitempty"`
-	QueryOptions QueryOptions   `json:"queryOptions"`
-	Parameters   map[string]any `json:"parameters,omitempty"`
-}
-
-type QueryOptions struct {
-	Offset        int            `json:"offset"`
-	Limit         int            `json:"limit"`
-	ColumnFilters []ColumnFilter `json:"columnFilters,omitempty"`
-}
-
 type SnapshotInfo struct {
 	ID          string `json:"id"`
 	CreatedAt   string `json:"createdAt,omitempty"`
@@ -67,18 +43,9 @@ type SnapshotInfo struct {
 	Note        string `json:"note,omitempty"`
 }
 
-type NetworkSnapshots struct {
-	Snapshots []SnapshotInfo `json:"snapshots"`
-}
-
 type Network struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
-}
-
-type ColumnFilter struct {
-	ColumnName string `json:"columnName"`
-	Value      string `json:"value"`
 }
 
 type CloudAccount struct {
@@ -161,46 +128,15 @@ type WebhookTestResult struct {
 	Error   string `json:"error,omitempty"`
 }
 
-type HTTPError struct {
-	Method     string
-	Path       string
-	StatusCode int
-	Body       string
-}
-
-func (e *HTTPError) Error() string {
-	return fmt.Sprintf("%s %s failed with status %d: %s", e.Method, e.Path, e.StatusCode, e.Body)
-}
-
-func IsHTTPStatus(err error, statusCodes ...int) bool {
-	var httpErr *HTTPError
-	if !errors.As(err, &httpErr) {
-		return false
-	}
-	for _, statusCode := range statusCodes {
-		if httpErr.StatusCode == statusCode {
-			return true
-		}
-	}
-	return false
-}
-
-func IsDuplicateWebhookError(err error) bool {
-	var httpErr *HTTPError
-	if !errors.As(err, &httpErr) {
-		return false
-	}
-	if httpErr.StatusCode != http.StatusBadRequest && httpErr.StatusCode != http.StatusConflict {
-		return false
-	}
-	body := strings.ToLower(httpErr.Body)
-	return strings.Contains(body, "duplicate") || strings.Contains(body, "already")
-}
-
 func NewClient(host, apiPrefix, username, password string, insecure bool, timeout time.Duration) (*Client, error) {
-	baseURL, err := normalizeHost(host)
-	if err != nil {
-		return nil, err
+	if prefix := strings.Trim(strings.TrimSpace(apiPrefix), "/"); prefix != "" && prefix != "api" {
+		return nil, fmt.Errorf("API prefix %q is not supported: forward-go-sdk always uses /api", apiPrefix)
+	}
+	if strings.TrimSpace(host) == "" {
+		return nil, fmt.Errorf("host is required")
+	}
+	if !strings.Contains(host, "://") {
+		host = "https://" + strings.TrimSpace(host)
 	}
 	if strings.TrimSpace(username) == "" {
 		return nil, fmt.Errorf("username is required")
@@ -211,25 +147,47 @@ func NewClient(host, apiPrefix, username, password string, insecure bool, timeou
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
-
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if transport.TLSClientConfig == nil {
-		transport.TLSClientConfig = &tls.Config{}
-	}
-	transport.TLSClientConfig.InsecureSkipVerify = insecure //nolint:gosec
-
-	return &Client{
-		baseURL:   baseURL,
-		apiPrefix: normalizeAPIPrefix(apiPrefix),
-		username:  username,
-		password:  password,
-		httpClient: &http.Client{
-			Timeout:   timeout,
-			Transport: transport,
+	sdk, err := forward.NewClient(forward.Config{
+		BaseURL:            host,
+		Username:           username,
+		Password:           password,
+		UserAgent:          "awssync",
+		InsecureSkipVerify: insecure,
+		HTTPClient:         &http.Client{Timeout: timeout},
+		Retry: forward.RetryPolicy{
+			MaxAttempts: defaultMaxAttempts,
+			Delay:       defaultRetryDelay,
+			MaxDelay:    maxRetryDelay,
 		},
-		maxAttempts: defaultMaxAttempts,
-		retryDelay:  defaultRetryDelay,
-	}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &Client{sdk: sdk}, nil
+}
+
+// IsHTTPStatus reports whether err is a Forward response with one of the codes.
+func IsHTTPStatus(err error, statusCodes ...int) bool {
+	for _, code := range statusCodes {
+		if forward.IsStatus(err, code) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsDuplicateWebhookError reports whether Forward refused a webhook create
+// because one with that name already exists.
+func IsDuplicateWebhookError(err error) bool {
+	if !IsHTTPStatus(err, http.StatusBadRequest, http.StatusConflict) {
+		return false
+	}
+	var response *forward.ErrorResponse
+	if !errors.As(err, &response) {
+		return false
+	}
+	text := strings.ToLower(response.Message + " " + response.Reason + " " + string(response.Body))
+	return strings.Contains(text, "duplicate") || strings.Contains(text, "already")
 }
 
 func (c *Client) QueryAWSAccounts(
@@ -265,43 +223,45 @@ func (c *Client) QueryAWSAccountsWithMetadata(
 	var completenessUnproven bool
 	completenessReason := "NQE pagination returned a terminating short page"
 	for offset := 0; ; offset += PageLimit {
-		columnFilters := []ColumnFilter{{
+		filters := []forward.NQEColumnFilter{{
 			ColumnName: "Cloud Type",
+			Operator:   forward.NQEFilterDefault,
 			Value:      "AWS",
 		}}
 		if len(setupIDs) == 1 {
-			columnFilters = append(columnFilters, ColumnFilter{
+			filters = append(filters, forward.NQEColumnFilter{
 				ColumnName: "Cloud Setup ID",
+				Operator:   forward.NQEFilterDefault,
 				Value:      setupIDs[0],
 			})
 		}
-		payload := QueryRequest{
+		pageOffset, pageLimit := int32(offset), int32(PageLimit)
+		result, _, err := c.sdk.NQE.Run(ctx, networkID, strings.TrimSpace(snapshotID), forward.NQEQueryRequest{
 			Query:      query,
 			QueryID:    queryID,
 			Parameters: parameters,
-			QueryOptions: QueryOptions{
-				Offset:        offset,
-				Limit:         PageLimit,
-				ColumnFilters: columnFilters,
+			Options: &forward.NQEOptions{
+				Offset:        &pageOffset,
+				Limit:         &pageLimit,
+				ColumnFilters: filters,
 			},
-		}
-		var response NQEResponse
-		endpointPath := fmt.Sprintf("/nqe?networkId=%s", url.QueryEscape(networkID))
-		if strings.TrimSpace(snapshotID) != "" {
-			endpointPath += fmt.Sprintf("&snapshotId=%s", url.QueryEscape(snapshotID))
-		}
-		if err := c.doJSONRetryable(ctx, http.MethodPost, endpointPath, payload, &response); err != nil {
+		})
+		if err != nil {
 			return QueryAWSAccountsResult{}, err
 		}
-		pageSignature := nqePageSignature(response.Items)
-		if len(response.Items) > 0 && pageSignature == previousPageSignature {
+		rows, err := result.RowsAny()
+		if err != nil {
+			return QueryAWSAccountsResult{}, err
+		}
+		pageSignature := nqePageSignature(rows)
+		if len(rows) > 0 && pageSignature == previousPageSignature {
 			completenessUnproven = true
 			completenessReason = "NQE pagination returned a repeated page; the offset cursor did not advance the result window"
 			break
 		}
 		previousPageSignature = pageSignature
-		allItems = append(allItems, filterItemsBySetupID(response.Items, setupIDs)...)
-		if len(response.Items) < PageLimit {
+		allItems = append(allItems, filterItemsBySetupID(rows, setupIDs)...)
+		if len(rows) < PageLimit {
 			break
 		}
 	}
@@ -319,11 +279,15 @@ func (c *Client) QueryAWSAccountsWithMetadata(
 }
 
 func (c *Client) Networks(ctx context.Context) ([]Network, error) {
-	var networks []Network
-	if err := c.doJSON(ctx, http.MethodGet, "/networks", nil, &networks); err != nil {
+	networks, _, err := c.sdk.Networks.List(ctx)
+	if err != nil {
 		return nil, err
 	}
-	return networks, nil
+	result := make([]Network, 0, len(networks))
+	for _, network := range networks {
+		result = append(result, Network{ID: string(network.ID), Name: network.Name})
+	}
+	return result, nil
 }
 
 func cleanSetupIDs(setupIDs []string) []string {
@@ -369,302 +333,251 @@ func nqePageSignature(items []map[string]any) string {
 	return string(encoded)
 }
 
+func snapshotInfo(snapshot forward.Snapshot) SnapshotInfo {
+	return SnapshotInfo{
+		ID:          string(snapshot.ID),
+		CreatedAt:   snapshot.CreatedAt,
+		State:       snapshot.State,
+		ProcessedAt: snapshot.ProcessedAt,
+		Note:        snapshot.Note,
+	}
+}
+
 func (c *Client) LatestProcessedSnapshot(ctx context.Context, networkID string) (*SnapshotInfo, error) {
 	if strings.TrimSpace(networkID) == "" {
 		return nil, fmt.Errorf("network ID is required")
 	}
-	var snapshot SnapshotInfo
-	if err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/networks/%s/snapshots/latestProcessed", networkID), nil, &snapshot); err != nil {
+	snapshot, _, err := c.sdk.Snapshots.LatestProcessed(ctx, networkID)
+	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(snapshot.ID) == "" {
+	info := snapshotInfo(*snapshot)
+	if strings.TrimSpace(info.ID) == "" {
 		return nil, fmt.Errorf("latest snapshot response did not include an id")
 	}
-	return &snapshot, nil
+	return &info, nil
 }
 
 func (c *Client) ListSnapshots(ctx context.Context, networkID string) ([]SnapshotInfo, error) {
 	if strings.TrimSpace(networkID) == "" {
 		return nil, fmt.Errorf("network ID is required")
 	}
-	var allSnapshots []SnapshotInfo
-	seenSnapshotIDs := make(map[string]int)
-	var previousPage []SnapshotInfo
-	for offset := 0; ; offset += PageLimit {
-		var page NetworkSnapshots
-		endpointPath := fmt.Sprintf(
-			"/networks/%s/snapshots?includeArchived=true&offset=%d&limit=%d",
-			networkID,
-			offset,
-			PageLimit,
-		)
-		if err := c.doJSON(ctx, http.MethodGet, endpointPath, nil, &page); err != nil {
-			return nil, err
-		}
-		if len(page.Snapshots) > PageLimit {
-			return nil, fmt.Errorf("list snapshots returned %d entries at offset %d, exceeding requested limit %d", len(page.Snapshots), offset, PageLimit)
-		}
-		if offset > 0 && sameSnapshotPage(previousPage, page.Snapshots) {
-			return nil, fmt.Errorf("list snapshots pagination repeated the page at offset %d", offset)
-		}
-		for _, snapshot := range page.Snapshots {
-			snapshotID := strings.TrimSpace(snapshot.ID)
-			if snapshotID == "" {
-				continue
-			}
-			if firstOffset, ok := seenSnapshotIDs[snapshotID]; ok {
-				return nil, fmt.Errorf(
-					"list snapshots pagination repeated snapshot %s at offset %d (first seen at offset %d)",
-					snapshotID,
-					offset,
-					firstOffset,
-				)
-			}
-			seenSnapshotIDs[snapshotID] = offset
-		}
-		allSnapshots = append(allSnapshots, page.Snapshots...)
-		if len(page.Snapshots) < PageLimit {
-			return allSnapshots, nil
-		}
-		previousPage = append(previousPage[:0], page.Snapshots...)
+	includeArchived := true
+	snapshots, _, err := c.sdk.Snapshots.List(ctx, networkID, forward.SnapshotListOptions{IncludeArchived: &includeArchived})
+	if err != nil {
+		return nil, err
 	}
+	seen := make(map[string]bool, len(snapshots))
+	result := make([]SnapshotInfo, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		info := snapshotInfo(snapshot)
+		if strings.TrimSpace(info.ID) == "" {
+			continue
+		}
+		if seen[info.ID] {
+			return nil, fmt.Errorf("list snapshots returned snapshot %s more than once", info.ID)
+		}
+		seen[info.ID] = true
+		result = append(result, info)
+	}
+	return result, nil
 }
 
-func sameSnapshotPage(left, right []SnapshotInfo) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
-}
 func (c *Client) CloudAccounts(ctx context.Context, networkID string) ([]CloudAccount, error) {
 	if strings.TrimSpace(networkID) == "" {
 		return nil, fmt.Errorf("network ID is required")
 	}
-	var accounts []CloudAccount
-	if err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/networks/%s/cloudAccounts", networkID), nil, &accounts); err != nil {
+	accounts, _, err := c.sdk.CloudAccounts.List(ctx, networkID)
+	if err != nil {
 		return nil, err
 	}
-	return accounts, nil
+	result := make([]CloudAccount, 0, len(accounts))
+	for _, account := range accounts {
+		converted := CloudAccount{
+			Type:                  account.Type,
+			Name:                  account.Name,
+			ProxyServerID:         account.ProxyServerID,
+			RegionToProxyServerID: account.RegionToProxyServerID,
+		}
+		if len(account.Regions) > 0 {
+			converted.Regions = make(map[string]RegionMeta, len(account.Regions))
+			for name, region := range account.Regions {
+				converted.Regions[name] = RegionMeta{TestInstant: region.TestInstant}
+			}
+		}
+		for _, role := range account.AssumeRoleInfos {
+			converted.AssumeRoleInfos = append(converted.AssumeRoleInfos, AssumeRoleInfo{
+				AccountID:   role.AccountID,
+				AccountName: role.AccountName,
+				RoleArn:     role.RoleARN,
+				ExternalID:  role.ExternalID,
+				ErrorMsg:    role.ErrorMsg,
+				Enabled:     role.Enabled,
+			})
+		}
+		result = append(result, converted)
+	}
+	return result, nil
 }
 
-func (c *Client) PatchCloudAccount(ctx context.Context, networkID, setupID string, payload any) error {
+func (c *Client) PatchCloudAccount(ctx context.Context, networkID, setupID string, payload PatchPayload) error {
 	if strings.TrimSpace(networkID) == "" {
 		return fmt.Errorf("network ID is required")
 	}
 	if strings.TrimSpace(setupID) == "" {
 		return fmt.Errorf("setup ID is required")
 	}
-	return c.doJSON(ctx, http.MethodPatch, fmt.Sprintf("/networks/%s/cloudAccounts/%s", networkID, setupID), payload, nil)
+	name := payload.Name
+	roles := sdkRoles(payload.AssumeRoleInfos)
+	if roles == nil {
+		roles = []forward.AWSAssumeRoleInfo{}
+	}
+	patch := forward.CloudAccountPatch{
+		Type:                  payload.Type,
+		Name:                  &name,
+		Regions:               payload.Regions,
+		RegionToProxyServerID: payload.RegionToProxyServerID,
+		AssumeRoleInfos:       &roles,
+	}
+	if payload.ProxyServerID != "" {
+		proxy := payload.ProxyServerID
+		patch.ProxyServerID = &proxy
+	}
+	_, _, err := c.sdk.CloudAccounts.Patch(ctx, networkID, setupID, patch)
+	return err
 }
 
-func (c *Client) CreateCloudAccount(ctx context.Context, networkID string, payload any) error {
+func (c *Client) CreateCloudAccount(ctx context.Context, networkID string, payload CreateAWSPayload) error {
 	if strings.TrimSpace(networkID) == "" {
 		return fmt.Errorf("network ID is required")
 	}
-	return c.doJSON(ctx, http.MethodPost, fmt.Sprintf("/networks/%s/cloudAccounts", networkID), payload, nil)
+	request := forward.CloudAccountRequest{
+		Type:                          payload.Type,
+		Name:                          payload.Name,
+		Collect:                       payload.Collect,
+		Username:                      payload.Username,
+		Password:                      payload.Password,
+		ProxyServerID:                 payload.ProxyServerID,
+		RegionToProxyServerID:         payload.RegionToProxyServerID,
+		AssumeRoleInfos:               sdkRoles(payload.AssumeRoleInfos),
+		UseForwardAccountToAssumeRole: payload.UseForwardAccountToAssumeRole,
+	}
+	if payload.Regions != nil {
+		request.Regions = make(map[string]int, len(payload.Regions))
+		for name, instant := range payload.Regions {
+			request.Regions[name] = int(instant)
+		}
+	}
+	_, _, err := c.sdk.CloudAccounts.Create(ctx, networkID, request)
+	return err
+}
+
+func sdkRoles(roles []AssumeRoleInfo) []forward.AWSAssumeRoleInfo {
+	if roles == nil {
+		return nil
+	}
+	result := make([]forward.AWSAssumeRoleInfo, 0, len(roles))
+	for _, role := range roles {
+		result = append(result, forward.AWSAssumeRoleInfo{
+			AccountID:   role.AccountID,
+			AccountName: role.AccountName,
+			RoleARN:     role.RoleArn,
+			ExternalID:  role.ExternalID,
+			Enabled:     role.Enabled,
+			ErrorMsg:    role.ErrorMsg,
+		})
+	}
+	return result
 }
 
 func (c *Client) AWSAssumeRoleExternalID(ctx context.Context, networkID string) (string, error) {
 	if strings.TrimSpace(networkID) == "" {
 		return "", fmt.Errorf("network ID is required")
 	}
-	var response ExternalIDResponse
-	if err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/networks/%s/cloudAccounts/aws/assumeRole/externalId", networkID), nil, &response); err != nil {
+	externalID, _, err := c.sdk.CloudAccounts.AWSAssumeRoleExternalID(ctx, networkID)
+	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(response.ExternalID), nil
+	return strings.TrimSpace(externalID), nil
 }
 
 func (c *Client) AddWebhook(ctx context.Context, webhook Webhook) error {
-	return c.doJSON(ctx, http.MethodPost, "/webhooks", webhook, nil)
+	request, err := webhookRequest(webhook)
+	if err != nil {
+		return err
+	}
+	_, err = c.sdk.Webhooks.Create(ctx, request)
+	return err
 }
 
 func (c *Client) UpdateWebhook(ctx context.Context, name string, webhook Webhook) error {
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("webhook name is required")
 	}
-	return c.doJSON(ctx, http.MethodPatch, fmt.Sprintf("/webhooks/%s", url.PathEscape(name)), webhook, nil)
+	request, err := webhookRequest(webhook)
+	if err != nil {
+		return err
+	}
+	patch := forward.WebhookPatch{
+		Name:                 &request.Name,
+		Description:          &request.Description,
+		URL:                  &request.URL,
+		DisableSSLValidation: &request.DisableSSLValidation,
+		EventParams:          request.EventParams,
+		Credential:           request.Credential,
+		Enabled:              request.Enabled,
+		Template:             request.Template,
+	}
+	_, err = c.sdk.Webhooks.Update(ctx, name, patch)
+	return err
 }
 
 func (c *Client) TestNewWebhook(ctx context.Context, webhook Webhook) (*WebhookTestResult, error) {
-	var result WebhookTestResult
-	if err := c.doJSON(ctx, http.MethodPost, "/webhooks?action=test", webhook, &result); err != nil {
+	request, err := webhookRequest(webhook)
+	if err != nil {
 		return nil, err
+	}
+	raw, _, err := c.sdk.Webhooks.TestNew(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	var result WebhookTestResult
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &result); err != nil {
+			return nil, fmt.Errorf("decode webhook test result: %w", err)
+		}
 	}
 	return &result, nil
 }
 
-func (c *Client) doJSON(ctx context.Context, method, endpointPath string, requestBody any, out any) error {
-	retryable := method == http.MethodGet || method == http.MethodPatch
-	return c.doJSONWithRetry(ctx, method, endpointPath, requestBody, out, retryable)
-}
-
-func (c *Client) doJSONRetryable(ctx context.Context, method, endpointPath string, requestBody any, out any) error {
-	return c.doJSONWithRetry(ctx, method, endpointPath, requestBody, out, true)
-}
-
-func (c *Client) doJSONWithRetry(ctx context.Context, method, endpointPath string, requestBody any, out any, retryable bool) error {
-	endpoint, err := c.resolve(endpointPath)
+func webhookRequest(webhook Webhook) (forward.WebhookRequest, error) {
+	template, err := json.Marshal(webhook.Template)
 	if err != nil {
-		return err
+		return forward.WebhookRequest{}, fmt.Errorf("encode webhook template: %w", err)
 	}
-	var encoded []byte
-	if requestBody != nil {
-		encoded, err = json.Marshal(requestBody)
-		if err != nil {
-			return fmt.Errorf("encode request body: %w", err)
+	networkIDs := webhook.EventParams.NetworkIDs
+	if networkIDs == nil {
+		networkIDs = []string{}
+	}
+	enabled := webhook.Enabled
+	request := forward.WebhookRequest{
+		Name:                 webhook.Name,
+		Description:          webhook.Description,
+		URL:                  webhook.URL,
+		DisableSSLValidation: webhook.DisableSSLValidation,
+		EventParams: map[string]any{
+			"type":       webhook.EventParams.Type,
+			"networkIds": networkIDs,
+		},
+		Template: template,
+		Enabled:  &enabled,
+	}
+	if webhook.Credential != nil {
+		request.Credential = &forward.WebhookCredentialRequest{
+			Type:     webhook.Credential.Type,
+			Username: webhook.Credential.Username,
+			Password: webhook.Credential.Password,
 		}
 	}
-	attempts := 1
-	if retryable && c.maxAttempts > 1 {
-		attempts = c.maxAttempts
-	}
-	for attempt := 1; attempt <= attempts; attempt++ {
-		var body io.Reader
-		if requestBody != nil {
-			body = bytes.NewReader(encoded)
-		}
-		req, err := http.NewRequestWithContext(ctx, method, endpoint.String(), body)
-		if err != nil {
-			return fmt.Errorf("build request: %w", err)
-		}
-		if requestBody != nil {
-			req.Header.Set("Content-Type", "application/json")
-		}
-		req.Header.Set("Accept", "application/json")
-		req.SetBasicAuth(c.username, c.password)
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			if !retryable || attempt == attempts || ctx.Err() != nil {
-				return fmt.Errorf("perform request: %w", err)
-			}
-			if err := waitForRetry(ctx, retryDelay(c.retryDelay, attempt, "")); err != nil {
-				return err
-			}
-			continue
-		}
-		respBody, readErr := io.ReadAll(resp.Body)
-		closeErr := resp.Body.Close()
-		if readErr != nil {
-			return fmt.Errorf("read response body: %w", readErr)
-		}
-		if closeErr != nil {
-			return fmt.Errorf("close response body: %w", closeErr)
-		}
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			httpErr := &HTTPError{
-				Method:     method,
-				Path:       endpoint.Path,
-				StatusCode: resp.StatusCode,
-				Body:       strings.TrimSpace(string(respBody)),
-			}
-			if !retryable || attempt == attempts || !isRetryableStatus(resp.StatusCode) {
-				return httpErr
-			}
-			if err := waitForRetry(ctx, retryDelay(c.retryDelay, attempt, resp.Header.Get("Retry-After"))); err != nil {
-				return err
-			}
-			continue
-		}
-		if out == nil || len(respBody) == 0 {
-			return nil
-		}
-		if err := json.Unmarshal(respBody, out); err != nil {
-			return fmt.Errorf("decode response body: %w", err)
-		}
-		return nil
-	}
-	return fmt.Errorf("perform request: retry attempts exhausted")
-}
-
-func isRetryableStatus(statusCode int) bool {
-	switch statusCode {
-	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-		return true
-	default:
-		return false
-	}
-}
-
-func retryDelay(base time.Duration, attempt int, retryAfter string) time.Duration {
-	if seconds, err := strconv.Atoi(strings.TrimSpace(retryAfter)); err == nil && seconds >= 0 {
-		return min(time.Duration(seconds)*time.Second, maxRetryDelay)
-	}
-	if when, err := http.ParseTime(strings.TrimSpace(retryAfter)); err == nil {
-		if delay := time.Until(when); delay > 0 {
-			return min(delay, maxRetryDelay)
-		}
-	}
-	if base <= 0 {
-		base = defaultRetryDelay
-	}
-	return min(base*time.Duration(1<<(attempt-1)), maxRetryDelay)
-}
-
-func waitForRetry(ctx context.Context, delay time.Duration) error {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return fmt.Errorf("wait to retry request: %w", ctx.Err())
-	case <-timer.C:
-		return nil
-	}
-}
-
-func (c *Client) resolve(endpointPath string) (*url.URL, error) {
-	relative := endpointPath
-	if !strings.HasPrefix(relative, "/") {
-		relative = "/" + relative
-	}
-	if c.apiPrefix != "" && !strings.HasPrefix(relative, c.apiPrefix+"/") && relative != c.apiPrefix {
-		relative = c.apiPrefix + relative
-	}
-	relativeURL, err := url.Parse(relative)
-	if err != nil {
-		return nil, fmt.Errorf("parse endpoint path: %w", err)
-	}
-	return c.baseURL.ResolveReference(relativeURL), nil
-}
-
-func normalizeHost(host string) (*url.URL, error) {
-	value := strings.TrimSpace(host)
-	if value == "" {
-		return nil, fmt.Errorf("host is required")
-	}
-	if !strings.Contains(value, "://") {
-		value = "https://" + value
-	}
-	parsed, err := url.Parse(value)
-	if err != nil {
-		return nil, fmt.Errorf("invalid host: %w", err)
-	}
-	if parsed.Scheme == "" || parsed.Host == "" {
-		return nil, fmt.Errorf("host must include a scheme and hostname")
-	}
-	parsed.Path = strings.TrimRight(parsed.Path, "/")
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	return parsed, nil
-}
-
-func normalizeAPIPrefix(prefix string) string {
-	value := strings.TrimSpace(prefix)
-	if value == "" || value == "/" {
-		return ""
-	}
-	if !strings.HasPrefix(value, "/") {
-		value = "/" + value
-	}
-	value = path.Clean(value)
-	if value == "." || value == "/" {
-		return ""
-	}
-	return strings.TrimRight(value, "/")
+	return request, nil
 }

@@ -89,7 +89,7 @@ func TestValidateSnapshotFreshnessRejectsFutureExplicitSnapshot(t *testing.T) {
 func TestPinLatestProcessedSnapshotRejectsFutureSnapshot(t *testing.T) {
 	futureAt := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, `{"id":"snapshot-future","processedAt":"`+futureAt+`","state":"PROCESSED"}`)
+		_, _ = io.WriteString(w, `{"snapshots":[{"id":"snapshot-future","processedAt":"`+futureAt+`","state":"PROCESSED"}]}`)
 	}))
 	defer server.Close()
 

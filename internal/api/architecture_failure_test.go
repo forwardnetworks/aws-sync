@@ -97,7 +97,6 @@ func TestP0AmbiguousPATCHRetryPreservesInterleavedEdit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient() error = %v", err)
 	}
-	client.retryDelay = time.Millisecond
 	err = client.PatchCloudAccount(context.Background(), "network-1", "setup-a", PatchPayload{
 		Type: "AWS",
 		Name: "setup-a",
