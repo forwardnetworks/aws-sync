@@ -226,7 +226,7 @@ func TestSyncAWSAccountManifestDryRunReportsRemovalAndApplyRequiresApproval(t *t
 				return
 			}
 			patchCount++
-			current = testCloudAccountFromPatchPayload(patchedPayload)
+			current = testCloudAccountFromPatchPayload(current, patchedPayload)
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)
@@ -336,8 +336,10 @@ func TestApprovalDigestStableAcrossIndependentPlanningProcesses(t *testing.T) {
 	if first.PlanDigest == "" || first.PlanDigest != second.PlanDigest {
 		t.Fatalf("approval digests differ across independent planning processes: %q != %q", first.PlanDigest, second.PlanDigest)
 	}
-	if first.PayloadSHA256 == second.PayloadSHA256 {
-		t.Fatalf("test setup did not produce distinct exact payloads: both hashes are %q", first.PayloadSHA256)
+	// Region test instants are never written, so the exact payload no longer
+	// depends on when planning ran.
+	if first.PayloadSHA256 != second.PayloadSHA256 {
+		t.Fatalf("exact payload depends on the planning instant: %q != %q", first.PayloadSHA256, second.PayloadSHA256)
 	}
 }
 

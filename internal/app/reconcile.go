@@ -264,16 +264,13 @@ func currentAccountHasExternalID(current map[AccountID]SetupAccount, id AccountI
 	return ok
 }
 
-func desiredRegions(current map[string]int64, planningInstant int64) map[string]int64 {
-	result := make(map[string]int64, len(current))
-	for region, testInstant := range current {
-		if testInstant == 0 {
-			result[region] = planningInstant
-			continue
-		}
-		result[region] = testInstant
-	}
-	return result
+// desiredRegions is the current regions unchanged. awssync never writes region
+// state (Forward would record each region as a freshly passed connectivity
+// test), so the desired state must not differ from the current one: a region
+// that was never tested (instant 0) would otherwise plan a change that is never
+// sent, and every run would PATCH again.
+func desiredRegions(current map[string]int64, _ int64) map[string]int64 {
+	return cloneInt64Map(current)
 }
 
 func sortedSetupAccounts(accounts map[AccountID]SetupAccount) []SetupAccount {

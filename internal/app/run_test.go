@@ -850,7 +850,7 @@ func TestRunWritesPayloadAndPatchesWhenApplyEnabled(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Fatalf("decode PATCH: %v", err)
 			}
-			current = testCloudAccountFromPatchPayload(payload)
+			current = testCloudAccountFromPatchPayload(current, payload)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{}`))
 		default:

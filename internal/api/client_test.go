@@ -434,3 +434,45 @@ func TestRetryWaitHonorsContextCancellation(t *testing.T) {
 		t.Fatalf("expected context cancellation, got %v", err)
 	}
 }
+
+func TestPatchCloudAccountNeverSendsRegions(t *testing.T) {
+	var body map[string]json.RawMessage
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch || r.URL.Path != "/api/networks/network-1/cloudAccounts/setup-a" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "/api", "alice", "secret", true, time.Second)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	err = client.PatchCloudAccount(context.Background(), "network-1", "setup-a", PatchPayload{
+		Type: "AWS",
+		Name: "setup-a",
+		// One tested region and one never tested (zero instant).
+		Regions:               map[string]int64{"us-east-1": 1700000000000, "us-west-2": 0},
+		RegionToProxyServerID: map[string]string{"us-east-1": "proxy-1"},
+		AssumeRoleInfos:       []AssumeRoleInfo{{AccountID: "111111111111", Enabled: true}},
+	})
+	if err != nil {
+		t.Fatalf("PatchCloudAccount() error = %v", err)
+	}
+	if _, present := body["regions"]; present {
+		t.Fatalf("PATCH body carries regions: Forward would record every region as a passed test: %s", body["regions"])
+	}
+	for _, field := range []string{"type", "name", "assumeRoleInfos", "regionToProxyServerId"} {
+		if _, present := body[field]; !present {
+			t.Fatalf("PATCH body lost %s: %v", field, body)
+		}
+	}
+	if _, present := body["collect"]; present {
+		t.Fatalf("PATCH body must not carry collect: %v", body)
+	}
+}

@@ -29,6 +29,7 @@ go test ./internal/app -run TestName    # single test
 ## Invariants to preserve
 
 - Forward ignores `offset` on the snapshot listing and returns everything when `limit` is unset, so `ListSnapshots` is one unlimited call (a `limit` silently truncates). The SDK's `PATCH` is never auto-retried (only 429/503 are, for any method).
+- `PatchCloudAccount` never sends `regions`: Forward records each one as a fresh passed connectivity test (UpdateAwsAccountRequest builds TestResult.success), which turns a real `AUTHORIZATION_FAILED` into `NONE`. Omitted, stored test results are untouched. Test mocks must model Forward's merge (absent = unchanged). Prove changes live with a workspace copy of the setup and a full-JSON diff after each step; only `externalId`/account changes may appear.
 - PATCH uses `CloudAccounts.Patch` (presence semantics). Never use the SDK's `CloudAccounts.Update`/`CloudAccountRequest` for PATCH: its `collect` always serialises and would disable collection.
 
 - **Single PATCH chokepoint:** `internal/app/patch_chokepoint_test.go` enforces exactly one production caller of `api.PatchCloudAccount`. Don't add another; route through `GuardAndApply`.

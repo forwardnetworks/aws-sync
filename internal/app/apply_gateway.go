@@ -422,6 +422,13 @@ func GuardAndApply(
 			_ = persistApplyJournal(&result)
 			return result, conflict
 		}
+		if problems := unwritableDifferences(setup.target, actual[setup.setupID]); len(problems) > 0 {
+			err := fmt.Errorf(
+				"setup %s cannot be applied: awssync does not write %s, but the approved target differs from Forward; no PATCH was sent for that setup; regenerate the plan or change it in Forward directly",
+				setup.setupID, strings.Join(problems, " or "),
+			)
+			return failPendingApply(result, setup.setupID, err)
+		}
 		if err := client.PatchCloudAccount(ctx, state.networkID, setup.setupID, setup.target); err != nil {
 			wrapped := fmt.Errorf("patch setup %s: %w", setup.setupID, err)
 			return failPendingApply(result, setup.setupID, wrapped)
@@ -817,6 +824,23 @@ func resultJournalPath(outputPath string) string {
 		return outputPath + ".result"
 	}
 	return strings.TrimSuffix(outputPath, ext) + ".result" + ext
+}
+
+// unwritableDifferences lists setup properties where the approved target
+// differs from Forward but a PATCH cannot carry the change: region membership
+// (regions are never sent) and clearing a proxy (an empty proxyServerId is left
+// out of the body, which Forward reads as unchanged). Applying such a target
+// would write the account list, then fail verification with a misleading
+// conflict, so refuse before any PATCH.
+func unwritableDifferences(target, actual api.PatchPayload) []string {
+	var problems []string
+	if len(target.Regions) > 0 && !stringSetsEqual(mapKeys(target.Regions), mapKeys(actual.Regions)) {
+		problems = append(problems, "region membership")
+	}
+	if target.ProxyServerID == "" && actual.ProxyServerID != "" {
+		problems = append(problems, "removal of the proxy server")
+	}
+	return problems
 }
 
 func clonePatchPayload(payload api.PatchPayload) api.PatchPayload {
