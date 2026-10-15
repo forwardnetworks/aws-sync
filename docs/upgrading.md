@@ -197,7 +197,7 @@ The approval digest format changed so the same approval-relevant plan now has th
 
 ### Account IDs are strict
 
-NQE account IDs must now be exactly 12 digits. Rows that the previous version tolerated may stop preflight or planning. Fix the query or source data first.
+NQE account IDs must now be exactly 12 digits. Rows that the previous version tolerated may stop preflight or planning. Fix the query or source data first. The one exception is a row whose Cloud Account ID is its own Cloud Setup ID (a setup-level row Forward reports for some IAM-user setups); it is skipped and noted by preflight.
 
 For an urgent additive NQE run, `--allow-malformed-rows` skips and reports malformed NQE rows, marks the observed inventory incomplete, and blocks using that inventory for removals. It does not relax `sync-accounts` manifest validation; reviewed manifests always require unique 12-digit IDs.
 

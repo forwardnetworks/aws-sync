@@ -33,7 +33,7 @@ go test ./internal/app -run TestName    # single test
 
 - **Single PATCH chokepoint:** `internal/app/patch_chokepoint_test.go` enforces exactly one production caller of `api.PatchCloudAccount`. Don't add another; route through `GuardAndApply`.
 - **Absence never means deletion for NQE data.** The NQE source is `network.cloudAccounts` (observed/partial, not a configured-account inventory), so NQE policy is `Additive` only and `--prune-missing` is refused. Removal is only legitimate from a human-reviewed manifest (`sync-accounts`, `CompleteInventory`) with `--allow-removals`, ceilings, and (unattended) `--allow-unattended-destructive`.
-- Account IDs are validated as exactly 12 digits; malformed rows fail the whole plan (deliberately fail-closed). Duplicate/conflicting identities are rejected.
+- Account IDs are validated as exactly 12 digits; malformed rows fail the whole plan (deliberately fail-closed). The one exemption is a row whose Cloud Account ID string equals its own Cloud Setup ID (a setup-level row Forward emits for some IAM-user setups); it is skipped, not counted as incomplete, and reported by preflight as `nqe_setup_level_rows`. Don't widen it. Duplicate/conflicting identities are rejected.
 - Forward PATCH semantics: top-level merge; `assumeRoleInfos` is replaced wholesale when present; no ETag/CAS exists, so the re-read check is best-effort, not atomic. Setup identity is by targeting name.
 - Webhook apply mode requires Basic Auth and an explicit network; event scope may only narrow configured scope.
 - Rollback files are pre-change PATCH payloads, not full setup backups.

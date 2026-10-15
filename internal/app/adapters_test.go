@@ -132,3 +132,70 @@ func TestAdaptCloudAccountsBySetupIDAcceptsWhitespaceAccountIDs(t *testing.T) {
 		t.Fatalf("expected normalized setup-id key")
 	}
 }
+
+func TestParseNQESnapshotSkipsSetupLevelRowWithoutFlagOrIncompleteness(t *testing.T) {
+	items := []map[string]any{
+		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Collected?": true},
+		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "setup-a", "Collected?": true},
+		{"Cloud Setup ID": "setup-b", "Cloud Account ID": "setup-b"},
+		{"Cloud Setup ID": "setup-b", "Cloud Account ID": "222222222222", "Collected?": true},
+	}
+	snapshot, err := parseNQESnapshotFromMapsWithOptions(items, parseNQESnapshotOptions{Completeness: InventoryCompletenessUnknown})
+	if err != nil {
+		t.Fatalf("setup-level rows must not fail the parse without --allow-malformed-rows: %v", err)
+	}
+	if len(snapshot.DiscoveredAccounts) != 2 {
+		t.Fatalf("discovered accounts = %d; want only the two real accounts", len(snapshot.DiscoveredAccounts))
+	}
+	if len(snapshot.SetupLevelRows) != 2 {
+		t.Fatalf("setup-level rows = %v; want one per setup", snapshot.SetupLevelRows)
+	}
+	if len(snapshot.IgnoredAccounts) != 0 || len(snapshot.SkippedRows) != 0 {
+		t.Fatalf("a setup-level row is not a malformed account: ignored=%v skipped=%v", snapshot.IgnoredAccounts, snapshot.SkippedRows)
+	}
+	if snapshot.Completeness != InventoryCompletenessUnknown {
+		t.Fatalf("completeness = %v; skipping a setup-level row loses no account and must not change it", snapshot.Completeness)
+	}
+}
+
+func TestParseNQESnapshotStillRejectsOtherInvalidAccountIDs(t *testing.T) {
+	tests := map[string]map[string]any{
+		"unrelated text":                            {"Cloud Setup ID": "setup-a", "Cloud Account ID": "not-an-account"},
+		"another setup's name":                      {"Cloud Setup ID": "setup-a", "Cloud Account ID": "setup-b"},
+		"short digits":                              {"Cloud Setup ID": "setup-a", "Cloud Account ID": "12345"},
+		"empty account id":                          {"Cloud Setup ID": "setup-a", "Cloud Account ID": ""},
+		"no setup column to key":                    {"Cloud Account ID": "setup-a"},
+		"empty setup and empty account":             {"Cloud Setup ID": "", "Cloud Account ID": ""},
+		"no columns at all":                         {},
+		"numeric id equal to a 12-digit setup name": {"Cloud Setup ID": "123456789012", "Cloud Account ID": 123456789012},
+	}
+	for name, row := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseNQESnapshotFromMaps([]map[string]any{row}); err == nil {
+				t.Fatalf("row %v parsed; only an account ID equal to its own setup ID may be skipped", row)
+			}
+		})
+	}
+}
+
+func TestPlanIgnoresSetupLevelRowWithoutRemovingOrDisablingAnything(t *testing.T) {
+	items := []map[string]any{
+		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "setup-a", "Collected?": true},
+		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Collected?": true},
+	}
+	configured := []api.CloudAccount{{
+		Type: "AWS",
+		Name: "setup-a",
+		AssumeRoleInfos: []api.AssumeRoleInfo{
+			{AccountID: "111111111111", RoleArn: "arn:aws:iam::111111111111:role/ForwardRole", Enabled: true},
+			{AccountID: "222222222222", RoleArn: "arn:aws:iam::222222222222:role/ForwardRole", Enabled: true},
+		},
+	}}
+	plan, err := buildPlanForConfig(Config{}, items, configured)
+	if err != nil {
+		t.Fatalf("buildPlanForConfig() error = %v", err)
+	}
+	if plan.HasRemovals() {
+		t.Fatalf("a setup-level row must never cause a removal or disable: %#v", plan)
+	}
+}
