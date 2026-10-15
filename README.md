@@ -6,6 +6,10 @@ Most operators should use `safe-sync`. It runs the safety checks, shows a short 
 
 Upgrading an existing deployment? Read [Upgrading `awssync`](docs/upgrading.md) before replacing the binary; this release intentionally breaks retired prune automation, applying webhook receivers without fixed authentication and network scope, and unattended destructive applies without an additional acknowledgement.
 
+## External IDs
+
+`awssync external-id` sets or clears the External ID on one, several, or all accounts of an existing AWS setup (dry run by default), and `awssync external-id-status` reports which accounts have one and whether they match what you intend, without ever showing a value. See [the quick start](docs/quick-start.md#see-and-verify-external-ids-read-only).
+
 ## Routine Safe Sync
 
 ### 1. Download and verify
@@ -115,7 +119,7 @@ Use `safe-sync` for ordinary account additions and unchecked accounts. The remai
 | New commercial AWS Organization | Forward Terraform provider; `discover-org` is the manual fallback |
 | No Organizations access | `onboard-accounts` or `sync-accounts` with a complete manifest |
 | GovCloud | [GovCloud workflow](docs/govcloud-workflow.md) |
-| One or more External ID changes | `external-id` |
+| One or more External ID changes | `external-id` (check with `external-id-status`) |
 
 ## When Safe Sync Stops
 

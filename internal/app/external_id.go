@@ -94,7 +94,7 @@ func ChangeExternalID(ctx context.Context, cfg ExternalIDConfig) (*ExternalIDSum
 	if externalIDFile != "" {
 		for assignmentSetupID := range assignments {
 			if assignmentSetupID != setupID {
-				return nil, fmt.Errorf("external ID file contains setup %s but command selected %s", assignmentSetupID, setupID)
+				return nil, fmt.Errorf("external ID file has rows for a setup other than the selected setup %s", setupID)
 			}
 		}
 	}
@@ -152,7 +152,7 @@ func ChangeExternalID(ctx context.Context, cfg ExternalIDConfig) (*ExternalIDSum
 		for _, rawAccountID := range cfg.AccountIDs {
 			accountID := strings.TrimSpace(rawAccountID)
 			if _, err := NewAccountID(accountID); err != nil {
-				return nil, fmt.Errorf("invalid AWS account ID %q; expected 12 digits", rawAccountID)
+				return nil, fmt.Errorf("an --account-id value is not a 12-digit AWS account ID (the value is not shown)")
 			}
 			if _, exists := selected[accountID]; exists {
 				return nil, fmt.Errorf("duplicate --account-id %s", accountID)

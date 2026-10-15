@@ -66,7 +66,7 @@ func loadExternalIDAssignments(path, defaultSetupID string) (externalIDAssignmen
 			offset = 1
 		}
 		if _, err := NewSetupID(setupID); err != nil {
-			return nil, fmt.Errorf("external ID file row %d has invalid setup_id %q: %w", row, setupID, err)
+			return nil, fmt.Errorf("external ID file row %d has an invalid setup_id (the value is not shown; check the column order)", row)
 		}
 		accountID := record[offset]
 		action := strings.ToLower(record[offset+1])
@@ -75,7 +75,7 @@ func loadExternalIDAssignments(path, defaultSetupID string) (externalIDAssignmen
 			return nil, fmt.Errorf("external ID file row %d has an empty setup_id", row)
 		}
 		if _, err := NewAccountID(accountID); err != nil {
-			return nil, fmt.Errorf("external ID file row %d has invalid AWS account ID %q; expected 12 digits", row, accountID)
+			return nil, fmt.Errorf("external ID file row %d has an invalid AWS account ID (the value is not shown; expected 12 digits, check the column order)", row)
 		}
 		switch action {
 		case "set":
@@ -87,13 +87,13 @@ func loadExternalIDAssignments(path, defaultSetupID string) (externalIDAssignmen
 				return nil, fmt.Errorf("external ID file row %d uses action clear but external_id is not empty", row)
 			}
 		default:
-			return nil, fmt.Errorf("external ID file row %d has invalid action %q; expected set or clear", row, action)
+			return nil, fmt.Errorf("external ID file row %d has an invalid action (the value is not shown; expected set or clear, check the column order)", row)
 		}
 		if assignments[setupID] == nil {
 			assignments[setupID] = make(map[string]string)
 		}
 		if _, exists := assignments[setupID][accountID]; exists {
-			return nil, fmt.Errorf("external ID file contains duplicate setup/account entry %s/%s", setupID, accountID)
+			return nil, fmt.Errorf("external ID file row %d repeats account %s for the same setup", row, accountID)
 		}
 		assignments[setupID][accountID] = externalID
 	}

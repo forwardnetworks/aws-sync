@@ -170,6 +170,7 @@ func newRootCommand() *cobra.Command {
 		newSafeSyncCommand(v),
 		newPreflightCommand(v),
 		newExternalIDCommand(v),
+		newExternalIDStatusCommand(v),
 		newApplyPlanCommand(v),
 		newStatusCommand(v),
 		newWaitCommand(v),
@@ -283,6 +284,80 @@ func newSafeSyncCommand(v *viper.Viper) *cobra.Command {
 	mustBind(v, cmd.Flags(), "yes")
 	_ = cmd.Flags().MarkHidden("output")
 	_ = cmd.Flags().MarkHidden("yes")
+	return cmd
+}
+
+func newExternalIDStatusCommand(v *viper.Viper) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "external-id-status",
+		Short: "Report which accounts in an AWS setup have an External ID (read-only; never shows values)",
+		Long: `Read-only. Lists every account in an existing AWS setup and whether an External ID is set.
+
+Give the same inputs as external-id (--value, --clear, or --external-id-file, optionally --account-id) to also see which accounts already match that expectation. Values are never printed or written. Use --output to export a CSV, and --check to exit non-zero when any compared account does not match.`,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			value, _ := cmd.Flags().GetString("value")
+			clearValue, _ := cmd.Flags().GetBool("clear")
+			externalIDFile, _ := cmd.Flags().GetString("external-id-file")
+			check, _ := cmd.Flags().GetBool("check")
+			if cmd.Flags().Changed("value") && strings.TrimSpace(value) == "" {
+				return fmt.Errorf("--value is empty; use --clear to expect no External ID")
+			}
+			if check && strings.TrimSpace(value) == "" && !clearValue && strings.TrimSpace(externalIDFile) == "" {
+				return fmt.Errorf("--check needs --value, --clear, or --external-id-file to compare against")
+			}
+			password, err := resolvePassword(v, os.Stdin, os.Stderr)
+			if err != nil {
+				return err
+			}
+			networkID, err := resolveNetworkIDForCLI(cmd.Context(), v, password, flagString(cmd, v, "network-id"), os.Stdin, os.Stderr)
+			if err != nil {
+				return err
+			}
+			setupID, _ := cmd.Flags().GetString("setup-id")
+			accountIDs, _ := cmd.Flags().GetStringSlice("account-id")
+			output, _ := cmd.Flags().GetString("output")
+			summary, err := app.ReportExternalIDStatus(cmd.Context(), app.ExternalIDStatusConfig{
+				Host:           v.GetString("host"),
+				Username:       v.GetString("username"),
+				Password:       password,
+				NetworkID:      networkID,
+				SetupID:        setupID,
+				AccountIDs:     accountIDs,
+				ExternalID:     value,
+				Clear:          clearValue,
+				ExternalIDFile: externalIDFile,
+				Output:         output,
+				APIPrefix:      v.GetString("api-prefix"),
+				Insecure:       v.GetBool("insecure"),
+				Timeout:        v.GetDuration("timeout"),
+			})
+			if err != nil {
+				return err
+			}
+			if err := emitResult(cmd, v, summary); err != nil {
+				return err
+			}
+			if check {
+				if !summary.Compared {
+					return fmt.Errorf("--check needs --value, --clear, or --external-id-file to compare against")
+				}
+				if !summary.AllInSync {
+					return fmt.Errorf("%d account(s) do not match the expected External ID state", len(summary.OutOfSync))
+				}
+			}
+			return nil
+		},
+	}
+	bindNetworkFlag(v, cmd.Flags())
+	cmd.Flags().String("setup-id", "", "existing Forward AWS setup ID")
+	cmd.Flags().String("value", "", "expected External ID; reports which accounts already have exactly this value (never shown)")
+	cmd.Flags().Bool("clear", false, "expect no External ID; reports which accounts have none")
+	cmd.Flags().StringSlice("account-id", nil, "limit the report to these AWS account IDs; repeatable or comma-separated")
+	cmd.Flags().String("external-id-file", "", "CSV of expected per-account External IDs (same file external-id takes); accounts not listed are not compared")
+	cmd.Flags().String("output", "", "write a CSV of the report (no values)")
+	cmd.Flags().Bool("check", false, "exit non-zero if any compared account does not match")
 	return cmd
 }
 
@@ -1401,6 +1476,8 @@ func emitResult(cmd *cobra.Command, v *viper.Viper, value any) error {
 		return emitSummaryHuman(summary)
 	case *app.ExternalIDSummary:
 		return emitExternalIDHuman(summary)
+	case *app.ExternalIDStatusSummary:
+		return emitExternalIDStatusHuman(summary)
 	case *app.ApplyPlanSummary:
 		return emitApplyPlanHuman(summary)
 	case *monitor.StatusResult:
@@ -1452,6 +1529,49 @@ func emitApplyPlanHuman(summary *app.ApplyPlanSummary) error {
 	}
 	if summary.ResultJournalOutput != "" {
 		fmt.Fprintf(os.Stdout, "  journal:   %s\n", summary.ResultJournalOutput)
+	}
+	return nil
+}
+
+func emitExternalIDStatusHuman(summary *app.ExternalIDStatusSummary) error {
+	fmt.Fprintln(os.Stdout, "External ID status (values are never shown)")
+	fmt.Fprintf(os.Stdout, "  host:      %s\n", summary.Host)
+	fmt.Fprintf(os.Stdout, "  network:   %s\n", summary.NetworkID)
+	fmt.Fprintf(os.Stdout, "  setup:     %s\n", summary.SetupID)
+	fmt.Fprintf(os.Stdout, "  accounts:  %d in setup, %d listed\n", summary.AccountCount, summary.ListedCount)
+	fmt.Fprintf(os.Stdout, "  whole setup: %d accounts have an External ID, %d do not\n", summary.SetCount, summary.UnsetCount)
+	if summary.Compared {
+		fmt.Fprintf(os.Stdout, "  matches:   %d of %d compared accounts match the expected state\n", summary.InSyncCount, summary.ComparedCount)
+		if summary.AllInSync {
+			fmt.Fprintln(os.Stdout, "  result:    all compared accounts match")
+		} else {
+			fmt.Fprintf(os.Stdout, "  result:    %d account(s) do not match:\n", len(summary.OutOfSync))
+			for i, accountID := range summary.OutOfSync {
+				if i == 50 {
+					fmt.Fprintf(os.Stdout, "             ... and %d more (use --output for the full list)\n", len(summary.OutOfSync)-50)
+					break
+				}
+				fmt.Fprintf(os.Stdout, "             %s\n", accountID)
+			}
+		}
+	}
+	if summary.ListedCount <= 25 {
+		for _, account := range summary.Accounts {
+			state := "unset"
+			if account.ExternalIDSet {
+				state = "set"
+			}
+			line := fmt.Sprintf("  - %s  %s", account.AccountID, state)
+			if account.InSync != nil {
+				line += fmt.Sprintf("  expected=%s in_sync=%t", account.Expected, *account.InSync)
+			}
+			fmt.Fprintln(os.Stdout, line)
+		}
+	} else if summary.Output == "" {
+		fmt.Fprintln(os.Stdout, "  (use --output status.csv for the per-account list)")
+	}
+	if summary.Output != "" {
+		fmt.Fprintf(os.Stdout, "  output:    %s\n", summary.Output)
 	}
 	return nil
 }
