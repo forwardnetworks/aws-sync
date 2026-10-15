@@ -81,7 +81,7 @@ If you need a manual fallback format for UI drag-and-drop, also review `aws_sync
 
 `removed_accounts` must be empty in a standard NQE plan. Stop without applying if it is not.
 
-NQE account IDs must contain exactly 12 digits. Malformed rows fail the run by default. `--allow-malformed-rows` is an additive-only escape hatch: it skips and reports those rows, marks the observation incomplete, and cannot authorize removals.
+NQE account IDs must contain exactly 12 digits. Malformed rows fail the run by default, except a row whose Cloud Account ID equals its own Cloud Setup ID: it describes the setup rather than an account and is skipped with a preflight note. `--allow-malformed-rows` is an additive-only escape hatch: it skips and reports those rows, marks the observation incomplete, and cannot authorize removals.
 
 Generated payload, rollback, result-journal, manual, and applied-audit files are atomically replaced with owner-only `0600` permissions. They can still contain sensitive credential material in static-key onboarding workflows, so store and dispose of them according to the customer's credential policy.
 

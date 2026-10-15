@@ -198,7 +198,7 @@ For native IaC onboarding, prefer the Forward Terraform provider. The [quick sta
 
 ## Run a Dry Plan
 
-Start without `--apply`. This writes the planned PATCH payload to disk but does not update Forward. NQE account IDs must contain exactly 12 digits; a malformed row fails by default. `--allow-malformed-rows` skips and reports malformed rows for an urgent additive run, marks the observed inventory incomplete, and cannot authorize removals.
+Start without `--apply`. This writes the planned PATCH payload to disk but does not update Forward. NQE account IDs must contain exactly 12 digits; a malformed row fails by default. The one exception is a row whose Cloud Account ID is its own Cloud Setup ID: Forward reports that row for some IAM-user setups, it describes the setup rather than an account, and it is skipped (preflight reports `nqe_setup_level_rows`) without marking the inventory incomplete. `--allow-malformed-rows` skips and reports malformed rows for an urgent additive run, marks the observed inventory incomplete, and cannot authorize removals.
 
 ```bash
 ./bin/awssync \

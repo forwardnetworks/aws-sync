@@ -807,13 +807,13 @@ func TestBuildPlanCountsOnlyNewUncollectedAccountsAsCandidates(t *testing.T) {
 func TestBuildPlanRejectsMalformedNQEAccountID(t *testing.T) {
 	items := []map[string]any{
 		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "111111111111", "Collected?": true},
-		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "setup-a", "Collected?": false},
+		{"Cloud Setup ID": "setup-a", "Cloud Account ID": "not-an-account", "Collected?": false},
 	}
 	_, err := buildPlan(items, []api.CloudAccount{{
 		Name:            "setup-a",
 		AssumeRoleInfos: []api.AssumeRoleInfo{{AccountID: "111111111111", RoleArn: "arn:aws:iam::111111111111:role/ForwardRole", Enabled: true}},
 	}}, "", nil)
-	if err == nil || !strings.Contains(err.Error(), "invalid AWS account ID \"setup-a\"; expected exactly 12 digits") {
+	if err == nil || !strings.Contains(err.Error(), "invalid AWS account ID \"not-an-account\"; expected exactly 12 digits") {
 		t.Fatalf("expected NQE ID validation error, got %v", err)
 	}
 }

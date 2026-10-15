@@ -199,7 +199,10 @@ type InventorySnapshot struct {
 	DiscoveredAccounts []DiscoveredAccount
 	IgnoredAccounts    []AccountSummary
 	SkippedRows        []MalformedNQERowSummary
-	CompleteIndicator  bool
+	// SetupLevelRows lists setups for which NQE returned a row describing the
+	// setup itself (account ID equal to setup ID) instead of an account.
+	SetupLevelRows    []SetupID
+	CompleteIndicator bool
 }
 
 type MalformedNQERowSummary struct {

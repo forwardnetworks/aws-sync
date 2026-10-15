@@ -152,7 +152,10 @@ func Preflight(ctx context.Context, cfg Config) (*PreflightSummary, error) {
 	if summary.IgnoredNQEItemCount > 0 {
 		result.warn("nqe_account_id_validation", fmt.Sprintf("ignored %d NQE row(s) with invalid AWS account IDs", summary.IgnoredNQEItemCount))
 	} else {
-		result.pass("nqe_account_id_validation", "all NQE AWS account IDs are valid 12-digit IDs")
+		result.pass("nqe_account_id_validation", "all NQE AWS account IDs are valid 12-digit IDs (setup-level rows excluded)")
+	}
+	if len(snapshot.SetupLevelRows) > 0 {
+		result.pass("nqe_setup_level_rows", fmt.Sprintf("skipped %d NQE row(s) whose account ID is the setup name itself; they describe the setup, not an account", len(snapshot.SetupLevelRows)))
 	}
 	if plan.HasRemovals() {
 		result.fail("account_removals", "planned account removals require review and --allow-removals for apply")

@@ -77,6 +77,10 @@ func parseNQESnapshotFromMapsWithOptions(items []map[string]any, options parseNQ
 		}
 		accountID, err := extractNQEAccountID(item, r)
 		if err != nil {
+			if isSetupLevelNQERow(item, setupID) {
+				snapshot.SetupLevelRows = append(snapshot.SetupLevelRows, setupID)
+				continue
+			}
 			if options.AllowMalformedRows && isMalformedNQEAccountIDError(err) {
 				snapshot.SkippedRows = append(snapshot.SkippedRows, MalformedNQERowSummary{
 					Row:       r,
@@ -152,6 +156,22 @@ func parseNQESnapshotFromMapsWithOptions(items []map[string]any, options parseNQ
 		})
 	}
 	return snapshot, nil
+}
+
+// isSetupLevelNQERow reports whether a row describes the setup itself rather
+// than an account: its Cloud Account ID is its own Cloud Setup ID. Forward
+// reports such a row for some IAM-user setups. It carries no account, so
+// skipping it loses no inventory and, unlike a malformed account row, does not
+// make the observation incomplete. Only this exact shape is exempt; any other
+// invalid account ID still fails the plan.
+func isSetupLevelNQERow(item map[string]any, setupID SetupID) bool {
+	if setupID.IsZero() {
+		return false
+	}
+	// Only a string qualifies: a number that formats like the setup name is a
+	// type error, not a setup-level row.
+	value, ok := item["Cloud Account ID"].(string)
+	return ok && strings.TrimSpace(value) == setupID.String()
 }
 
 func isMalformedNQEAccountIDError(err error) bool {
