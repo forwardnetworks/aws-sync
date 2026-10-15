@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`awssync` is a Go CLI (cobra/viper, Go 1.26) that keeps the AWS account list of an existing Forward Networks cloud setup in sync with the AWS inventory Forward has already collected. The primary operator command is `safe-sync` (additive only: add/re-enable, never remove). Other commands: `run`/sync, `sync-accounts` (reviewed manifest, the only path that may remove accounts), `apply-plan`, `preflight`, `status`, `wait`, `discover-org`, `onboard-accounts`, `external-id`, `serve-webhook`, `configure-webhook`.
+`awssync` is a Go CLI (cobra/viper, Go 1.26) that keeps the AWS account list of an existing Forward Networks cloud setup in sync with the AWS inventory Forward has already collected. The primary operator command is `safe-sync` (additive only: add/re-enable, never remove). Other commands: `run`/sync, `sync-accounts` (reviewed manifest, the only path that may remove accounts), `apply-plan`, `preflight`, `status`, `wait`, `discover-org`, `onboard-accounts`, `external-id`, `external-id-status` (read-only; must never print or write an External ID value), `serve-webhook`, `configure-webhook`.
 
 ## Commands
 

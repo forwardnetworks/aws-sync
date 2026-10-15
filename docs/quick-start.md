@@ -131,6 +131,34 @@ Every External ID apply writes the pre-change account list and PATCHable setup f
 
 Rollback order matters: first relax or remove the mandatory `sts:ExternalId` condition from the target-role trust policies and confirm a representative role can still be assumed. Then replace `--value VALUE` with `--clear`, review the dry run, apply it, and test collection again. Clearing Forward first while AWS still requires the External ID will interrupt collection.
 
+### See and Verify External IDs (read-only)
+
+`external-id-status` lists every account in a setup and whether an External ID is set. It never prints, returns, or writes a value, and it never changes Forward.
+
+```bash
+# What is there now? Export a CSV: setup_id, account_id, account_name, enabled, external_id_set
+# (plus expected and in_sync when you also give --value, --clear or --external-id-file).
+./bin/awssync external-id-status --setup-id AWS-PROD --output status.csv
+
+# Does Forward already hold what I intend? Same inputs as external-id.
+./bin/awssync external-id-status --setup-id AWS-PROD --account-id 111111111111 --value customer-defined-value
+./bin/awssync external-id-status --setup-id AWS-PROD --external-id-file external-ids.csv
+./bin/awssync external-id-status --setup-id AWS-PROD --clear
+```
+
+With `--value`, `--clear`, or `--external-id-file` the report says which accounts match and lists the ones that do not. Accounts missing from an `--external-id-file` are not compared. The whole-setup counts always cover every account, while the match counts cover only the accounts you listed. Add `--check` to exit non-zero when any compared account does not match, so a script can gate on it.
+
+A complete cycle for one or more accounts looks like this:
+
+1. `external-id-status --output before.csv` to see where you start.
+2. `external-id ... --output plan.json` (dry run) and review the change counts.
+3. `external-id ... --apply --yes`. This writes `plan.rollback.json`.
+4. `external-id-status ... --check` with the same inputs to confirm Forward holds what you set.
+5. Add the `sts:ExternalId` condition in AWS for those accounts and test collection.
+6. To back out, relax the AWS trust policy, then `apply-plan --plan plan.rollback.json --yes`. The rollback restores each account to what it held before that apply. Confirm by comparing with `before.csv` (the accounts that had an External ID before still have one). If the accounts had none before, `external-id ... --clear` also works, and `external-id-status --account-id ... --clear --check` with the same `--account-id` values confirms it.
+
+Repeat with the next accounts. Accounts you do not name are never touched, and `awssync` never changes the per-region connectivity results Forward shows.
+
 ## Discover Before Onboarding
 
 Prefer the Forward Terraform provider for native IaC onboarding. Use this CLI path for a new Forward AWS setup when you need manual review artifacts or cannot use the provider. It reads AWS Organizations directly and never patches an existing Forward setup.

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1173,4 +1174,69 @@ func captureStdout(t *testing.T, fn func()) string {
 		t.Fatalf("read stdout: %v", err)
 	}
 	return string(data)
+}
+
+func TestExternalIDStatusCheckExitsNonZeroOnlyWhenAccountsDiffer(t *testing.T) {
+	var writes atomic.Int32
+	setup := api.CloudAccount{Type: "AWS", Name: "setup-a", AssumeRoleInfos: []api.AssumeRoleInfo{
+		{AccountID: "111111111111", RoleArn: "arn:aws:iam::111111111111:role/R", Enabled: true, ExternalID: "the-value"},
+		{AccountID: "222222222222", RoleArn: "arn:aws:iam::222222222222:role/R", Enabled: true},
+	}}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writes.Add(1)
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts" {
+			_ = json.NewEncoder(w).Encode([]api.CloudAccount{setup})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	run := func(args ...string) (string, error) {
+		var runErr error
+		out := captureStdout(t, func() {
+			cmd := newRootCommand()
+			cmd.SetArgs(append([]string{
+				"external-id-status", "--host", server.URL, "--username", "alice", "--password", "secret",
+				"--network-id", "network-1", "--setup-id", "setup-a", "--insecure", "--json",
+			}, args...))
+			runErr = cmd.Execute()
+		})
+		return out, runErr
+	}
+
+	if out, err := run("--account-id", "111111111111", "--value", "the-value", "--check"); err != nil {
+		t.Fatalf("matching account must exit zero: %v\n%s", err, out)
+	}
+	if out, err := run("--value", "the-value", "--check"); err == nil {
+		t.Fatalf("a non-matching account must make --check fail:\n%s", out)
+	}
+	if out, err := run("--check"); err == nil {
+		t.Fatalf("--check without anything to compare must fail:\n%s", out)
+	}
+	out, err := run("--value", "the-value")
+	if err != nil {
+		t.Fatalf("without --check a mismatch is only reported: %v", err)
+	}
+	if strings.Contains(out, "the-value") {
+		t.Fatalf("output leaked the External ID value:\n%s", out)
+	}
+	// Human output must not leak either.
+	var humanErr error
+	human := captureStdout(t, func() {
+		cmd := newRootCommand()
+		cmd.SetArgs([]string{
+			"external-id-status", "--host", server.URL, "--username", "alice", "--password", "secret",
+			"--network-id", "network-1", "--setup-id", "setup-a", "--insecure", "--value", "the-value",
+		})
+		humanErr = cmd.Execute()
+	})
+	if humanErr != nil || strings.Contains(human, "the-value") || !strings.Contains(human, "of 2 compared") {
+		t.Fatalf("human output wrong or leaked (err=%v):\n%s", humanErr, human)
+	}
+	if n := writes.Load(); n != 0 {
+		t.Fatalf("external-id-status sent %d non-GET request(s)", n)
+	}
 }

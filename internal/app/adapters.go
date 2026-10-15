@@ -28,16 +28,16 @@ func adaptExternalIDAssignments(assignments externalIDAssignments) (externalIDBy
 	for setupIDRaw, byAccount := range assignments {
 		setupID, err := NewSetupID(setupIDRaw)
 		if err != nil {
-			return nil, fmt.Errorf("external ID assignment has invalid setup ID %q: %w", setupIDRaw, err)
+			return nil, fmt.Errorf("external ID file has an invalid setup_id (the value is not shown; check the column order)")
 		}
 		if _, exists := converted[setupID]; exists {
-			return nil, fmt.Errorf("external ID file contains duplicate setup %q", setupID)
+			return nil, fmt.Errorf("external ID file lists the same setup twice")
 		}
 		converted[setupID] = make(map[AccountID]string, len(byAccount))
 		for rawAccountID, externalID := range byAccount {
 			accountID, err := NewAccountID(rawAccountID)
 			if err != nil {
-				return nil, fmt.Errorf("external ID assignment for setup %q has invalid AWS account ID %q: %w", setupID, rawAccountID, err)
+				return nil, fmt.Errorf("external ID file has an invalid AWS account ID for the selected setup (the value is not shown)")
 			}
 			if _, exists := converted[setupID][accountID]; exists {
 				return nil, fmt.Errorf("external ID file contains duplicate setup/account entry %s/%s", setupID, accountID)

@@ -1,5 +1,9 @@
 # Upgrading `awssync`
 
+## v3.3.0
+
+New read-only command `external-id-status`: per-account External ID state, an optional match check against `--value`, `--clear` or `--external-id-file`, a CSV export, and `--check` for scripts. No existing behavior changes.
+
 ## v3.2.1 to v3.2.2
 
 Every apply before v3.2.2 sent each setup's `regions` back to Forward. Forward stores those as new, successful connectivity tests, so each `awssync` PATCH changed every region's test result to `NONE`, even where the real result was `AUTHORIZATION_FAILED`, and marked a region that had never been tested as passed. v3.2.2 never sends `regions`; the stored test results are left as they are. If you applied with an earlier version, run Forward's connectivity test on the setup to see the real region status again.
