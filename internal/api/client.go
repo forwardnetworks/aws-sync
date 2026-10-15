@@ -432,10 +432,14 @@ func (c *Client) PatchCloudAccount(ctx context.Context, networkID, setupID strin
 	if roles == nil {
 		roles = []forward.AWSAssumeRoleInfo{}
 	}
+	// payload.Regions is deliberately not sent. Forward records every region in
+	// a PATCH as a fresh successful connectivity test (UpdateAwsAccountRequest
+	// builds TestResult.success from the instants), so writing regions back
+	// would turn a real AUTHORIZATION_FAILED into NONE on every apply. Omitted,
+	// the field leaves the stored test results untouched.
 	patch := forward.CloudAccountPatch{
 		Type:                  payload.Type,
 		Name:                  &name,
-		Regions:               payload.Regions,
 		RegionToProxyServerID: payload.RegionToProxyServerID,
 		AssumeRoleInfos:       &roles,
 	}

@@ -317,7 +317,7 @@ func TestApplyPlanCommandHonorsLocalYesFlag(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Fatalf("decode PATCH: %v", err)
 			}
-			current = testCloudAccountFromPatchPayload(payload)
+			current = testCloudAccountFromPatchPayload(current, payload)
 			_, _ = w.Write([]byte(`{}`))
 		default:
 			http.NotFound(w, r)
@@ -438,7 +438,7 @@ func TestSafeSyncRunsPreflightPreviewAndAdditiveApply(t *testing.T) {
 				t.Fatalf("safe-sync payload did not re-enable account: %#v", payload)
 			}
 			enabled = true
-			current = testCloudAccountFromPatchPayload(payload)
+			current = testCloudAccountFromPatchPayload(current, payload)
 			patched = true
 			_, _ = w.Write([]byte(`{}`))
 		default:
@@ -522,7 +522,7 @@ func TestSafeSyncHandlesMultipleSetups(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Fatalf("decode PATCH: %v", err)
 			}
-			current[setupID] = testCloudAccountFromPatchPayload(payload)
+			current[setupID] = testCloudAccountFromPatchPayload(current[setupID], payload)
 			patched[setupID] = true
 			_, _ = w.Write([]byte(`{}`))
 		default:
@@ -1121,19 +1121,31 @@ func TestResolveSetupIDsForCLINonInteractiveAutoSelectsSingle(t *testing.T) {
 	}
 }
 
-func testCloudAccountFromPatchPayload(payload api.PatchPayload) api.CloudAccount {
-	regions := make(map[string]api.RegionMeta, len(payload.Regions))
-	for region, instant := range payload.Regions {
-		regions[region] = api.RegionMeta{TestInstant: instant}
+// testCloudAccountFromPatchPayload models Forward's PATCH merge: a property the
+// body omits is left unchanged (awssync never sends regions).
+func testCloudAccountFromPatchPayload(current api.CloudAccount, payload api.PatchPayload) api.CloudAccount {
+	regions := current.Regions
+	if len(payload.Regions) > 0 {
+		regions = make(map[string]api.RegionMeta, len(payload.Regions))
+		for region, instant := range payload.Regions {
+			regions[region] = api.RegionMeta{TestInstant: instant}
+		}
 	}
-	regionToProxy := make(map[string]string, len(payload.RegionToProxyServerID))
-	for region, proxyID := range payload.RegionToProxyServerID {
-		regionToProxy[region] = proxyID
+	regionToProxy := current.RegionToProxyServerID
+	if len(payload.RegionToProxyServerID) > 0 {
+		regionToProxy = make(map[string]string, len(payload.RegionToProxyServerID))
+		for region, proxyID := range payload.RegionToProxyServerID {
+			regionToProxy[region] = proxyID
+		}
+	}
+	proxyServerID := current.ProxyServerID
+	if payload.ProxyServerID != "" {
+		proxyServerID = payload.ProxyServerID
 	}
 	return api.CloudAccount{
 		Type:                  payload.Type,
 		Name:                  payload.Name,
-		ProxyServerID:         payload.ProxyServerID,
+		ProxyServerID:         proxyServerID,
 		RegionToProxyServerID: regionToProxy,
 		Regions:               regions,
 		AssumeRoleInfos:       append([]api.AssumeRoleInfo(nil), payload.AssumeRoleInfos...),

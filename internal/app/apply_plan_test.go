@@ -38,7 +38,7 @@ func TestApplyPlanPatchesReviewedPayload(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatalf("decode PATCH: %v", err)
 		}
-		current = testCloudAccountFromPatchPayload(payload)
+		current = testCloudAccountFromPatchPayload(current, payload)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{}`))
 	}))
@@ -131,7 +131,7 @@ func TestApplyPlanAcceptsPreBranchBinaryArtifacts(t *testing.T) {
 					if err := json.NewDecoder(r.Body).Decode(&patched); err != nil {
 						t.Fatalf("decode PATCH: %v", err)
 					}
-					current = testCloudAccountFromPatchPayload(patched)
+					current = testCloudAccountFromPatchPayload(current, patched)
 					_, _ = w.Write([]byte(`{}`))
 				default:
 					http.NotFound(w, r)
@@ -164,7 +164,7 @@ func TestApplyPlanAcceptsPreBranchBinaryArtifacts(t *testing.T) {
 			if len(patched.AssumeRoleInfos) != 2 || patched.AssumeRoleInfos[1].Enabled != test.wantEnabled {
 				t.Fatalf("old artifact account state was misread: %#v", patched.AssumeRoleInfos)
 			}
-			if patched.ProxyServerID != want.ProxyServerID || patched.Regions["us-east-1"] != 123 {
+			if patched.ProxyServerID != want.ProxyServerID || len(patched.Regions) != 0 {
 				t.Fatalf("old artifact recovery fields were misread: %#v", patched)
 			}
 		})
@@ -288,7 +288,7 @@ func TestApplyPlanDisableRequiresGatewayDestructiveAuthorization(t *testing.T) {
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Fatalf("decode PATCH: %v", err)
 					}
-					current = testCloudAccountFromPatchPayload(payload)
+					current = testCloudAccountFromPatchPayload(current, payload)
 					w.WriteHeader(http.StatusNoContent)
 				default:
 					http.NotFound(w, r)
@@ -513,5 +513,60 @@ func TestApplyPlanBlocksConcurrentSetupChange(t *testing.T) {
 	}
 	if patched {
 		t.Fatal("concurrent setup change reached PATCH")
+	}
+}
+
+func TestApplyPlanRefusesChangesAPatchCannotCarryBeforeWritingAnything(t *testing.T) {
+	// awssync never writes region state or clears a proxy. A reviewed plan that
+	// needs either must be refused before the first PATCH; otherwise the account
+	// list would be written and verification would then report a false conflict.
+	tests := map[string]string{
+		"different region membership": `{"setup-a":{"type":"AWS","name":"setup-a","regions":{"eu-west-1":1},"proxyServerId":"proxy-1","regionToProxyServerId":{},"assumeRoleInfos":[
+			{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true},
+			{"accountId":"222222222222","roleArn":"arn:aws:iam::222222222222:role/ForwardRole","enabled":true}]}}`,
+		"removing the proxy": `{"setup-a":{"type":"AWS","name":"setup-a","regions":{"us-east-1":1},"regionToProxyServerId":{},"assumeRoleInfos":[
+			{"accountId":"111111111111","roleArn":"arn:aws:iam::111111111111:role/ForwardRole","enabled":true},
+			{"accountId":"222222222222","roleArn":"arn:aws:iam::222222222222:role/ForwardRole","enabled":true}]}}`,
+	}
+	for name, plan := range tests {
+		t.Run(name, func(t *testing.T) {
+			patches := 0
+			current := api.CloudAccount{
+				Type:          "AWS",
+				Name:          "setup-a",
+				ProxyServerID: "proxy-1",
+				Regions:       map[string]api.RegionMeta{"us-east-1": {TestInstant: 5}},
+				AssumeRoleInfos: []api.AssumeRoleInfo{
+					{AccountID: "111111111111", RoleArn: "arn:aws:iam::111111111111:role/ForwardRole", Enabled: true},
+				},
+			}
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+					_ = json.NewEncoder(w).Encode([]api.CloudAccount{current})
+				case r.Method == http.MethodPatch:
+					patches++
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{}`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			planPath := filepath.Join(t.TempDir(), "plan.json")
+			if err := os.WriteFile(planPath, []byte(plan), 0o600); err != nil {
+				t.Fatalf("write plan: %v", err)
+			}
+			_, err := ApplyPlan(context.Background(), ApplyPlanConfig{
+				Host: server.URL, Username: "alice", Password: "secret", NetworkID: "network-1",
+				PlanPath: planPath, APIPrefix: "/api", Insecure: true,
+			})
+			if err == nil || !strings.Contains(err.Error(), "awssync does not write") {
+				t.Fatalf("ApplyPlan() error = %v; want a refusal before any PATCH", err)
+			}
+			if patches != 0 {
+				t.Fatalf("%d PATCH request(s) were sent; want none", patches)
+			}
+		})
 	}
 }

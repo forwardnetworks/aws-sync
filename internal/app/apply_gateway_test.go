@@ -777,16 +777,30 @@ func gatewayAssumeRole(accountID string, enabled bool) api.AssumeRoleInfo {
 	}
 }
 
-func testCloudAccountFromPatchPayload(payload api.PatchPayload) api.CloudAccount {
-	regions := make(map[string]api.RegionMeta, len(payload.Regions))
-	for region, instant := range payload.Regions {
-		regions[region] = api.RegionMeta{TestInstant: instant}
+// testCloudAccountFromPatchPayload models Forward's PATCH merge: a property the
+// body omits is left unchanged. awssync never sends regions, so the stored
+// region test results must survive an apply.
+func testCloudAccountFromPatchPayload(current api.CloudAccount, payload api.PatchPayload) api.CloudAccount {
+	regions := current.Regions
+	if len(payload.Regions) > 0 {
+		regions = make(map[string]api.RegionMeta, len(payload.Regions))
+		for region, instant := range payload.Regions {
+			regions[region] = api.RegionMeta{TestInstant: instant}
+		}
+	}
+	proxyServerID := current.ProxyServerID
+	if payload.ProxyServerID != "" {
+		proxyServerID = payload.ProxyServerID
+	}
+	regionToProxy := current.RegionToProxyServerID
+	if len(payload.RegionToProxyServerID) > 0 {
+		regionToProxy = cloneStringMap(payload.RegionToProxyServerID)
 	}
 	return api.CloudAccount{
 		Type:                  payload.Type,
 		Name:                  payload.Name,
-		ProxyServerID:         payload.ProxyServerID,
-		RegionToProxyServerID: cloneStringMap(payload.RegionToProxyServerID),
+		ProxyServerID:         proxyServerID,
+		RegionToProxyServerID: regionToProxy,
 		Regions:               regions,
 		AssumeRoleInfos:       append([]api.AssumeRoleInfo(nil), payload.AssumeRoleInfos...),
 	}

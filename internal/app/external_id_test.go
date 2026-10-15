@@ -52,16 +52,19 @@ func TestChangeExternalIDSetsAndClearsWithoutNQE(t *testing.T) {
 			if err := json.Unmarshal(data, &fields); err != nil {
 				t.Fatalf("decode patch fields: %v", err)
 			}
-			for _, field := range []string{"type", "name", "regions", "assumeRoleInfos"} {
+			for _, field := range []string{"type", "name", "assumeRoleInfos"} {
 				if fields[field] == nil {
 					t.Fatalf("gateway External ID PATCH omitted preserved field %s: %s", field, string(data))
 				}
+			}
+			if fields["regions"] != nil {
+				t.Fatalf("awssync must never write region state (Forward records it as a passed connectivity test): %s", string(data))
 			}
 			var payload api.PatchPayload
 			if err := json.Unmarshal(data, &payload); err != nil {
 				t.Fatalf("decode patch: %v", err)
 			}
-			if payload.Name != stored.Name || payload.Regions["us-east-1"] != 123 {
+			if payload.Name != stored.Name {
 				t.Fatalf("gateway External ID PATCH changed preserved setup metadata: %#v", payload)
 			}
 			stored.AssumeRoleInfos = payload.AssumeRoleInfos
@@ -143,7 +146,7 @@ func TestChangeExternalIDConfirmsComputedDigestBeforeGatewayApply(t *testing.T) 
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Fatalf("decode PATCH: %v", err)
 			}
-			stored = testCloudAccountFromPatchPayload(payload)
+			stored = testCloudAccountFromPatchPayload(stored, payload)
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)

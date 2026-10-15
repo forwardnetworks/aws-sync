@@ -54,8 +54,10 @@ func TestComputeDesiredIsDeterministicAndClassifiesFieldChanges(t *testing.T) {
 	if got := current.Metadata.Regions["us-east-1"]; got != 0 {
 		t.Fatalf("ComputeDesired mutated current regions: %d", got)
 	}
-	if got := firstDesired.Metadata.Regions["us-east-1"]; got != planningInstant.UnixMilli() {
-		t.Fatalf("desired planning instant = %d, want %d", got, planningInstant.UnixMilli())
+	// awssync never writes region state, so a never-tested region (instant 0)
+	// must stay as it is and must not plan a change that is never sent.
+	if got := firstDesired.Metadata.Regions["us-east-1"]; got != 0 {
+		t.Fatalf("desired region instant = %d; want the current value 0 (no planning-instant substitution)", got)
 	}
 	if len(firstChanges.Add) != 1 ||
 		len(firstChanges.Enable) != 1 ||
@@ -63,7 +65,7 @@ func TestComputeDesiredIsDeterministicAndClassifiesFieldChanges(t *testing.T) {
 		len(firstChanges.Rename) != 1 ||
 		len(firstChanges.RotateExternalID) != 1 ||
 		len(firstChanges.ChangeRole) != 1 ||
-		len(firstChanges.SetupMetadata) != 1 {
+		len(firstChanges.SetupMetadata) != 0 {
 		t.Fatalf("unexpected field-level changes: %#v", firstChanges)
 	}
 	if len(firstChanges.Disable) != 0 {
@@ -242,5 +244,41 @@ func reconcileTestAccount(t *testing.T, accountID, name, roleName, externalID st
 	}
 	return SetupAccount{
 		AccountID: id, AccountName: name, RoleARN: roleARN, ExternalID: externalID, Enabled: enabled,
+	}
+}
+
+func TestComputeDesiredPlansNoRegionChangeForNeverTestedRegion(t *testing.T) {
+	// Forward reports a region that was never tested as instant 0. awssync does
+	// not write region state, so planning must see nothing to change; otherwise
+	// every run would report "patched" and PATCH again without ever settling.
+	current := CurrentSetup{
+		SetupID: SetupID("setup-a"),
+		Metadata: SetupMetadata{
+			CloudType: "AWS",
+			Regions:   map[string]int64{"us-east-1": 0, "us-west-2": 1700000000000},
+		},
+		Accounts: []SetupAccount{reconcileTestAccount(t, "111111111111", "same", "ForwardRole", "", true)},
+	}
+	snapshot := InventorySnapshot{
+		Completeness: InventoryCompletenessComplete,
+		DiscoveredAccounts: []DiscoveredAccount{
+			{SetupID: SetupID("setup-a"), AccountID: AccountID("111111111111"), AccountName: "same"},
+		},
+	}
+	policy := ReconcilePolicy{Kind: CompleteInventory, PlanningInstant: time.Unix(5, 0).UTC(), DefaultRoleName: "ForwardRole"}
+	desired, changes, err := ComputeDesired(current, snapshot, policy)
+	if err != nil {
+		t.Fatalf("ComputeDesired() error = %v", err)
+	}
+	if !reflect.DeepEqual(desired.Metadata.Regions, current.Metadata.Regions) {
+		t.Fatalf("desired regions %v differ from current %v", desired.Metadata.Regions, current.Metadata.Regions)
+	}
+	for _, change := range changes.SetupMetadata {
+		if change.Field == "regions" {
+			t.Fatalf("planned a regions change that is never sent: %#v", change)
+		}
+	}
+	if !changes.Empty() {
+		t.Fatalf("a setup with nothing to change planned work: %#v", changes)
 	}
 }
