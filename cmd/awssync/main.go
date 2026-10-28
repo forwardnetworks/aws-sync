@@ -1866,6 +1866,10 @@ func emitSafeSyncPreview(summary *app.Summary) {
 			len(setup.RemovedAccounts),
 		)
 	}
+	if len(summary.SetupLevelNQERows) > 0 {
+		fmt.Fprintf(os.Stdout, "\n  skipped (setup-level): %d row(s) (%s). The account ID equals the setup name, so it is not an AWS account.\n",
+			len(summary.SetupLevelNQERows), strings.Join(summary.SetupLevelNQERows, ", "))
+	}
 	added, reenabled, removed := summaryChangeCounts(summary)
 	fmt.Fprintf(os.Stdout, "\nChanges: add=%d reenable=%d remove=%d\n", added, reenabled, removed)
 }

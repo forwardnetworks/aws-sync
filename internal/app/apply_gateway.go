@@ -868,6 +868,7 @@ func cloneInventorySnapshot(snapshot InventorySnapshot) InventorySnapshot {
 	result.DiscoveredAccounts = append([]DiscoveredAccount(nil), snapshot.DiscoveredAccounts...)
 	result.IgnoredAccounts = append([]AccountSummary(nil), snapshot.IgnoredAccounts...)
 	result.SkippedRows = append([]MalformedNQERowSummary(nil), snapshot.SkippedRows...)
+	result.SetupLevelRows = append([]SetupID(nil), snapshot.SetupLevelRows...)
 	if snapshot.ExpectedRowCount != nil {
 		value := *snapshot.ExpectedRowCount
 		result.ExpectedRowCount = &value

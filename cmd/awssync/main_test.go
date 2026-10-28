@@ -1240,3 +1240,24 @@ func TestExternalIDStatusCheckExitsNonZeroOnlyWhenAccountsDiffer(t *testing.T) {
 		t.Fatalf("external-id-status sent %d non-GET request(s)", n)
 	}
 }
+
+func TestEmitSafeSyncPreviewReportsSetupLevelRows(t *testing.T) {
+	stdout := captureStdout(t, func() {
+		emitSafeSyncPreview(&app.Summary{
+			NetworkID:         "network-1",
+			SnapshotID:        "snap-1",
+			SetupLevelNQERows: []string{"setup-a"},
+			PlannedSetups:     []app.SetupSummary{{SetupID: "setup-a", ConfiguredAccountCount: 1, NQEAccountRowCount: 1}},
+		})
+	})
+	if !strings.Contains(stdout, "skipped (setup-level): 1 row(s) (setup-a)") ||
+		!strings.Contains(stdout, "not an AWS account") {
+		t.Fatalf("preview must report the setup-level row:\n%s", stdout)
+	}
+	quiet := captureStdout(t, func() {
+		emitSafeSyncPreview(&app.Summary{NetworkID: "network-1", SnapshotID: "snap-1"})
+	})
+	if strings.Contains(quiet, "setup-level") {
+		t.Fatalf("no setup-level line expected when there are none:\n%s", quiet)
+	}
+}

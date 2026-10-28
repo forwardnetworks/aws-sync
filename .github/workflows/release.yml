@@ -87,6 +87,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Generate SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
       - name: Download all build artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -105,7 +113,7 @@ jobs:
           done
           (
             cd dist
-            sha256sum awssync-* > sha256sums.txt
+            sha256sum awssync-* sbom.spdx.json > sha256sums.txt
           )
       - name: Verify artifacts are executable and checksums match
         run: |
@@ -136,6 +144,7 @@ jobs:
             dist/awssync-linux-arm64.tar.gz
             dist/awssync-darwin-amd64.tar.gz
             dist/awssync-darwin-arm64.tar.gz
+            dist/sbom.spdx.json
       - name: Render release notes
         run: |
           sed "s|{{VERSION}}|${{ github.ref_name }}|g" .github/RELEASE_NOTES_TEMPLATE.md > dist/release-notes.md
@@ -147,4 +156,5 @@ jobs:
           body_path: dist/release-notes.md
           files: |
             dist/awssync-*
+            dist/sbom.spdx.json
             dist/sha256sums.txt

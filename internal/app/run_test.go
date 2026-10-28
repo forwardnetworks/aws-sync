@@ -1547,3 +1547,55 @@ func TestWriteJSONPayloadIsAtomicAndOwnerOnly(t *testing.T) {
 		t.Fatalf("temporary files were not cleaned up: %#v", temps)
 	}
 }
+
+func TestRunReportsSetupLevelRowInSummaryWithoutChangingPlan(t *testing.T) {
+	current := api.CloudAccount{
+		Type: "AWS",
+		Name: "setup-a",
+		AssumeRoleInfos: []api.AssumeRoleInfo{{
+			RoleArn: "arn:aws:iam::111111111111:role/ForwardRole",
+			Enabled: true,
+		}},
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/nqe":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"items":[` +
+				`{"Setup ID":"setup-a","Cloud Account ID":"111111111111","Cloud Account Name":"acct-a"},` +
+				`{"Setup ID":"setup-a","Cloud Account ID":"setup-a"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/networks/network-1/cloudAccounts":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]api.CloudAccount{current})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	summary, err := Run(context.Background(), Config{
+		Host:      server.URL,
+		Username:  "alice",
+		Password:  "secret",
+		NetworkID: "network-1",
+		QueryID:   "custom-query",
+		Output:    filepath.Join(t.TempDir(), "payload.json"),
+		APIPrefix: "/api",
+		Insecure:  true,
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := summary.SetupLevelNQERows; len(got) != 1 || got[0] != "setup-a" {
+		t.Fatalf("SetupLevelNQERows = %v; want [setup-a]", got)
+	}
+	if summary.IgnoredNQEItemCount != 0 || len(summary.SkippedNQERows) != 0 {
+		t.Fatalf("a setup-level row must not count as an ignored invalid row: %+v", summary)
+	}
+	if len(summary.PlannedSetups) != 1 {
+		t.Fatalf("planned setups = %d; want 1", len(summary.PlannedSetups))
+	}
+	if setup := summary.PlannedSetups[0]; len(setup.AddedAccounts) != 0 || setup.NQEAccountRowCount != 1 {
+		t.Fatalf("the setup-level row must not become an account: %+v", setup)
+	}
+}
