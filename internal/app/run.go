@@ -165,6 +165,7 @@ type Summary struct {
 	IgnoredNQEItemCount       int                             `json:"ignored_nqe_item_count,omitempty"`
 	IgnoredNQEAccounts        []AccountSummary                `json:"ignored_nqe_accounts,omitempty"`
 	SkippedNQERows            []MalformedNQERowSummary        `json:"skipped_nqe_rows,omitempty"`
+	SetupLevelNQERows         []string                        `json:"setup_level_nqe_rows,omitempty"`
 	PlannedSetupCount         int                             `json:"planned_setup_count"`
 	PatchedSetupCount         int                             `json:"patched_setup_count"`
 	SkippedSetupCount         int                             `json:"skipped_setup_count"`
@@ -1076,6 +1077,7 @@ func buildSummary(
 		IgnoredNQEItemCount: len(plan.IgnoredAccounts),
 		IgnoredNQEAccounts:  plan.IgnoredAccounts,
 		SkippedNQERows:      plan.SkippedRows,
+		SetupLevelNQERows:   plan.SetupLevelRows,
 		PlannedSetupCount:   len(plan.Setups),
 		PatchedSetupCount:   patchedCount,
 		SkippedSetupCount:   len(plan.Skips),
@@ -1128,6 +1130,7 @@ type patchPlan struct {
 	CandidateChecks []CandidateCheck
 	IgnoredAccounts []AccountSummary
 	SkippedRows     []MalformedNQERowSummary
+	SetupLevelRows  []string
 }
 
 type plannedSetup struct {
@@ -1402,6 +1405,7 @@ func buildPlanFromSnapshot(snapshot *InventorySnapshot, cloudAccounts []api.Clou
 		Payloads:        make(auditPayloads),
 		IgnoredAccounts: append([]AccountSummary(nil), snapshot.IgnoredAccounts...),
 		SkippedRows:     append([]MalformedNQERowSummary(nil), snapshot.SkippedRows...),
+		SetupLevelRows:  setupIDStrings(snapshot.SetupLevelRows),
 	}
 	for _, setupID := range plannedSetupIDs {
 		meta, ok := cloudMetaMap[setupID]
@@ -2259,4 +2263,18 @@ func rollbackPath(outputPath string) string {
 		return outputPath + ".rollback"
 	}
 	return strings.TrimSuffix(outputPath, ext) + ".rollback" + ext
+}
+
+// setupIDStrings returns the sorted, de-duplicated setup IDs as plain strings.
+func setupIDStrings(ids []SetupID) []string {
+	seen := make(map[string]bool, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if s := id.String(); !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

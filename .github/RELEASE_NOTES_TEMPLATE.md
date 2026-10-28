@@ -49,7 +49,7 @@ and avoid unattended destructive runs on setups that people also edit by hand.
 
 ### Download and verify
 
-Assets include native Linux and macOS binaries for amd64 and arm64, tar archives, `sha256sums.txt`, and GitHub build-provenance attestations.
+Assets include native Linux and macOS binaries for amd64 and arm64, tar archives, `sha256sums.txt`, an SBOM (`sbom.spdx.json`), and GitHub build-provenance attestations. See [docs/security-review.md](https://github.com/forwardnetworks/aws-sync/blob/main/docs/security-review.md) for what the tool does.
 
 ```bash
 tar -xzf awssync-linux-amd64.tar.gz

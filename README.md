@@ -24,7 +24,7 @@ gh attestation verify awssync-linux-amd64 \
 ./awssync-linux-amd64 --version
 ```
 
-Release assets are available for Linux and macOS on amd64 and arm64.
+Release assets are available for Linux and macOS on amd64 and arm64. Approving this for your environment? See [docs/security-review.md](docs/security-review.md).
 
 ### 2. Set the Forward login
 
