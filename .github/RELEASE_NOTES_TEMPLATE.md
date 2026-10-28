@@ -1,30 +1,6 @@
 ## aws-sync {{VERSION}}
 
-### This release
-
-Additive safety hardening. **No breaking changes** — upgrading from v3.0.0
-requires no configuration changes.
-
-- **Post-apply verification.** Each setup is re-read after a successful PATCH
-  and compared against the approved target. Unexplained divergence stops the
-  apply, is recorded as `conflicted` in the result journal, and points at the
-  rollback artifact. No automatic remediation is attempted: a corrective PATCH
-  would repeat the same overwrite, and deciding whose change wins is a human
-  call.
-
-  This narrows the concurrent-edit gap; it does not close it. See *Known
-  limitation* below for exactly what remains undetectable.
-
-- **Manifest quality warnings.** `sync-accounts` warns when a manifest closely
-  matches observed NQE inventory while diverging from configured membership —
-  the signature of a manifest derived from NQE, which reproduces by hand the
-  unsound inference retired in v3.0.0. It warns rather than blocks.
-
-- **Removal impact is always stated.** Previews now say "removes 968 of 978
-  accounts (98.98%)" regardless of what the configured ceilings permit.
-
-- **Webhook state locking.** A second daemon sharing a state file now fails
-  fast instead of silently corrupting dedupe records and snapshot watermarks.
+{{THIS_RELEASE}}
 
 ### Upgrading from v2.x
 
