@@ -46,5 +46,6 @@ go test ./internal/app -run TestName    # single test
 
 ## Misc
 
+- Releases: add `.github/release-notes/vX.Y.Z.md` (the "This release" section) before tagging. The release workflow fails without it and splices it into `.github/RELEASE_NOTES_TEMPLATE.md`. Tag only after `make ci` is green on main.
 - `docs/ARCHITECTURE_REVIEW.md` is the historical safety review and rationale; `docs/upgrading.md`, `routine-safe-sync.md`, `govcloud-workflow.md` cover operator workflows. Update docs when operator-visible behavior changes.
 - Generated `aws_sync_payload_*.json` / `fwd_accounts_data_*.json` files accumulate under `cmd/awssync/` and `internal/app/` during runs/tests; they are gitignored and may contain tenant data — never commit them or copy them into fixtures (use `internal/app/testdata`).
